@@ -27,6 +27,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 | Media | **Jellyfin REST** → SQLite cache; LLM reasons over a **filtered subset** |
 | Chat UI | Thin HTTP client only — no business logic, no direct Ollama/Jellyfin calls |
 | Deploy target | Linux compute box later; keep code **OS-agnostic** now (Windows + AMD 9070 XT 16 GB) |
+| Language/tooling | **Python 3.12+** · **uv** · **ruff**; profiles: **single-user v1** (locked Phase 0) |
 
 ## Architecture invariants
 
@@ -43,7 +44,10 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ```
 brain/           # FastAPI service, tools, agent loop, SQLite
 clients/chat/    # Thin chat UI or bot
-config/          # Examples, system prompt — no secrets committed
+config/          # Examples + system prompt — real config.yaml gitignored
+tests/           # pytest suite
+.env.example     # Secret placeholders — copy to .env (gitignored)
+pyproject.toml   # Brain service deps, uv-managed
 docker-compose.yml
 Concept.md
 ROADMAP.md

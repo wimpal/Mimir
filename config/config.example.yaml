@@ -1,0 +1,31 @@
+# Mimir non-secret configuration.
+#
+# Copy to config/config.yaml and adjust (that copy is gitignored).
+# Precedence: MIMIR_* environment variables override this file;
+# secrets (Jellyfin API key, auth token) come from .env / environment only.
+
+ollama:
+  url: http://127.0.0.1:11434
+  model: qwen3:8b
+
+location:
+  # Used by the weather tool (Phase 3). Placeholder coords below — replace
+  # with your own before Phase 3, or set MIMIR_LATITUDE / MIMIR_LONGITUDE.
+  latitude: 0.0
+  longitude: 0.0
+
+jellyfin:
+  url: http://127.0.0.1:8096
+  # api_key comes from .env (JELLYFIN_API_KEY) — wired up in Phase 5.
+
+auth:
+  # none | token — enforcement lands in Phase 7; keep the brain LAN-only until then.
+  mode: none
+
+runtime:
+  # SQLite + logs live here. Relative paths resolve against the working directory.
+  # On the Linux box: point this at a mounted volume (e.g. /data) via config or MIMIR_DATA_DIR.
+  data_dir: ./data
+  log_level: INFO
+  host: 127.0.0.1
+  port: 8000

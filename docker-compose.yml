@@ -1,0 +1,35 @@
+# Mimir stack template — Phase 0 STUB, intentionally not wired yet.
+#
+# During Windows GPU bring-up, Ollama runs natively on the host (AMD ROCm/HIP path)
+# and the brain runs via `uv run uvicorn brain.main:app`. This file becomes the
+# deploy unit when we move to the Linux compute box (ROADMAP Phase 8).
+#
+# Target topology:
+#
+# services:
+#   brain:
+#     build:
+#       context: .
+#       dockerfile: brain/Dockerfile      # written in Phase 8
+#     ports:
+#       - "127.0.0.1:8000:8000"           # LAN bind decision finalized in Phase 7 (security)
+#     environment:
+#       MIMIR_CONFIG: /config/config.yaml
+#       MIMIR_DATA_DIR: /data
+#     volumes:
+#       - ./data:/data                    # SQLite + logs
+#       - ./config:/config:ro             # config.yaml + system_prompt.md
+#     depends_on: []                      # host-native Ollama during GPU bring-up
+#
+#   ollama:                                 # optional containerized alternative to native install
+#     image: ollama/ollama
+#     ports:
+#       - "127.0.0.1:11434:11434"
+#     volumes:
+#       - ollama-models:/root/.ollama
+#     # GPU reservation differs per vendor stack; configured at Linux move time.
+#
+# volumes:
+#   ollama-models:
+#
+#   chat (Phase 6): thin static client served alongside; talks ONLY to the brain API.

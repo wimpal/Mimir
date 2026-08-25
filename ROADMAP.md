@@ -50,12 +50,13 @@ Lock choices before code so schema and APIs don’t thrash later.
 
 | Decision | Status |
 |---|---|
-| Inference | Ollama + **Qwen3 8B** on 9070 XT (30B-A3B deferred to compute box) |
-| Orchestration | Custom FastAPI loop (no LangChain) |
-| Storage | SQLite: history, prefs, Jellyfin cache |
-| Clients | Thin chat UI first; brain stays OpenAI-compatible / HTTP-agnostic |
-| Profiles | **Decide now:** single-user vs multi-profile (affects prefs + Jellyfin schema) |
-| Personality | Draft system prompt (tone, “I don’t know,” clarifying questions) |
+| Inference | **Locked:** Ollama + **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on 9070 XT (30B-A3B deferred to compute box) |
+| Orchestration | **Locked:** custom FastAPI loop (no LangChain) |
+| Storage | **Locked:** SQLite: history, prefs, Jellyfin cache |
+| Clients | **Locked:** thin chat UI first; brain stays OpenAI-compatible / HTTP-agnostic |
+| Profiles | **Locked:** single-user for v1 — no users table/FKs; revisit only if multi-user becomes a day-one requirement |
+| Personality | **Locked v0:** formal-register personal secretary — see [`config/system_prompt.md`](./config/system_prompt.md) |
+| Language/tooling | **Locked:** Python 3.12+, uv, ruff; config = `config/config.yaml` (non-secrets) + `.env` secrets, `MIMIR_*` env overrides YAML |
 
 **Deliverables**
 - Repo skeleton: `brain/`, `clients/chat/`, `config/`, `docker-compose.yml` (stubs OK)
