@@ -12,6 +12,11 @@ config/config.yaml
 # Runtime data (SQLite, logs)
 data/
 
+# PyInstaller (TUI exe)
+build/
+dist/
+*.spec
+
 # OS junk
 Thumbs.db
 .DS_Store

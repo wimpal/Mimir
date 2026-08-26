@@ -1,0 +1,216 @@
+"""Async HTTP + SSE client for the Mimir brain."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse, urlunparse
+
+import httpx
+
+DEFAULT_BRAIN_URL = "http://127.0.0.1:8000"
+DEFAULT_TURN_TIMEOUT_S = 180.0
+CONNECT_TIMEOUT_S = 5.0
+
+
+class BrainClientError(RuntimeError):
+    """Brain unreachable, timed out, or returned a bad response."""
+
+
+@dataclass(frozen=True)
+class HealthInfo:
+    status: str
+    reachable: bool
+    detail: str = ""
+
+
+def normalize_brain_url(url: str) -> str:
+    """Strip trailing slash and accidental ``/v1`` API suffix."""
+    text = (url or "").strip()
+    if not text:
+        raise ValueError("brain URL is empty")
+    parsed = urlparse(text)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError(f"invalid brain URL: {url!r}")
+    path = (parsed.path or "").rstrip("/")
+    if path == "/v1" or path.endswith("/v1"):
+        path = path[: -len("/v1")] if path.endswith("/v1") else ""
+    cleaned = urlunparse(
+        (parsed.scheme, parsed.netloc, path, "", "", "")
+    ).rstrip("/")
+    return cleaned
+
+
+def parse_sse_chunk(buffer: str) -> tuple[list[dict[str, Any]], str]:
+    """Split a SSE buffer into complete events; return (events, remainder)."""
+    events: list[dict[str, Any]] = []
+    rest = buffer
+    while True:
+        sep = -1
+        for candidate in ("\r\n\r\n", "\n\n"):
+            idx = rest.find(candidate)
+            if idx >= 0 and (sep < 0 or idx < sep):
+                sep = idx
+                sep_len = len(candidate)
+        if sep < 0:
+            break
+        raw = rest[:sep]
+        rest = rest[sep + sep_len :]
+        data_lines: list[str] = []
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if not data_lines:
+            continue
+        try:
+            payload = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events, rest
+
+
+class BrainClient:
+    def __init__(
+        self,
+        base_url: str = DEFAULT_BRAIN_URL,
+        *,
+        turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.base_url = normalize_brain_url(base_url)
+        self.turn_timeout_s = max(1.0, float(turn_timeout_s))
+        timeout = httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S,
+            read=self.turn_timeout_s,
+            write=CONNECT_TIMEOUT_S,
+            pool=CONNECT_TIMEOUT_S,
+        )
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=timeout,
+            headers={"Accept": "application/json"},
+        )
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> BrainClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def health(self) -> HealthInfo:
+        try:
+            resp = await self._client.get("/health")
+        except httpx.TimeoutException as exc:
+            raise BrainClientError(
+                f"brain health timed out at {self.base_url}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(
+                f"brain unreachable at {self.base_url}: {exc}"
+            ) from exc
+
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BrainClientError("health returned non-JSON") from exc
+
+        if not isinstance(body, dict):
+            raise BrainClientError("health returned unexpected JSON")
+
+        status = str(body.get("status", "unknown"))
+        # HTTP 200 can still mean degraded/fail — inspect body.
+        reachable = resp.status_code < 500
+        detail = ""
+        ollama = body.get("ollama")
+        if isinstance(ollama, dict) and ollama.get("reachable") is False:
+            detail = "ollama unreachable"
+        elif status != "ok":
+            detail = f"status={status}"
+        return HealthInfo(status=status, reachable=reachable, detail=detail)
+
+    async def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
+        cid = conversation_id.strip()
+        if not cid:
+            return []
+        try:
+            resp = await self._client.get(f"/v1/conversations/{cid}/messages")
+        except httpx.TimeoutException as exc:
+            raise BrainClientError("list messages timed out") from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(f"list messages failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise BrainClientError(
+                f"list messages HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BrainClientError("list messages returned non-JSON") from exc
+        msgs = body.get("messages") if isinstance(body, dict) else None
+        if not isinstance(msgs, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in msgs:
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+
+    async def stream_chat(
+        self,
+        message: str,
+        *,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        payload: dict[str, Any] = {"message": message, "stream": True}
+        if conversation_id and conversation_id.strip():
+            payload["conversation_id"] = conversation_id.strip()
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/v1/chat",
+                json=payload,
+                headers={"Accept": "text/event-stream"},
+            ) as resp:
+                if resp.status_code >= 400:
+                    raw = (await resp.aread()).decode("utf-8", errors="replace")
+                    detail = raw
+                    try:
+                        err = json.loads(raw)
+                        if isinstance(err, dict) and err.get("detail"):
+                            detail = str(err["detail"])
+                    except json.JSONDecodeError:
+                        pass
+                    raise BrainClientError(detail or f"HTTP {resp.status_code}")
+
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    events, buffer = parse_sse_chunk(buffer)
+                    for event in events:
+                        yield event
+
+                if buffer.strip():
+                    events, _ = parse_sse_chunk(
+                        buffer if buffer.endswith("\n\n") else buffer + "\n\n"
+                    )
+                    for event in events:
+                        yield event
+        except BrainClientError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise BrainClientError(
+                f"chat timed out after {self.turn_timeout_s:.0f}s"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(f"chat failed: {exc}") from exc

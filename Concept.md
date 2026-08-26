@@ -2,13 +2,30 @@
 
 Assistant name: Mimir
 
+**Doc roles:** this file is intent, locked decisions, and rationale.
+Sequencing, exit criteria, and hardware locks live in [`ROADMAP.md`](./ROADMAP.md).
+Agent working rules: [`AGENTS.md`](./AGENTS.md).
+
 ## Goals (v1)
 
 - Answer general questions
 - Check local weather
 - Recommend movies from a Jellyfin catalogue
 - Activated via chat app (v1), voice (v2, Siri/Echo-style)
-- Fully offline, self-hosted, uncensored
+- Fully offline, self-hosted; no cloud safety layer between the user and the model
+
+### v1 definition of done
+
+A single-user LAN chat client can: ask general questions, get weather, get Jellyfin
+recommendations from *this* library, keep history across restart, and degrade
+clearly when Ollama/tools are down — without the client talking to Ollama or
+Jellyfin directly. Voice is **not** required for v1.
+
+### Non-goals (until ROADMAP says otherwise)
+
+LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin,
+calendar/shopping/smart-home/proactive notify, public-internet exposure,
+multi-user/voice-ID.
 
 ---
 
@@ -18,29 +35,55 @@ Assistant name: Mimir
 
 Reasoning:
 
-- Wraps llama.cpp, so you get its performance and quantization support, but with automatic GPU offloading, model management, and an OpenAI-compatible REST API.
-- Native tool-calling support — required for the weather and Jellyfin integrations.
-- vLLM is built for concurrent multi-user throughput — overkill and unnecessary ops overhead for a single-user assistant.
-- llama.cpp directly remains the fallback if you later want fine-grained control (custom sampling, ARM/edge builds).
+- Wraps llama.cpp with GPU offload, model management, and a REST API (native +
+  OpenAI-compatible).
+- Native tool-calling support — required for weather and Jellyfin.
+- vLLM is multi-user throughput tooling — unnecessary ops for a single-user assistant.
+- llama.cpp directly remains the fallback for fine-grained control later.
 
-**Model: Qwen3** (8B for tighter hardware, 30B-A3B MoE if you have 16–24GB VRAM to spare). Uncensored version?
+**Model (locked for this hardware):** stock **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on
+the current AMD box; optional **Qwen3 30B-A3B** only on a later compute box with
+enough VRAM. See ROADMAP hardware + VRAM tables.
 
-Currently has the best tool-calling reliability among local models available via Ollama — fewer dropped or malformed tool calls than Llama 3.3 or Gemma 4 in recent benchmarks. This matters once the agent is chaining tool calls rather than just chatting. Run it quantized (Q4_K_M as a starting point).
+**Why Qwen3:** chosen for local tool-calling reliability via Ollama’s tools API.
+Do not treat comparative “beats Llama / Gemma on benchmarks” claims as fact
+without a dated source — re-verify if swapping models. Phase 1’s scripted suite
+is the project’s ground truth for *this* stack.
+
+**“Uncensored” decision (locked):** means **self-hosted + no cloud moderation
+proxy**, not an abliterated / “uncensored” fine-tune. Abliterated finetunes often
+degrade instruction-following and structured tool calls — the capability we
+optimized for. Stay on stock `qwen3:8b` unless a measured suite run justifies a
+swap. Personality and refusal style are controlled by
+[`config/system_prompt.md`](./config/system_prompt.md).
+
+**Thinking mode (locked):** Qwen3 is hybrid. **`think: false` for all tool loops
+and for voice.** Chat-only deep reasoning with thinking may be revisited later;
+it costs latency/tokens and can interfere with tool-call formatting. Config:
+`ollama.think` (default `false`).
+
+**Context window (locked default):** set `ollama.num_ctx` explicitly (default
+**8192**). Ollama’s implicit default is often smaller and **silently truncates**
+system prompt + history + tool schemas + tool results — which looks like “forgot”
+or “dropped a tool call”. Raise only after checking VRAM (`ollama ps`).
 
 ---
 
 ## Orchestration: Custom, not LangChain
 
-For 3 tools (chat, weather, Jellyfin), a heavy agent framework adds abstraction you don't need.
+For a handful of tools (chat, weather, Jellyfin), a heavy agent framework adds
+abstraction we don’t need.
 
-Build a small **FastAPI** service that:
+Build a small **FastAPI** “brain” that:
 
 1. Receives the user message
-2. Sends it to Ollama with your tool schemas (weather lookup, Jellyfin query)
-3. If the model returns a tool call, executes it and feeds the result back to get a final response
-4. Returns the response to the chat frontend
+2. Sends it to Ollama with tool schemas
+3. If the model returns a tool call, executes it and feeds the result back
+4. Returns the final response to whatever client called it
 
-This is roughly 150 lines of Python, and you'll understand every part of it — valuable when debugging why it hallucinated a tool call.
+Keep the loop readable in a sitting (`brain/agent.py` + `brain/ollama.py` +
+tools). Understanding every step beats opaque framework magic when debugging
+bad tool calls.
 
 ---
 
@@ -48,28 +91,52 @@ This is roughly 150 lines of Python, and you'll understand every part of it — 
 
 ### Weather
 
-- **Open-Meteo** — free, no API key required, sufficient for personal use.
-- Store your lat/long in config.
+- **Open-Meteo** (no API key) as the HTTP transport; for Netherlands home
+  coords pin **KNMI HARMONIE AROME** (`knmi_harmonie_arome_netherlands`, 2 km).
+- Lat/long + `Europe/Amsterdam` timezone in config. Soft network dependency —
+  degrade clearly when offline.
+- Buienradar-style 5-minute rain nowcast is Phase 10 backlog if needed.
 
 ### Jellyfin
 
-- Use the **Jellyfin REST API** to pull library metadata (genres, cast, watch history, ratings).
-- For v1: pull the catalogue + watch history into SQLite, and let the LLM reason over a filtered/summarized subset (e.g. "unwatched movies in genres you rate highly") rather than building a full recommendation engine.
-- If the library grows large (1000+ titles), add embeddings + a small vector store (SQLite + `sqlite-vec`, or Chroma) so the whole catalogue isn't stuffed into context every time.
+- **Jellyfin REST API** → SQLite Catalogue (movies from allowlisted libraries;
+  titles, genres, overview, director, cast, ratings, watch state for a configured
+  Jellyfin user). Sync is owned by the **brain**, never by Ollama. Paginate;
+  auth via API key from env (`X-Emby-Token`). On-demand HTTP + daily periodic Sync;
+  atomic generation publish so a failed Sync keeps the last-good Catalogue.
+- v1: `recommend_movies` filters a small Catalogue subset (seed-title overlap per
+  ADR 0002); LLM picks. Embeddings / `sqlite-vec` only after catalogue stuffing
+  fails (~1000+ titles or bad relevance). Series and playback control are out of
+  scope for v1.
 
 ---
 
-## Memory / State
+## Memory / State (Data)
 
-SQLite for conversation history and preferences. Simple, durable, zero ops overhead.
+SQLite under a configurable `data_dir`: history, preferences, Jellyfin cache,
+optional tool logs.
+
+| Topic | v1 policy |
+|---|---|
+| Migrations | Hand-rolled versioned SQL (`schema_version`); Phase 5 at version 2 — no Alembic unless pain forces it |
+| Backup | Copy/stop-and-copy the SQLite file from `data_dir`; document in Phase 8 |
+| Retention | Keep full history for single-user v1; no auto-prune unless disk hurts |
+| Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`. Token-budget window and summarization/compaction are backlog until long threads actually break |
+| Chat memory path | Mimir `/v1/chat` owns SQLite Conversations; OpenAI-compat stays client `messages` only until Assist needs shared threads (ADR 0001) |
+| Preferences | Allowlisted keys via tools + system-prompt inject; Jellyfin watch/likes are media state, not Preference rows |
 
 ---
 
 ## Chat Frontend (v1)
 
-Build a minimal custom chat UI (or a Telegram/Matrix bot) rather than adopting Open WebUI.
+Full-screen Textual TUI Chat client (`uv run mimir` / `dist/mimir.exe`) — thin
+HTTP client only (ADR 0004). Health-checks the brain and starts it if needed
+(`uv run uvicorn` from the repo); does not stop it on exit. Each launch opens a
+new Conversation (resume backlog). Telegram/Matrix bots are not a v1 path. The
+Phase 6 web UI was superseded.
 
-Open WebUI is excellent but chat-specific. Since the roadmap includes voice, the FastAPI "brain" service should be frontend-agnostic from day one, with chat as just the first client calling it.
+Open WebUI is fine for temporary debugging, not the long-term product UI: voice
+must call the same brain without rewriting chat-specific logic.
 
 ---
 
@@ -77,132 +144,64 @@ Open WebUI is excellent but chat-specific. Since the roadmap includes voice, the
 
 ```
 [Chat client] ──HTTP──▶ [FastAPI "brain" service] ──▶ [Ollama + Qwen3]
-                              │                              │
-                              ├──▶ [Open-Meteo API]          │ (tool calls)
-                              ├──▶ [Jellyfin API] ◀───sync───┘
+                              │
+                              ├── tool calls ──▶ [Open-Meteo API]
+                              ├── tool calls ──▶ [Jellyfin API]
+                              ├── sync job   ──▶ [Jellyfin API]  (brain-owned)
                               └──▶ [SQLite: history, prefs, cached catalogue]
-
 ```
+
+Ollama never talks to Jellyfin or Open-Meteo. The brain executes tools and runs sync.
 
 ---
 
 ## Path to Voice (v2)
 
-Don't build this from scratch — use **Home Assistant's Assist pipeline** plus the **Wyoming protocol** ecosystem (built by the Home Assistant/Rhasspy team specifically for local wake-word → STT → assistant → TTS pipelines).
+Use **Home Assistant Assist** + **Wyoming** (wake → STT → conversation agent → TTS),
+not a custom voice stack.
 
-Components:
+Components (see ROADMAP Phase 9 for sequencing):
 
-- **Home Assistant Voice Preview Edition** (or another Wyoming satellite) for wake word + mic/speaker, see Hardware section below
-- **faster-whisper** or **whisper.cpp** for speech-to-text
-- **Piper** for text-to-speech (fast, decent quality, fully local)
-- **Home Assistant** itself, acting as the orchestrator between the satellite, STT/TTS, and the brain service
+- Living-room satellite: HA Voice Preview Edition (or Atom Echo / phone / Pi+ReSpeaker)
+- STT: faster-whisper or whisper.cpp; TTS: Piper
+- Conversation agent → **Mimir brain** (not HA’s native Ollama integration)
 
-The FastAPI brain service gets registered with Home Assistant as a **conversation agent** (HA supports OpenAI-compatible endpoints for this) — same tool-calling logic as v1, new front door. This is the reason to build the chat frontend as a thin client rather than baking chat-specific logic into the brain service: the brain doesn't change between v1 and v2, only what's calling it.
+**Load-bearing assumption — verify before Phase 9 (docs spike in Phase 2):**
+HA must be able to call **our** OpenAI-compatible (or custom) conversation endpoint
+so tool calling stays in the brain. Historically, the built-in OpenAI Conversation
+integration may not accept an arbitrary base URL without a custom integration;
+HA’s **native Ollama** conversation agent would bypass the brain and drop our
+tools. Do not discover this at voice bring-up.
 
-### Updated architecture with voice
-
-```
-[Voice PE, living room] ──Wyoming──▶ [Home Assistant, hidden compute box]
-                                              │
-                                    ┌─────────┴─────────┐
-                                    │  Assist pipeline:  │
-                                    │  STT (whisper)      │
-                                    │  → conversation agent (FastAPI brain)
-                                    │  → TTS (Piper)      │
-                                    └─────────┬─────────┘
-                                              ▼
-                                   [Ollama + Qwen3, weather API, Jellyfin]
+### Voice architecture
 
 ```
+[Voice PE / satellite] ──Wyoming──▶ [Home Assistant]
+                                         │
+                              Assist: STT → conversation agent → TTS
+                                         │
+                                         ▼
+                              [FastAPI brain] ──▶ Ollama / weather / Jellyfin
+```
 
 ---
 
-## Hardware Recommendations
+## Hardware
 
-Key idea: **decouple the living-room device from the compute.** Only the microphone/speaker endpoint needs to look nice — the GPU or Mac mini doing the actual inference can live in a closet, basement, or network cabinet, connected over the local network.
+**Locked now:** Windows dev box, **AMD RX 9070 XT 16 GB**, Qwen3 8B.
+**Later:** separate Linux (or HA OS) compute box; optional 30B-A3B if VRAM allows.
 
-### Compute box (hidden)
-
-Two solid paths:
-
-**GPU box**
-
-- Used **RTX 3090 (24GB)** — best VRAM-per-dollar on the used market, comfortably runs Qwen3 30B-A3B quantized with room to spare.
-- Pair with any decent CPU + 32GB RAM.
-
-**Mac mini/Studio (M-series, 24–32GB+ unified memory)**
-
-- Quieter, lower power, good if the box needs to sit in a living space rather than a server closet.
-- Apple Silicon inference (especially via Ollama's MLX path) has gotten notably fast in 2026.
-
-**Budget option**
-
-- 8B model on a 12GB card (e.g. RTX 3060 12GB) is a perfectly good starting point. Upgrade the model later without touching the rest of the stack.
-
-### Living-room device (visible): Home Assistant Voice Preview Edition
-
-This is essentially built for exactly this use case — a privacy-respecting, Echo/Nest-style alternative:
-
-- ~$59, puck-shaped, semi-transparent polycarbonate housing — designed to look like consumer smart-speaker hardware, not a dev board in a project box
-- Built-in mic array, speaker, LED ring, rotary volume dial
-- Runs fully local by default via the **Wyoming protocol** — no cloud account required
-- Actively maintained by Nabu Casa (the Home Assistant company), with regular OTA firmware updates
-
-It just streams audio to a server; wake word can run on-device or be offloaded, and everything else (STT, LLM, TTS) happens on the hidden compute box.
-
-**Cheaper/DIY alternatives** if covering multiple rooms:
-
-- **M5Stack Atom Echo** (~$13) — works well, but looks like a dev board; fine for an office, not for a living room
-- **Old Android phone as satellite** — supported since March 2026; on-device wake word, phone as mic/speaker, free if a spare phone is available (put it in a nice dock)
-- **DIY Raspberry Pi + ReSpeaker HAT** in a 3D-printed or off-the-shelf enclosure — most flexible, most effort, best if a specific look is wanted
+Living-room vs compute stay decoupled: pretty satellite in the room, GPU in a
+closet. Detailed SKUs, VRAM tables, AMD/ROCm notes, and Windows→Linux portability
+are owned by [`ROADMAP.md`](./ROADMAP.md) — do not duplicate shopping lists here.
 
 ---
 
-## Roadmap: Beyond the Core Build
+## Build order
 
-### Reliability & fallback
+Owned by [`ROADMAP.md`](./ROADMAP.md). Short form:
 
-- Define graceful failure behavior for when Ollama/GPU is down or overloaded (e.g. "brain's offline" response rather than a hang or silent timeout)
-- Add timeouts on tool calls — if Jellyfin or Open-Meteo is slow/unreachable, the assistant shouldn't hang waiting indefinitely
-
-### Security
-
-- Put the FastAPI brain service behind basic auth or restrict it to the LAN/VLAN, especially once Home Assistant and voice satellites are also talking to it
-- If ever exposed externally (e.g. checking the assistant from outside home), use Tailscale/WireGuard rather than port-forwarding
-
-### Multi-user awareness
-
-- HA's Assist pipeline doesn't do voice-ID by default — "who's speaking" isn't distinguished unless explicitly added
-- Decide early whether recommendations/preferences are single-profile or need per-person separation, since this affects the Jellyfin/SQLite schema now rather than as a painful migration later
-
-### Observability
-
-- Log prompts, tool calls, and latencies (even just to a file or SQLite table) — useful for debugging "why did it call the wrong tool" once not watching the terminal directly
-
-### Deployment
-
-- A `docker-compose.yml` tying together Ollama, the FastAPI service, and (later) Home Assistant makes the whole stack reproducible and easy to redeploy if hardware changes
-
-### System prompt / personality
-
-- Decide tone and boundaries up front (how terse, how it handles "I don't know," whether it asks clarifying questions) — small thing, but it's what makes it feel like a personal assistant rather than a generic chatbot
-
-### Future features
-
-- Calendar integration
-- Shopping lists
-- Smart home control (comes free via Home Assistant once integrated)
-- Proactive notifications (e.g. "new episode of X is out on Jellyfin")
-- play music
-
----
-
-## Build Order Suggestion
-
-1. Ollama + Qwen3 running locally, verify tool-calling works with a dummy tool
-2. FastAPI brain service with weather tool wired in
-3. Jellyfin sync (SQLite cache of catalogue + watch history) + recommendation tool
-4. Chat frontend as thin client
-5. Wyoming voice pipeline (wake word → STT → brain service → TTS)
-
-**Note:** Start the recommendation logic simple (LLM reasoning over curated context) and only add embeddings/vector search once the catalogue-stuffing approach breaks down — it's tempting to over-engineer that part first.
+1. Prove Ollama tool-calling (dummy tools + standing suite)
+2. FastAPI brain + hardening
+3. Weather → memory → Jellyfin
+4. Thin chat UI → package → voice last

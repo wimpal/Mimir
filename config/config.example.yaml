@@ -7,20 +7,48 @@
 ollama:
   url: http://127.0.0.1:11434
   model: qwen3:8b
+  # Set explicitly — Ollama's default is often smaller and silently truncates
+  # system + history + tool schemas + results (looks like "forgot" / dropped tools).
+  num_ctx: 8192
+  # Qwen3 hybrid thinking: off for tool loops and voice (latency + formatting).
+  think: false
 
 location:
-  # Used by the weather tool (Phase 3). Placeholder coords below — replace
-  # with your own before Phase 3, or set MIMIR_LATITUDE / MIMIR_LONGITUDE.
-  latitude: 0.0
-  longitude: 0.0
+  # Home coords for get_weather (Open-Meteo → KNMI HARMONIE for NL).
+  # Example: Utrecht — replace with your own, or set MIMIR_LATITUDE /
+  # MIMIR_LONGITUDE / MIMIR_TIMEZONE.
+  latitude: 52.09
+  longitude: 5.12
+  timezone: Europe/Amsterdam
 
 jellyfin:
   url: http://127.0.0.1:8096
-  # api_key comes from .env (JELLYFIN_API_KEY) — wired up in Phase 5.
+  # api_key comes from .env (JELLYFIN_API_KEY).
+  user_id: ""  # Jellyfin user GUID for watch state
+  library_ids: []  # allowlisted movie library GUIDs only
+  sync_interval_hours: 24  # 0 = periodic Sync off (on-demand still works)
+  page_size: 100
 
 auth:
   # none | token — enforcement lands in Phase 7; keep the brain LAN-only until then.
   mode: none
+
+agent:
+  max_iterations: 3
+  system_prompt_path: config/system_prompt.md
+
+timeouts:
+  ollama_s: 120
+  # Enforced when tools become I/O-bound (Phase 3+).
+  tool_s: 30
+  # Overall wall-clock budget for one /v1/chat turn.
+  turn_s: 180
+  # Overall wall-clock budget for one Jellyfin Catalogue Sync.
+  jellyfin_sync_s: 300
+
+memory:
+  # Last N user+assistant pairs injected from SQLite (full history retained).
+  history_pairs: 20
 
 runtime:
   # SQLite + logs live here. Relative paths resolve against the working directory.

@@ -1,40 +1,212 @@
-"""Mimir brain — FastAPI service (Phase 0 stub).
+"""Mimir brain — FastAPI service (Phase 2+).
 
-Phase 2 turns this into the real brain: chat endpoints, agent loop, tools,
-Ollama reachability checks in /health. For now it proves config loads and
-the service boots.
+Endpoints:
+  GET  /health
+  POST /v1/chat
+  POST /v1/chat/completions   (OpenAI-compatible; tools run server-side)
+  GET  /v1/models
+  GET  /v1/conversations/{id}/messages
+  POST /v1/jellyfin/sync
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from brain import __version__
-from brain.config import Settings, load_config
+from brain.api_chat import register_chat_routes
+from brain.config import Settings, jellyfin_sync_configured, load_config
+from brain.db import Database
+from brain.jellyfin_sync import SyncManager
+from brain.ollama import OllamaClient
+from brain.openai_compat import models_list, run_openai_chat
+from brain.prompt import PromptError, load_system_prompt
+from brain.service import BrainService
+
+logger = logging.getLogger("mimir")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Fails loud at startup if config is missing/invalid.
-    app.state.settings = load_config()
-    app.state.settings.runtime.ensure_data_dir()
-    yield
+def _configure_logging(level: str) -> None:
+    root = logging.getLogger("mimir")
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+        )
+        root.addHandler(handler)
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root.propagate = False
 
 
-app = FastAPI(title="Mimir Brain", version=__version__, lifespan=lifespan)
+def _wire_state(
+    app: FastAPI,
+    settings: Settings,
+    *,
+    client: OllamaClient | None = None,
+    system_prompt: str | None = None,
+    prompt_id: str | None = None,
+    data_dir: Path | None = None,
+) -> None:
+    resolved_data = data_dir or settings.runtime.ensure_data_dir()
+    if system_prompt is None or prompt_id is None:
+        text, pid = load_system_prompt(settings.agent.system_prompt_path)
+        system_prompt = system_prompt or text
+        prompt_id = prompt_id or pid
+
+    db = Database(resolved_data / "mimir.db")
+    ollama = client or OllamaClient(
+        settings.ollama.url,
+        settings.ollama.model,
+        num_ctx=settings.ollama.num_ctx,
+        timeout_s=settings.timeouts.ollama_s,
+    )
+    service = BrainService(
+        settings,
+        ollama,
+        system_prompt=system_prompt,
+        prompt_id=prompt_id,
+        data_dir=resolved_data,
+        db=db,
+    )
+    sync_manager = SyncManager(settings, db)
+
+    app.state.settings = settings
+    app.state.data_dir = resolved_data
+    app.state.db = db
+    app.state.ollama = ollama
+    app.state.service = service
+    app.state.sync_manager = sync_manager
+    app.state.prompt_id = prompt_id
+    app.state._owns_ollama = client is None
 
 
-@app.get("/health")
-def health(request: Request) -> dict:
-    # Deliberately does NOT ping Ollama yet — reachability checks are Phase 2 semantics.
-    s: Settings = request.app.state.settings
-    return {
-        "status": "ok",
-        "service": "mimir-brain",
-        "version": __version__,
-        "config_loaded": True,
-        "single_user": True,
-        "ollama": {"url": s.ollama.url, "model": s.ollama.model},
-    }
+async def _jellyfin_sync_loop(app: FastAPI) -> None:
+    """Background Catalogue Sync: initial if needed, then periodic."""
+    sync_mgr: SyncManager = app.state.sync_manager
+    settings: Settings = app.state.settings
+    if not jellyfin_sync_configured(settings):
+        return
+
+    await asyncio.sleep(2.0)
+    try:
+        if sync_mgr.needs_sync():
+            await asyncio.to_thread(sync_mgr.run_sync, force=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("initial jellyfin sync failed")
+
+    interval_h = settings.jellyfin.sync_interval_hours
+    if interval_h <= 0:
+        return
+
+    while True:
+        try:
+            await asyncio.sleep(interval_h * 3600.0)
+            await asyncio.to_thread(sync_mgr.run_sync, force=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("periodic jellyfin sync failed")
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    client: OllamaClient | None = None,
+    system_prompt: str | None = None,
+    prompt_id: str | None = None,
+    data_dir: Path | None = None,
+) -> FastAPI:
+    """Build a FastAPI app. Pass ``settings``/``client`` to skip production lifespan I/O."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        sync_task: asyncio.Task[None] | None = None
+        if getattr(app.state, "service", None) is None:
+            cfg = settings or load_config()
+            _configure_logging(cfg.runtime.log_level)
+            try:
+                _wire_state(
+                    app,
+                    cfg,
+                    client=client,
+                    system_prompt=system_prompt,
+                    prompt_id=prompt_id,
+                    data_dir=data_dir,
+                )
+            except PromptError as exc:
+                raise RuntimeError(str(exc)) from exc
+            logger.info(
+                "brain ready model=%s prompt_id=%s data_dir=%s",
+                cfg.ollama.model,
+                app.state.prompt_id,
+                app.state.data_dir,
+            )
+        if jellyfin_sync_configured(app.state.settings):
+            sync_task = asyncio.create_task(
+                _jellyfin_sync_loop(app),
+                name="jellyfin-sync-loop",
+            )
+            app.state._sync_task = sync_task
+        try:
+            yield
+        finally:
+            if sync_task is not None:
+                sync_task.cancel()
+                try:
+                    await sync_task
+                except asyncio.CancelledError:
+                    pass
+            sync_mgr: SyncManager | None = getattr(app.state, "sync_manager", None)
+            if sync_mgr is not None:
+                sync_mgr.close()
+            if getattr(app.state, "_owns_ollama", False):
+                app.state.ollama.close()
+
+    application = FastAPI(
+        title="Mimir Brain",
+        version=__version__,
+        lifespan=lifespan,
+        description=(
+            "Offline personal-assistant brain. Native /v1/chat supports SSE "
+            "(docs/api-streaming.md); OpenAI-compat streaming remains 501."
+        ),
+    )
+
+    if settings is not None:
+        _configure_logging(settings.runtime.log_level)
+        _wire_state(
+            application,
+            settings,
+            client=client,
+            system_prompt=system_prompt or "You are Mimir, a test assistant.",
+            prompt_id=prompt_id or "test:prompt",
+            data_dir=data_dir,
+        )
+
+    register_chat_routes(application)
+
+    @application.post("/v1/chat/completions")
+    def openai_chat_completions(request: Request, body: dict[str, Any]) -> JSONResponse:
+        """OpenAI-compatible completions. Tools run inside Mimir; client tools ignored."""
+        service: BrainService = request.app.state.service
+        status, payload = run_openai_chat(service, body)
+        return JSONResponse(status_code=status, content=payload)
+
+    @application.get("/v1/models")
+    def openai_models(request: Request) -> dict[str, Any]:
+        s: Settings = request.app.state.settings
+        return models_list(s.ollama.model)
+
+    return application
+
+
+app = create_app()
