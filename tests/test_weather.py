@@ -92,6 +92,7 @@ def test_build_registry_includes_weather(tmp_path: Path) -> None:
 
 def test_get_weather_with_mock_transport(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
+    data_dir = settings.runtime.data_dir
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert KNMI_MODEL in str(request.url)
@@ -104,13 +105,88 @@ def test_get_weather_with_mock_transport(tmp_path: Path) -> None:
     with httpx.Client(transport=transport, timeout=5.0) as client:
         from brain.tools.weather import weather_tools
 
-        reg = {**TOOLS, **weather_tools(settings, http_client=client)}
+        reg = {
+            **TOOLS,
+            **weather_tools(settings, http_client=client, data_dir=data_dir),
+        }
         out = dispatch("get_weather", {}, tools=reg)
 
     assert not out.startswith("error:")
     data = json.loads(out)
     assert data["current"]["temperature_c"] == 18.5
     assert data["source"] == "open-meteo/knmi"
+    assert data["stale"] is False
+    assert "fetched_at" in data
+    from brain.weather_cache import weather_cache_path
+
+    assert weather_cache_path(data_dir).is_file()
+
+
+def test_get_weather_serves_stale_cache(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    data_dir = settings.runtime.data_dir
+    from brain.tools.weather import normalize_forecast
+    from brain.weather_cache import weather_cache_path, write_cache
+
+    compact = normalize_forecast(
+        SAMPLE_RAW,
+        home=settings.location.as_home(),
+    )
+    write_cache(weather_cache_path(data_dir), compact, fetched_at="2026-08-26T10:00:00+00:00")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="down")
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=5.0) as client:
+        from brain.tools.weather import weather_tools
+
+        reg = {
+            **TOOLS,
+            **weather_tools(settings, http_client=client, data_dir=data_dir),
+        }
+        out = dispatch("get_weather", {}, tools=reg)
+
+    assert not out.startswith("error:")
+    data = json.loads(out)
+    assert data["stale"] is True
+    assert data["fetched_at"] == "2026-08-26T10:00:00+00:00"
+    assert data["current"]["temperature_c"] == 18.5
+
+
+def test_get_weather_expired_cache_fails_clear(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings = Settings(
+        location=settings.location.model_dump(),
+        ollama=settings.ollama.model_dump(),
+        runtime={"data_dir": settings.runtime.data_dir},
+        timeouts=settings.timeouts.model_dump(),
+        weather={"cache_ttl_s": 1.0},
+    )
+    data_dir = settings.runtime.data_dir
+    from datetime import UTC, datetime, timedelta
+
+    from brain.tools.weather import normalize_forecast
+    from brain.weather_cache import weather_cache_path, write_cache
+
+    compact = normalize_forecast(SAMPLE_RAW, home=settings.location.as_home())
+    old = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+    write_cache(weather_cache_path(data_dir), compact, fetched_at=old)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="down")
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport, timeout=5.0) as client:
+        from brain.tools.weather import weather_tools
+
+        reg = {
+            **TOOLS,
+            **weather_tools(settings, http_client=client, data_dir=data_dir),
+        }
+        out = dispatch("get_weather", {}, tools=reg)
+
+    assert out.startswith("error: weather unavailable")
 
 
 def test_get_weather_http_error(tmp_path: Path) -> None:

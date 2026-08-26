@@ -21,8 +21,9 @@ Quick “new window” shortcut (still uses uv): double-click
 powershell -File scripts/build_mimir_exe.ps1
 ```
 
-Uses `clients/tui/assets/mimir.ico` (world-tree icon). The console title is
-set to **Mimir** (not the exe path).
+Uses `clients/tui/assets/mimir.ico` (world-tree, taskbar/Explorer). The window
+caption is **Mimir** (system title text — console apps cannot color it).
+The in-app header does not repeat the name.
 
 Output: `dist/mimir.exe`. On startup the TUI checks `/health`; if the brain
 is down it starts `uv run uvicorn …` from the repo (keep the exe under
@@ -30,7 +31,7 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 
 ## UI
 
-- Compact top bar (brand + host / conversation)
+- Compact status line (host / conversation) under the window caption
 - World-tree splash when the Conversation is empty; `/new` restores it
 - Each launch starts a **new** Conversation (resume-previous is backlog)
 - Highlighted user strips, bordered tool cards, Amp-style input border

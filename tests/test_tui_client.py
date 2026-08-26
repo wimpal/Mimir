@@ -171,6 +171,18 @@ def test_client_uses_long_read_timeout() -> None:
     assert client._client.timeout.read == 180.0
 
 
+def test_client_sets_authorization_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIMIR_AUTH_TOKEN", "tok-from-env")
+    client = BrainClient("http://127.0.0.1:8000")
+    assert client._client.headers["Authorization"] == "Bearer tok-from-env"
+
+
+def test_client_auth_token_arg_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIMIR_AUTH_TOKEN", "env-tok")
+    client = BrainClient("http://127.0.0.1:8000", auth_token="arg-tok")
+    assert client._client.headers["Authorization"] == "Bearer arg-tok"
+
+
 def test_host_port_from_url() -> None:
     assert host_port_from_url("http://127.0.0.1:8000") == ("127.0.0.1", 8000)
     assert host_port_from_url("http://localhost:9000/v1") == ("localhost", 9000)

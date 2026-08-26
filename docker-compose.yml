@@ -12,10 +12,14 @@
 #       context: .
 #       dockerfile: brain/Dockerfile      # written in Phase 8
 #     ports:
-#       - "127.0.0.1:8000:8000"           # LAN bind decision finalized in Phase 7 (security)
+#       # Prefer publishing loopback; for LAN chat publish host port and set
+#       # runtime.host + auth.mode: token (ADR 0005). Sync/debug stay Host-only.
+#       - "127.0.0.1:8000:8000"
 #     environment:
 #       MIMIR_CONFIG: /config/config.yaml
 #       MIMIR_DATA_DIR: /data
+#       # MIMIR_AUTH_TOKEN: from .env when auth.mode is token
+
 #     volumes:
 #       - ./data:/data                    # SQLite + logs
 #       - ./config:/config:ro             # config.yaml + system_prompt.md

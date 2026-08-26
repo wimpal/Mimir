@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -79,6 +80,7 @@ class BrainClient:
         base_url: str = DEFAULT_BRAIN_URL,
         *,
         turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
+        auth_token: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = normalize_brain_url(base_url)
@@ -89,11 +91,16 @@ class BrainClient:
             write=CONNECT_TIMEOUT_S,
             pool=CONNECT_TIMEOUT_S,
         )
+        headers: dict[str, str] = {"Accept": "application/json"}
+        env_token = os.environ.get("MIMIR_AUTH_TOKEN", "")
+        token = (auth_token if auth_token is not None else env_token).strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
-            headers={"Accept": "application/json"},
+            headers=headers,
         )
 
     async def aclose(self) -> None:

@@ -47,3 +47,19 @@ _Avoid_: Seen, started
 **Chat client**:
 The thin Textual TUI (`uv run mimir` / `dist/mimir.exe`) that talks only to the brain over HTTP. It may start the brain if `/health` fails, but holds no business logic and never calls Ollama, Jellyfin, or weather APIs directly. Each launch opens a new Conversation.
 _Avoid_: Open WebUI (as the product UI), web UI (superseded), bot, frontend with tools/prompts
+
+**Auth token**:
+The shared secret a client must send to the brain when auth is enabled. Single-user; not a login system.
+_Avoid_: Password, API key (reserved for Jellyfin), session, user account
+
+**Forecast cache**:
+The brain's last successful weather payload, kept under a TTL and returned when Open-Meteo is unreachable. Distinct from the Catalogue (Jellyfin).
+_Avoid_: Weather history, offline weather, circuit breaker
+
+**Turn trace**:
+A JSONL observability record of one agent loop (prompt id, tools, latencies, success/fail). Not a Message; not full prompt or reply text by default.
+_Avoid_: Log line, debug dump, conversation history
+
+**Host-only**:
+Reachable only on the machine running the brain (loopback bind), not from other LAN devices. Used for operational endpoints such as Sync and debug traces.
+_Avoid_: Localhost-only as a synonym for “LAN”, admin network

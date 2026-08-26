@@ -93,6 +93,17 @@ def test_repo_example_config_loads() -> None:
     assert s.memory.history_pairs == 20
     assert s.timeouts.jellyfin_sync_s == 300.0
     assert s.jellyfin.sync_interval_hours == 24.0
+    assert s.weather.cache_ttl_s == 3600.0
+
+
+def test_validate_bind_via_load_config(tmp_path: Path) -> None:
+    from brain.config import validate_bind_auth
+
+    s = _load(tmp_path)
+    validate_bind_auth(s)
+    bad = VALID_YAML + "runtime:\n  host: 0.0.0.0\n"
+    with pytest.raises(ConfigError, match="not loopback"):
+        load_config(write_config(tmp_path, bad), use_dotenv=False)
 
 
 def test_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

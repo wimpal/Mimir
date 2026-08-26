@@ -72,7 +72,7 @@ class JellyfinSettings(_Strict):
 
 class AuthSettings(_Strict):
     mode: Literal["none", "token"] = "none"
-    token: str | None = None  # secret: MIMIR_AUTH_TOKEN (enforced in Phase 7)
+    token: str | None = None  # secret: MIMIR_AUTH_TOKEN
 
 
 class RuntimeSettings(_Strict):
@@ -102,6 +102,10 @@ class TimeoutSettings(_Strict):
     jellyfin_sync_s: float = 300.0  # overall Sync wall clock
 
 
+class WeatherSettings(_Strict):
+    cache_ttl_s: float = 3600.0  # Forecast cache TTL when Open-Meteo fails
+
+
 class MemorySettings(_Strict):
     history_pairs: int = 20  # last N user+assistant pairs injected under num_ctx
 
@@ -114,7 +118,32 @@ class Settings(_Strict):
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
+    weather: WeatherSettings = Field(default_factory=WeatherSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when ``runtime.host`` is loopback-only."""
+    return (host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def validate_bind_auth(settings: Settings) -> None:
+    """Refuse insecure bind: non-loopback requires Auth token (ADR 0005)."""
+    token = (settings.auth.token or "").strip()
+    if settings.auth.mode == "token" and not token:
+        raise ConfigError(
+            "auth.mode is 'token' but MIMIR_AUTH_TOKEN is empty — set the token"
+        )
+    if not is_loopback_host(settings.runtime.host):
+        if settings.auth.mode != "token" or not token:
+            raise ConfigError(
+                f"runtime.host is {settings.runtime.host!r} (not loopback); "
+                "set auth.mode: token and MIMIR_AUTH_TOKEN, or bind 127.0.0.1 "
+                "(see docs/adr/0005-non-loopback-requires-auth-token.md)"
+            )
 
 
 # Flat env names on purpose — no nested delimiters in deployment configs.
@@ -142,6 +171,7 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "tool_s"): "MIMIR_TIMEOUT_TOOL_S",
     ("timeouts", "turn_s"): "MIMIR_TIMEOUT_TURN_S",
     ("timeouts", "jellyfin_sync_s"): "MIMIR_JELLYFIN_SYNC_TIMEOUT_S",
+    ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
 }
 
@@ -200,9 +230,12 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
                 target[key] = value
 
     try:
-        return Settings.model_validate(data)
+        settings = Settings.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(f"invalid configuration in {cfg_path}:\n{exc}") from exc
+
+    validate_bind_auth(settings)
+    return settings
 
 
 def jellyfin_sync_configured(settings: Settings) -> bool:

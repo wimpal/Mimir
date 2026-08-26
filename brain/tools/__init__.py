@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -118,15 +119,22 @@ def build_registry(
     *,
     db: Database | None = None,
     weather_fetch_override: Callable[[], str] | None = None,
+    data_dir: Path | None = None,
 ) -> dict[str, Tool]:
     """Dummy tools + weather + optional preference / recommend tools bound to SQLite."""
     from brain.tools.preferences import preference_tools
     from brain.tools.recommend import recommend_tools
     from brain.tools.weather import weather_tools
 
+    resolved_data = data_dir if data_dir is not None else Path(settings.runtime.data_dir)
+
     registry: dict[str, Tool] = {
         **TOOLS,
-        **weather_tools(settings, fetch_override=weather_fetch_override),
+        **weather_tools(
+            settings,
+            fetch_override=weather_fetch_override,
+            data_dir=resolved_data,
+        ),
     }
     if db is not None:
         registry.update(preference_tools(db))

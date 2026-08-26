@@ -36,19 +36,15 @@ uv run python -m brain.config
 # 4. Standing tool-call suite (>=80%)
 uv run python scripts/tool_call_suite.py
 
-# 5. Run the brain
+# 5. Run the brain (host/port must match config runtime.host / runtime.port)
 uv run uvicorn brain.main:app --host 127.0.0.1 --port 8000 --reload
 
-# 6. Chat TUI (auto-starts brain if needed)
+# 6. Chat TUI (auto-starts brain if needed; sends MIMIR_AUTH_TOKEN when set)
 uv run mimir
 # optional: uv run mimir --url http://127.0.0.1:8000
-
-# Windows: double-clickable console exe (build once)
-# powershell -File scripts/build_mimir_exe.ps1
-# then run dist\mimir.exe
 ```
 
-Health + curl still work:
+Health + curl still work. With `auth.mode: token`, pass a Bearer header on `/v1/*`:
 
 ```powershell
 curl http://127.0.0.1:8000/health
@@ -58,8 +54,11 @@ curl http://127.0.0.1:8000/v1/chat -H "Content-Type: application/json" -d "{\"me
 OpenAI-compatible surface (for Home Assistant later): `POST /v1/chat/completions`,
 `GET /v1/models`. See [`docs/ha-conversation-agent.md`](./docs/ha-conversation-agent.md).
 Streaming on native chat: [`docs/api-streaming.md`](./docs/api-streaming.md).
+Phase 7 harden notes: [`docs/phase7-harden.md`](./docs/phase7-harden.md).
+Backup: [`docs/ops-backup.md`](./docs/ops-backup.md).
 
-Turn traces: `data/logs/turns.jsonl` (under `runtime.data_dir`).
+Turn traces: `data/logs/turns.jsonl` (under `runtime.data_dir`); Host-only
+`GET /debug/recent-traces`.
 
 Optional: iterate on the system prompt without the tool loop via
 `uv run python scripts/try_prompt.py "…"`.
@@ -80,3 +79,4 @@ If layers stay on CPU: update AMD drivers, retry, and only then judge model qual
 `MIMIR_*` env vars > `config/config.yaml`; secrets (`JELLYFIN_API_KEY`,
 `MIMIR_AUTH_TOKEN`) come from `.env`/environment only. See `.env.example`.
 TUI-only: `MIMIR_BRAIN_URL`, `MIMIR_TURN_TIMEOUT_S`, `MIMIR_STATE_DIR`.
+Non-loopback bind requires Auth token — [`docs/adr/0005-non-loopback-requires-auth-token.md`](./docs/adr/0005-non-loopback-requires-auth-token.md).

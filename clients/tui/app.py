@@ -50,6 +50,18 @@ def _host_label(url: str) -> str:
 class Transcript(VerticalScroll):
     """Scrollable message list."""
 
+    DEFAULT_CSS = """
+    Transcript {
+        scrollbar-background: #0d0f0c;
+        scrollbar-background-hover: #141914;
+        scrollbar-background-active: #1a2418;
+        scrollbar-color: #3d4a38;
+        scrollbar-color-hover: #7cb342;
+        scrollbar-color-active: #9ccc65;
+        scrollbar-corner-color: #0d0f0c;
+    }
+    """
+
     def append_line(self, text: str, *, classes: str = "") -> Static:
         widget = Static(text, classes=classes)
         self.mount(widget)
@@ -79,23 +91,28 @@ class MimirApp(App[None]):
     Screen {
         layout: vertical;
         background: #0d0f0c;
+        scrollbar-background: #0d0f0c;
+        scrollbar-background-hover: #141914;
+        scrollbar-background-active: #1a2418;
+        scrollbar-color: #3d4a38;
+        scrollbar-color-hover: #7cb342;
+        scrollbar-color-active: #9ccc65;
+        scrollbar-corner-color: #0d0f0c;
     }
 
     #topbar {
-        height: 2;
+        dock: top;
+        height: 1;
+        width: 100%;
         padding: 0 1;
-        background: #121612;
-        border-bottom: solid #2a3328;
-    }
-    #brand {
-        color: #7cb342;
-        text-style: bold;
-        width: auto;
+        background: #0d0f0c;
+        layout: horizontal;
     }
     #meta {
-        color: #6b7280;
         width: 1fr;
+        color: #6b7280;
         text-align: right;
+        content-align: right middle;
     }
 
     #body {
@@ -112,6 +129,13 @@ class MimirApp(App[None]):
     #transcript {
         height: 1fr;
         padding: 0 1 1 1;
+        scrollbar-background: #0d0f0c;
+        scrollbar-background-hover: #141914;
+        scrollbar-background-active: #1a2418;
+        scrollbar-color: #3d4a38;
+        scrollbar-color-hover: #7cb342;
+        scrollbar-color-active: #9ccc65;
+        scrollbar-corner-color: #0d0f0c;
     }
     #transcript .user {
         background: #1a2418;
@@ -180,7 +204,7 @@ class MimirApp(App[None]):
         height: 1;
         padding: 0 1;
         color: #6b7280;
-        background: #121612;
+        background: #0d0f0c;
         border-top: solid #2a3328;
     }
     """
@@ -213,7 +237,6 @@ class MimirApp(App[None]):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
-            yield Static("Mimir", id="brand")
             yield Static("", id="meta")
         with Vertical(id="body"):
             yield Splash(id="splash")

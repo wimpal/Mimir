@@ -54,7 +54,8 @@ is the project’s ground truth for *this* stack.
 proxy**, not an abliterated / “uncensored” fine-tune. Abliterated finetunes often
 degrade instruction-following and structured tool calls — the capability we
 optimized for. Stay on stock `qwen3:8b` unless a measured suite run justifies a
-swap. Personality and refusal style are controlled by
+swap. Personality is **Jarvis-led** (calm competence, dry wit, brief answers);
+refusal style and tone live in
 [`config/system_prompt.md`](./config/system_prompt.md).
 
 **Thinking mode (locked):** Qwen3 is hybrid. **`think: false` for all tool loops
@@ -94,7 +95,8 @@ bad tool calls.
 - **Open-Meteo** (no API key) as the HTTP transport; for Netherlands home
   coords pin **KNMI HARMONIE AROME** (`knmi_harmonie_arome_netherlands`, 2 km).
 - Lat/long + `Europe/Amsterdam` timezone in config. Soft network dependency —
-  degrade clearly when offline.
+  degrade clearly when offline; Phase 7 serves a TTL **Forecast cache** (marked
+  `stale`) when Open-Meteo is unreachable.
 - Buienradar-style 5-minute rain nowcast is Phase 10 backlog if needed.
 
 ### Jellyfin
@@ -119,7 +121,7 @@ optional tool logs.
 | Topic | v1 policy |
 |---|---|
 | Migrations | Hand-rolled versioned SQL (`schema_version`); Phase 5 at version 2 — no Alembic unless pain forces it |
-| Backup | Copy/stop-and-copy the SQLite file from `data_dir`; document in Phase 8 |
+| Backup | Copy/stop-and-copy `data_dir` (SQLite + logs + cache); see [`docs/ops-backup.md`](./docs/ops-backup.md) |
 | Retention | Keep full history for single-user v1; no auto-prune unless disk hurts |
 | Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`. Token-budget window and summarization/compaction are backlog until long threads actually break |
 | Chat memory path | Mimir `/v1/chat` owns SQLite Conversations; OpenAI-compat stays client `messages` only until Assist needs shared threads (ADR 0001) |
@@ -134,6 +136,12 @@ HTTP client only (ADR 0004). Health-checks the brain and starts it if needed
 (`uv run uvicorn` from the repo); does not stop it on exit. Each launch opens a
 new Conversation (resume backlog). Telegram/Matrix bots are not a v1 path. The
 Phase 6 web UI was superseded.
+
+**Network / auth:** Default bind is loopback with no Auth token. Opening
+`runtime.host` past loopback requires `auth.mode: token` and `MIMIR_AUTH_TOKEN`
+(ADR 0005) — refuse startup otherwise. LAN clients may call chat with Bearer;
+Sync and debug traces stay Host-only. No public-internet exposure; remote VPN
+docs are backlog.
 
 Open WebUI is fine for temporary debugging, not the long-term product UI: voice
 must call the same brain without rewriting chat-specific logic.

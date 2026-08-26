@@ -13,9 +13,78 @@ from brain.agent import StoppedReason, TurnResult
 
 logger = logging.getLogger("mimir.turns")
 
+_SUMMARY_KEYS = (
+    "ts",
+    "turn_id",
+    "prompt_id",
+    "conversation_id",
+    "stopped_reason",
+    "success",
+    "tools_used",
+)
+
 
 def turns_log_path(data_dir: Path) -> Path:
     return data_dir / "logs" / "turns.jsonl"
+
+
+def _step_latency_rollups(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    ollama_ms = [
+        s["ollama_latency_ms"]
+        for s in steps
+        if isinstance(s.get("ollama_latency_ms"), (int, float))
+    ]
+    tool_ms = [
+        s["tool_latency_ms"]
+        for s in steps
+        if isinstance(s.get("tool_latency_ms"), (int, float))
+    ]
+    return {
+        "step_count": len(steps),
+        "ollama_latency_ms_sum": round(sum(ollama_ms), 2) if ollama_ms else 0.0,
+        "tool_latency_ms_sum": round(sum(tool_ms), 2) if tool_ms else 0.0,
+    }
+
+
+def summarize_trace(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop non-summary fields from a Turn trace record."""
+    out = {k: record.get(k) for k in _SUMMARY_KEYS}
+    steps = record.get("steps")
+    if isinstance(steps, list):
+        out.update(_step_latency_rollups(steps))
+    else:
+        out["step_count"] = 0
+        out["ollama_latency_ms_sum"] = 0.0
+        out["tool_latency_ms_sum"] = 0.0
+    return out
+
+
+def read_recent_traces(path: Path, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Return the newest ``limit`` Turn trace summaries (oldest→newest within the window)."""
+    if limit <= 0:
+        return []
+    if not path.is_file():
+        return []
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    summaries: list[dict[str, Any]] = []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            summaries.append(summarize_trace(record))
+    if len(summaries) > limit:
+        summaries = summaries[-limit:]
+    return summaries
 
 
 def append_turn_trace(

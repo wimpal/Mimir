@@ -81,6 +81,21 @@ def brain_reachable(base_url: str, *, timeout_s: float = CONNECT_TIMEOUT_S) -> b
     return resp.status_code < 500
 
 
+def _bind_host_port(base_url: str, *, repo_root: Path) -> tuple[str, int]:
+    """Prefer ``runtime.host``/``port`` from config; fall back to the client URL."""
+    url_host, url_port = host_port_from_url(base_url)
+    try:
+        from brain.config import load_config
+
+        cfg_path = repo_root / "config" / "config.yaml"
+        if not cfg_path.is_file():
+            return url_host, url_port
+        settings = load_config(cfg_path, use_dotenv=True)
+        return settings.runtime.host, int(settings.runtime.port)
+    except Exception:  # noqa: BLE001 — launcher must still start with URL bind
+        return url_host, url_port
+
+
 def start_brain_process(base_url: str, *, repo_root: Path | None = None) -> subprocess.Popen[bytes]:
     """Spawn ``uv run uvicorn …`` for the brain. Raises RuntimeError on setup failure."""
     root = repo_root or find_repo_root()
@@ -96,7 +111,7 @@ def start_brain_process(base_url: str, *, repo_root: Path | None = None) -> subp
             "Could not find `uv` on PATH. Install uv or start the brain manually."
         )
 
-    host, port = host_port_from_url(base_url)
+    host, port = _bind_host_port(base_url, repo_root=root)
     log_dir = root / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "brain_launch.log"

@@ -7,6 +7,7 @@ Endpoints:
   GET  /v1/models
   GET  /v1/conversations/{id}/messages
   POST /v1/jellyfin/sync
+  GET  /debug/recent-traces   (Host-only)
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ from fastapi.responses import JSONResponse
 
 from brain import __version__
 from brain.api_chat import register_chat_routes
-from brain.config import Settings, jellyfin_sync_configured, load_config
+from brain.auth import AuthMiddleware
+from brain.config import Settings, jellyfin_sync_configured, load_config, validate_bind_auth
 from brain.db import Database
 from brain.jellyfin_sync import SyncManager
 from brain.ollama import OllamaClient
@@ -54,6 +56,7 @@ def _wire_state(
     prompt_id: str | None = None,
     data_dir: Path | None = None,
 ) -> None:
+    validate_bind_auth(settings)
     resolved_data = data_dir or settings.runtime.ensure_data_dir()
     if system_prompt is None or prompt_id is None:
         text, pid = load_system_prompt(settings.agent.system_prompt_path)
@@ -180,6 +183,8 @@ def create_app(
             "(docs/api-streaming.md); OpenAI-compat streaming remains 501."
         ),
     )
+
+    application.add_middleware(AuthMiddleware)
 
     if settings is not None:
         _configure_logging(settings.runtime.log_level)

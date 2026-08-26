@@ -30,7 +30,8 @@ jellyfin:
   page_size: 100
 
 auth:
-  # none | token — enforcement lands in Phase 7; keep the brain LAN-only until then.
+  # none | token — token required when runtime.host is not loopback (ADR 0005).
+  # Secret: MIMIR_AUTH_TOKEN in .env. Clients send Authorization: Bearer …
   mode: none
 
 agent:
@@ -46,14 +47,20 @@ timeouts:
   # Overall wall-clock budget for one Jellyfin Catalogue Sync.
   jellyfin_sync_s: 300
 
+weather:
+  # Forecast cache TTL (seconds). Serve last success marked stale when API fails.
+  cache_ttl_s: 3600
+
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).
   history_pairs: 20
 
 runtime:
-  # SQLite + logs live here. Relative paths resolve against the working directory.
+  # SQLite + logs + weather cache live here. Relative paths resolve against cwd.
   # On the Linux box: point this at a mounted volume (e.g. /data) via config or MIMIR_DATA_DIR.
   data_dir: ./data
   log_level: INFO
+  # Listen address for uvicorn (TUI auto-start reads this). Non-loopback requires
+  # auth.mode: token + MIMIR_AUTH_TOKEN. Pass the same --host/--port to uvicorn.
   host: 127.0.0.1
   port: 8000

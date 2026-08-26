@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -173,19 +175,50 @@ def _execute_get_weather(
     home: HomeLocation,
     timeout_s: float,
     http_client: httpx.Client | None = None,
+    cache_path: Path | None = None,
+    cache_ttl_s: float = 3600.0,
 ) -> str:
+    from brain.weather_cache import write_cache
+
     try:
         raw = fetch_forecast(home, timeout_s=timeout_s, client=http_client)
         compact = normalize_forecast(raw, home=home)
-        return json.dumps(compact, separators=(",", ":"))
-    except httpx.TimeoutException:
-        return f"error: weather unavailable (timed out after {timeout_s}s)"
+        fetched_at = datetime.now(UTC).isoformat()
+        if cache_path is not None:
+            write_cache(cache_path, compact, fetched_at=fetched_at)
+        out = {**compact, "fetched_at": fetched_at, "stale": False}
+        return json.dumps(out, separators=(",", ":"))
+    except httpx.TimeoutException as exc:
+        err = f"error: weather unavailable (timed out after {timeout_s}s)"
+        return _maybe_stale(cache_path, cache_ttl_s, err, cause=exc)
     except httpx.HTTPStatusError as exc:
-        return f"error: weather unavailable (HTTP {exc.response.status_code})"
+        err = f"error: weather unavailable (HTTP {exc.response.status_code})"
+        return _maybe_stale(cache_path, cache_ttl_s, err, cause=exc)
     except httpx.HTTPError as exc:
-        return f"error: weather unavailable ({exc.__class__.__name__})"
+        err = f"error: weather unavailable ({exc.__class__.__name__})"
+        return _maybe_stale(cache_path, cache_ttl_s, err, cause=exc)
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        return f"error: weather unavailable (bad response: {exc})"
+        err = f"error: weather unavailable (bad response: {exc})"
+        return _maybe_stale(cache_path, cache_ttl_s, err, cause=exc)
+
+
+def _maybe_stale(
+    cache_path: Path | None,
+    cache_ttl_s: float,
+    err: str,
+    *,
+    cause: BaseException,
+) -> str:
+    from brain.weather_cache import read_fresh
+
+    del cause  # reserved for future logging
+    if cache_path is None:
+        return err
+    cached = read_fresh(cache_path, ttl_s=cache_ttl_s)
+    if cached is None:
+        return err
+    out = {**cached.forecast, "fetched_at": cached.fetched_at, "stale": True}
+    return json.dumps(out, separators=(",", ":"))
 
 
 def make_get_weather_tool(
@@ -193,12 +226,16 @@ def make_get_weather_tool(
     *,
     http_client: httpx.Client | None = None,
     fetch_override: Callable[[], str] | None = None,
+    data_dir: Path | None = None,
 ):
-    """Build get_weather bound to config lat/long and tool timeout."""
+    """Build get_weather bound to config lat/long, tool timeout, and Forecast cache."""
     from brain.tools import Tool
+    from brain.weather_cache import weather_cache_path
 
     home = settings.location.as_home()
     timeout_s = settings.timeouts.tool_s
+    cache_ttl_s = settings.weather.cache_ttl_s
+    cache_path = weather_cache_path(data_dir) if data_dir is not None else None
 
     def execute() -> str:
         if fetch_override is not None:
@@ -207,6 +244,8 @@ def make_get_weather_tool(
             home=home,
             timeout_s=timeout_s,
             http_client=http_client,
+            cache_path=cache_path,
+            cache_ttl_s=cache_ttl_s,
         )
 
     return Tool(
@@ -215,7 +254,8 @@ def make_get_weather_tool(
             "Return current conditions and a short forecast for the user's home "
             "location (lat/long from server config; Netherlands KNMI model via "
             "Open-Meteo). Use for weather today/tomorrow, rain, umbrella, "
-            "temperature, or conditions. No arguments — home location is fixed."
+            "temperature, or conditions. No arguments — home location is fixed. "
+            "Payload may include stale=true with fetched_at when serving Forecast cache."
         ),
         parameters={
             "type": "object",
@@ -231,8 +271,12 @@ def weather_tools(
     *,
     http_client: httpx.Client | None = None,
     fetch_override: Callable[[], str] | None = None,
+    data_dir: Path | None = None,
 ) -> dict[str, Any]:
     tool = make_get_weather_tool(
-        settings, http_client=http_client, fetch_override=fetch_override
+        settings,
+        http_client=http_client,
+        fetch_override=fetch_override,
+        data_dir=data_dir,
     )
     return {tool.name: tool}

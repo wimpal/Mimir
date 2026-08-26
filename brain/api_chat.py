@@ -61,7 +61,7 @@ def _iter_sse(events: Iterator[dict[str, Any]]) -> Iterator[str]:
 
 
 def register_chat_routes(application: FastAPI) -> None:
-    """Attach ``GET /health``, ``POST /v1/chat``, ``POST /v1/jellyfin/sync``, messages GET."""
+    """Attach health, chat, Sync, messages, and Host-only debug routes."""
 
     @application.get("/health")
     def health(request: Request) -> dict[str, Any]:
@@ -103,6 +103,15 @@ def register_chat_routes(application: FastAPI) -> None:
             "jellyfin_sync": jellyfin_sync,
             "prompt_id": request.app.state.prompt_id,
         }
+
+    @application.get("/debug/recent-traces")
+    def recent_traces(request: Request, limit: int = 50) -> dict[str, Any]:
+        from brain.turn_log import read_recent_traces, turns_log_path
+
+        capped = max(1, min(int(limit), 200))
+        data_dir = request.app.state.data_dir
+        traces = read_recent_traces(turns_log_path(data_dir), limit=capped)
+        return {"traces": traces, "limit": capped, "count": len(traces)}
 
     @application.post("/v1/jellyfin/sync")
     async def jellyfin_sync(request: Request) -> JSONResponse:

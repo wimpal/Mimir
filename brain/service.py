@@ -138,7 +138,7 @@ class BrainService:
         if tools is not None:
             self.tools = tools
         else:
-            self.tools = build_registry(settings, db=db)
+            self.tools = build_registry(settings, db=db, data_dir=data_dir)
 
     def _refresh_system_after_pref_tool(
         self,
