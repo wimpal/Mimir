@@ -9,7 +9,7 @@
 |---|---|
 | `brain/jellyfin_client.py` | Paginated `Users/{userId}/Items` (movies only, `EnableUserData=true`) |
 | `brain/jellyfin_sync.py` | Single-flight SyncManager; atomic generation publish |
-| `brain/db.py` | `schema_version=2`: `movies` + `jellyfin_sync_state` |
+| `brain/db.py` | `schema_version=2`: `movies` + `jellyfin_sync_state` (play timing → Phase 8a / v3; Box sets → v4) |
 | `brain/tools/recommend.py` | `recommend_movies` — Catalogue subset for the LLM |
 | `POST /v1/jellyfin/sync` | On-demand Sync (HTTP only; not a chat tool) |
 | `GET /health` → `jellyfin_sync` | Informational last-run / stale / count |

@@ -1,6 +1,6 @@
 # Offline LLM Personal Assistant — v1 Architecture & Tech Stack
 
-Assistant name: Mimir
+Assistant name: **Mimir** (Modular Intelligent Multi-Interface Resource)
 
 **Doc roles:** this file is intent, locked decisions, and rationale.
 Sequencing, exit criteria, and hardware locks live in [`ROADMAP.md`](./ROADMAP.md).
@@ -24,8 +24,9 @@ Jellyfin directly. Voice is **not** required for v1.
 ### Non-goals (until ROADMAP says otherwise)
 
 LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin,
-calendar/shopping/smart-home/proactive notify, public-internet exposure,
-multi-user/voice-ID.
+shopping/smart-home/proactive notify, email inbox sync, public-internet exposure,
+multi-user/voice-ID. Calendar read is sequenced in ROADMAP Phase 8d (ICS Calendar
+feed); Discord is a brain **tool** (Phase 8f), not a Chat client front door.
 
 ---
 
@@ -97,7 +98,7 @@ bad tool calls.
 - Lat/long + `Europe/Amsterdam` timezone in config. Soft network dependency —
   degrade clearly when offline; Phase 7 serves a TTL **Forecast cache** (marked
   `stale`) when Open-Meteo is unreachable.
-- Buienradar-style 5-minute rain nowcast is Phase 10 backlog if needed.
+- Buienradar-style 5-minute rain nowcast is Phase 11 backlog if needed.
 
 ### Jellyfin
 
@@ -120,12 +121,12 @@ optional tool logs.
 
 | Topic | v1 policy |
 |---|---|
-| Migrations | Hand-rolled versioned SQL (`schema_version`); Phase 5 at version 2 — no Alembic unless pain forces it |
+| Migrations | Hand-rolled versioned SQL (`schema_version`); Catalogue Box sets at version 4 — no Alembic unless pain forces it |
 | Backup | Copy/stop-and-copy `data_dir` (SQLite + logs + cache); see [`docs/ops-backup.md`](./docs/ops-backup.md) |
 | Retention | Keep full history for single-user v1; no auto-prune unless disk hurts |
 | Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`. Token-budget window and summarization/compaction are backlog until long threads actually break |
 | Chat memory path | Mimir `/v1/chat` owns SQLite Conversations; OpenAI-compat stays client `messages` only until Assist needs shared threads (ADR 0001) |
-| Preferences | Allowlisted keys via tools + system-prompt inject; Jellyfin watch/likes are media state, not Preference rows |
+| Preferences | Allowlisted keys via tools + TUI `/settings` + system-prompt inject; HTTP `GET/PUT /v1/preferences`; Jellyfin watch/likes are media state, not Preference rows |
 
 ---
 
@@ -134,8 +135,9 @@ optional tool logs.
 Full-screen Textual TUI Chat client (`uv run mimir` / `dist/mimir.exe`) — thin
 HTTP client only (ADR 0004). Health-checks the brain and starts it if needed
 (`uv run uvicorn` from the repo); does not stop it on exit. Each launch opens a
-new Conversation (resume backlog). Telegram/Matrix bots are not a v1 path. The
-Phase 6 web UI was superseded.
+new Conversation; `/history` resumes a past one; `/settings` edits allowlisted Preferences. Telegram/Matrix bots are not a v1 path.
+Discord is a send tool with a Channel allowlist (ADR 0006), not a chat front door.
+The Phase 6 web UI was superseded.
 
 **Network / auth:** Default bind is loopback with no Auth token. Opening
 `runtime.host` past loopback requires `auth.mode: token` and `MIMIR_AUTH_TOKEN`
@@ -155,6 +157,8 @@ must call the same brain without rewriting chat-specific logic.
                               │
                               ├── tool calls ──▶ [Open-Meteo API]
                               ├── tool calls ──▶ [Jellyfin API]
+                              ├── tool calls ──▶ [Calendar feed ICS URL]  (Phase 8d)
+                              ├── tool calls ──▶ [Discord API]           (Phase 8f)
                               ├── sync job   ──▶ [Jellyfin API]  (brain-owned)
                               └──▶ [SQLite: history, prefs, cached catalogue]
 ```
@@ -168,13 +172,13 @@ Ollama never talks to Jellyfin or Open-Meteo. The brain executes tools and runs 
 Use **Home Assistant Assist** + **Wyoming** (wake → STT → conversation agent → TTS),
 not a custom voice stack.
 
-Components (see ROADMAP Phase 9 for sequencing):
+Components (see ROADMAP Phase 10 for sequencing):
 
 - Living-room satellite: HA Voice Preview Edition (or Atom Echo / phone / Pi+ReSpeaker)
 - STT: faster-whisper or whisper.cpp; TTS: Piper
 - Conversation agent → **Mimir brain** (not HA’s native Ollama integration)
 
-**Load-bearing assumption — verify before Phase 9 (docs spike in Phase 2):**
+**Load-bearing assumption — verify before Phase 10 (docs spike in Phase 2):**
 HA must be able to call **our** OpenAI-compatible (or custom) conversation endpoint
 so tool calling stays in the brain. Historically, the built-in OpenAI Conversation
 integration may not accept an arbitrary base URL without a custom integration;

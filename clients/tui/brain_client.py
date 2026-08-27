@@ -7,13 +7,16 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
+
+from brain.db import CONVERSATIONS_LIST_DEFAULT
 
 DEFAULT_BRAIN_URL = "http://127.0.0.1:8000"
 DEFAULT_TURN_TIMEOUT_S = 180.0
 CONNECT_TIMEOUT_S = 5.0
+CONTROL_TIMEOUT_S = 10.0
 
 
 class BrainClientError(RuntimeError):
@@ -144,12 +147,44 @@ class BrainClient:
             detail = f"status={status}"
         return HealthInfo(status=status, reachable=reachable, detail=detail)
 
+    async def list_conversations(
+        self, *, limit: int = CONVERSATIONS_LIST_DEFAULT
+    ) -> list[dict[str, Any]]:
+        try:
+            resp = await self._client.get(
+                "/v1/conversations", params={"limit": limit}
+            )
+        except httpx.TimeoutException as exc:
+            raise BrainClientError("list conversations timed out") from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(f"list conversations failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise BrainClientError(
+                f"list conversations HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BrainClientError("list conversations returned non-JSON") from exc
+        if not isinstance(body, dict):
+            raise BrainClientError("list conversations returned unexpected JSON")
+        convos = body.get("conversations")
+        if not isinstance(convos, list):
+            raise BrainClientError("list conversations returned unexpected JSON")
+        out: list[dict[str, Any]] = []
+        for item in convos:
+            if isinstance(item, dict) and str(item.get("id") or "").strip():
+                out.append(item)
+        return out
+
     async def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
         cid = conversation_id.strip()
         if not cid:
             return []
+        path = f"/v1/conversations/{quote(cid, safe='')}/messages"
         try:
-            resp = await self._client.get(f"/v1/conversations/{cid}/messages")
+            resp = await self._client.get(path)
         except httpx.TimeoutException as exc:
             raise BrainClientError("list messages timed out") from exc
         except httpx.HTTPError as exc:
@@ -171,6 +206,76 @@ class BrainClient:
             if isinstance(item, dict):
                 out.append(item)
         return out
+
+    async def _control_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        label: str,
+    ) -> dict[str, Any]:
+        """GET/PUT-style control call with a short timeout (not chat-length)."""
+        timeout = httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S,
+            read=CONTROL_TIMEOUT_S,
+            write=CONNECT_TIMEOUT_S,
+            pool=CONNECT_TIMEOUT_S,
+        )
+        try:
+            resp = await self._client.request(
+                method,
+                path,
+                json=json_body,
+                timeout=timeout,
+            )
+        except httpx.TimeoutException as exc:
+            raise BrainClientError(f"{label} timed out") from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(f"{label} failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            detail = resp.text[:200]
+            try:
+                err = resp.json()
+                if isinstance(err, dict) and err.get("detail"):
+                    detail = str(err["detail"])
+            except ValueError:
+                pass
+            raise BrainClientError(f"{label} HTTP {resp.status_code}: {detail}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BrainClientError(f"{label} returned non-JSON") from exc
+        if not isinstance(body, dict):
+            raise BrainClientError(f"{label} returned unexpected JSON")
+        return body
+
+    async def get_preferences(self) -> list[dict[str, Any]]:
+        body = await self._control_request(
+            "GET", "/v1/preferences", label="get preferences"
+        )
+        prefs = body.get("preferences")
+        if not isinstance(prefs, list):
+            raise BrainClientError("get preferences returned unexpected JSON")
+        out: list[dict[str, Any]] = []
+        for item in prefs:
+            if isinstance(item, dict) and str(item.get("key") or "").strip():
+                out.append(item)
+        return out
+
+    async def put_preference(self, key: str, value: str) -> dict[str, Any]:
+        key = key.strip()
+        path = f"/v1/preferences/{quote(key, safe='')}"
+        body = await self._control_request(
+            "PUT",
+            path,
+            json_body={"value": value},
+            label="put preference",
+        )
+        if not str(body.get("key") or "").strip():
+            raise BrainClientError("put preference returned unexpected JSON")
+        return body
 
     async def stream_chat(
         self,

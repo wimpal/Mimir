@@ -26,6 +26,12 @@ from brain.ollama import ChatMessage, OllamaClient
 from brain.tools import build_registry, tool_schemas
 
 
+def _iso_days_ago(days: float) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _fixture_catalogue_movies() -> list[Movie]:
     return [
         Movie(
@@ -38,6 +44,7 @@ def _fixture_catalogue_movies() -> list[Movie]:
             director="Ridley Scott",
             cast=["Harrison Ford"],
             played=True,
+            last_played_at=_iso_days_ago(3),
         ),
         Movie(
             jellyfin_id="br2049",
@@ -47,6 +54,7 @@ def _fixture_catalogue_movies() -> list[Movie]:
             community_rating=8.0,
             played=False,
             playback_position_ticks=5000,
+            last_played_at=_iso_days_ago(1),
         ),
         Movie(
             jellyfin_id="ghost",
@@ -136,6 +144,13 @@ def _fail_all(reason: str) -> CheckResult:
 def _weather_payload(result: TurnResult) -> str | None:
     for m in result.messages:
         if m.role == "tool" and m.tool_name == "get_weather":
+            return m.content
+    return None
+
+
+def _calendar_payload(result: TurnResult) -> str | None:
+    for m in result.messages:
+        if m.role == "tool" and m.tool_name == "get_calendar":
             return m.content
     return None
 
@@ -445,6 +460,100 @@ def _echo_not_weather(expected: str) -> Callable[[TurnResult], CheckResult]:
     return check
 
 
+def _require_calendar_grounded() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "get_calendar" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _calendar_payload(result)
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        events = data.get("events") or []
+        if not isinstance(events, list) or not events:
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        for ev in events:
+            summary = str(ev.get("summary") or "").strip()
+            start = str(ev.get("start") or "").strip()
+            if summary and summary.lower() in content:
+                return _ok()
+            # Ground on a time fragment from the event start (HH:MM or date).
+            if len(start) >= 10 and start[:10] in content:
+                return _ok()
+            if "T" in start:
+                hhmm = start[11:16] if len(start) >= 16 else ""
+                if hhmm and hhmm in content:
+                    return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
+
+
+def _require_calendar_offline_clear() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "get_calendar" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _calendar_payload(result)
+        if not payload or not payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        fail_words = (
+            "unavailable",
+            "unable",
+            "can't",
+            "cannot",
+            "failed",
+            "error",
+            "offline",
+            "reach",
+            "timeout",
+            "timed out",
+            "down",
+            "configured",
+            "calendar",
+        )
+        if not any(w in content for w in fail_words):
+            return _fail_used("tool_not_used_in_answer")
+        return _ok()
+
+    return check
+
+
+def _echo_not_calendar(expected: str) -> Callable[[TurnResult], CheckResult]:
+    """Control: echo works; get_calendar must not be called."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        seq = result.tools_used()
+        if "get_calendar" in seq:
+            return _fail_right("unexpected_tool")
+        if "echo" not in seq:
+            return _fail_right("no_tool_when_required")
+        echoed = any(
+            m.role == "tool" and m.tool_name == "echo" and expected in m.content
+            for m in result.messages
+        )
+        if not echoed:
+            return _fail_args("malformed_args")
+        if not (result.content or "").strip():
+            return _fail_used("empty_response")
+        return _ok()
+
+    return check
+
+
 def _require_set_preference(key: str, needle: str) -> Callable[[TurnResult], CheckResult]:
     def check(result: TurnResult) -> CheckResult:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
@@ -574,7 +683,7 @@ def _echo_not_recommend(expected: str) -> Callable[[TurnResult], CheckResult]:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
             return _fail_all("ollama_error")
         seq = result.tools_used()
-        if "recommend_movies" in seq:
+        if "recommend_movies" in seq or "list_recently_watched" in seq:
             return _fail_right("unexpected_tool")
         if "echo" not in seq:
             return _fail_right("no_tool_when_required")
@@ -586,6 +695,42 @@ def _echo_not_recommend(expected: str) -> Callable[[TurnResult], CheckResult]:
             return _fail_args("malformed_args")
         if not (result.content or "").strip():
             return _fail_used("empty_response")
+        return _ok()
+
+    return check
+
+
+def _recent_payload(result: TurnResult) -> str | None:
+    for m in result.messages:
+        if m.role == "tool" and m.tool_name == "list_recently_watched":
+            return m.content
+    return None
+
+
+def _require_recently_watched_titles(
+    *needles: str,
+) -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "list_recently_watched" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _recent_payload(result)
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        names = [m.get("name", "") for m in data.get("movies") or []]
+        content = result.content or ""
+        if not content.strip():
+            return _fail_used("empty_response")
+        grounded = any(n and n in content for n in names) or any(
+            needle in content for needle in needles
+        )
+        if not grounded:
+            return _fail_used("tool_not_used_in_answer")
         return _ok()
 
     return check
@@ -742,6 +887,30 @@ CASES: list[Case] = [
         "Echo exactly: no-movies-77",
         _echo_not_recommend("no-movies-77"),
     ),
+    Case(
+        "jellyfin_6",
+        "must_call_recently_watched",
+        "What did I watch lately from my Jellyfin library?",
+        _require_recently_watched_titles("Blade Runner", "Blade Runner 2049"),
+    ),
+    Case(
+        "calendar_1",
+        "must_call_calendar",
+        "What's on my calendar today?",
+        _require_calendar_grounded(),
+    ),
+    Case(
+        "calendar_2",
+        "calendar_offline",
+        "What's on my calendar right now?",
+        _require_calendar_offline_clear(),
+    ),
+    Case(
+        "calendar_3",
+        "must_not_call_calendar",
+        "Echo exactly: no-calendar-55",
+        _echo_not_calendar("no-calendar-55"),
+    ),
 ]
 
 
@@ -763,12 +932,14 @@ def _system_messages() -> list[ChatMessage]:
         "- `recommend_movies`: use for movie recommendations from the Jellyfin "
         "Catalogue (seed_title for 'like X', genre, mood). Never invent titles; "
         "ground picks in the tool output.\n"
+        "- `list_recently_watched`: use when asked what they watched lately / "
+        "last week; ground the answer in the tool list only.\n"
         "Call a tool when it clearly applies; otherwise answer directly.\n"
         "When both time and echo are needed, call get_server_time first, "
         "then echo the returned timestamp — never invent a time.\n"
         "Never invent weather; if get_weather fails, say so briefly.\n"
-        "Never invent movie titles; if recommend_movies fails or the catalogue "
-        "is empty, say so briefly.\n"
+        "Never invent movie titles; if recommend_movies or "
+        "list_recently_watched fails or the catalogue is empty, say so briefly.\n"
     )
     return [ChatMessage(role="system", content=text)]
 
@@ -818,6 +989,38 @@ def metric_rates(results: list[CaseResult]) -> dict[str, float]:
     }
 
 
+def _suite_calendar_ok() -> str:
+    """Deterministic calendar payload so the suite does not need a live ICS URL."""
+    return json.dumps(
+        {
+            "timezone": "Europe/Amsterdam",
+            "window": {
+                "start": "2026-08-27T08:00:00+02:00",
+                "end": "2026-08-28T00:00:00+02:00",
+            },
+            "events": [
+                {
+                    "summary": "Standup",
+                    "start": "2026-08-27T12:00:00+02:00",
+                    "end": "2026-08-27T13:00:00+02:00",
+                    "all_day": False,
+                    "location": "Office",
+                },
+                {
+                    "summary": "Away day",
+                    "start": "2026-08-27",
+                    "end": "2026-08-28",
+                    "all_day": True,
+                },
+            ],
+            "fetched_at": "2026-08-27T06:00:00+00:00",
+            "stale": False,
+            "lag_note": "feed may lag publisher (e.g. Proton share up to ~8h)",
+        },
+        separators=(",", ":"),
+    )
+
+
 def main() -> int:
     try:
         settings = load_config()
@@ -830,13 +1033,27 @@ def main() -> int:
     db.seed_catalogue_for_tests(_fixture_catalogue_movies())
     empty_dir = Path(tempfile.mkdtemp(prefix="mimir-suite-empty-"))
     empty_db = Database(empty_dir / "mimir.db")
-    registry = build_registry(settings, db=db)
+    registry = build_registry(
+        settings,
+        db=db,
+        calendar_fetch_override=_suite_calendar_ok,
+    )
     offline_reg = build_registry(
         settings,
         db=db,
         weather_fetch_override=lambda: "error: weather unavailable (offline)",
+        calendar_fetch_override=_suite_calendar_ok,
     )
-    empty_reg = build_registry(settings, db=empty_db)
+    calendar_offline_reg = build_registry(
+        settings,
+        db=db,
+        calendar_fetch_override=lambda: "error: calendar unavailable (offline)",
+    )
+    empty_reg = build_registry(
+        settings,
+        db=empty_db,
+        calendar_fetch_override=_suite_calendar_ok,
+    )
 
     print(
         f"model={settings.ollama.model} url={settings.ollama.url} "
@@ -856,6 +1073,8 @@ def main() -> int:
             print(f"… {case.id} ({case.category})", flush=True)
             if case.id == "weather_4":
                 tools = offline_reg
+            elif case.id == "calendar_2":
+                tools = calendar_offline_reg
             elif case.id == "jellyfin_4":
                 tools = empty_reg
             else:
@@ -927,6 +1146,11 @@ def main() -> int:
     if jellyfin_cases:
         j_pass = sum(1 for r in jellyfin_cases if r.passed)
         print(f"jellyfin_pinned={j_pass}/{len(jellyfin_cases)}")
+
+    calendar_cases = [r for r in results if r.id.startswith("calendar_")]
+    if calendar_cases:
+        c_pass = sum(1 for r in calendar_cases if r.passed)
+        print(f"calendar_pinned={c_pass}/{len(calendar_cases)}")
 
     if rate >= PASS_THRESHOLD:
         print(f"\nEXIT OK (>= {PASS_THRESHOLD:.0%})")

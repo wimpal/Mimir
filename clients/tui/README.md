@@ -1,7 +1,7 @@
 # clients/tui — Mimir Chat client
 
 Full-screen Textual TUI (ADR 0004): Claude/Amp-style blend chrome with a
-green Yggdrasil splash on empty sessions.
+green Yggdrasil splash on empty Conversations.
 
 ## Run (dev)
 
@@ -33,7 +33,7 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 
 - Compact status line (host / conversation) under the window caption
 - World-tree splash when the Conversation is empty; `/new` restores it
-- Each launch starts a **new** Conversation (resume-previous is backlog)
+- Each launch starts a **new** Conversation; `/history` resumes a past one; `/settings` edits Preferences
 - Highlighted user strips, bordered tool cards, Amp-style input border
 - Esc interrupts the current turn while working
 
@@ -43,8 +43,10 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 |---|---|
 | text + Enter | Send chat turn (SSE) |
 | `/new` | New Conversation |
+| `/history` | Browse and resume a past Conversation |
+| `/settings` | View and edit allowlisted Preferences |
 | `/quit` | Exit |
 | `/help` | Help |
-| Esc | Interrupt in-flight turn |
+| Esc | Interrupt in-flight turn (or dismiss `/history` / `/settings`) |
 
 State: `~/.mimir/chat_state.json` (or `MIMIR_STATE_DIR`).

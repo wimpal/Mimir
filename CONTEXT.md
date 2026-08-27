@@ -13,7 +13,7 @@ A persisted user utterance or final assistant reply in a Conversation. Tool-call
 _Avoid_: Turn (reserved for observability traces), history entry
 
 **Preference**:
-A durable key/value fact about the user, drawn from a small allowlist. The brain injects known Preferences into model context and exposes get/set via tools.
+A durable key/value fact about the user, drawn from a small allowlist. The brain injects known Preferences into model context and exposes get/set via tools and `GET/PUT /v1/preferences` (TUI `/settings`).
 _Avoid_: Setting, config, memory (as a synonym for prefs)
 
 **History window**:
@@ -45,7 +45,7 @@ A Movie the configured Jellyfin user has marked played/completed. Partial progre
 _Avoid_: Seen, started
 
 **Chat client**:
-The thin Textual TUI (`uv run mimir` / `dist/mimir.exe`) that talks only to the brain over HTTP. It may start the brain if `/health` fails, but holds no business logic and never calls Ollama, Jellyfin, or weather APIs directly. Each launch opens a new Conversation.
+The thin Textual TUI (`uv run mimir` / `dist/mimir.exe`) that talks only to the brain over HTTP. It may start the brain if `/health` fails, but holds no business logic and never calls Ollama, Jellyfin, or weather APIs directly. Each launch opens a new Conversation; `/history` resumes a past one; `/settings` edits allowlisted Preferences.
 _Avoid_: Open WebUI (as the product UI), web UI (superseded), bot, frontend with tools/prompts
 
 **Auth token**:
@@ -63,3 +63,23 @@ _Avoid_: Log line, debug dump, conversation history
 **Host-only**:
 Reachable only on the machine running the brain (loopback bind), not from other LAN devices. Used for operational endpoints such as Sync and debug traces.
 _Avoid_: Localhost-only as a synonym for “LAN”, admin network
+
+**Recent watches**:
+Movies the configured Jellyfin user played in a recent time window (about one to two weeks), used to answer “what did I watch lately” and to bias recommendations. Distinct from the boolean Watched flag alone.
+_Avoid_: Watch history (unbounded), viewing session
+
+**Box set**:
+A Jellyfin BoxSet grouping of Movies (e.g. MCU), cached on Catalogue rows at Sync time. Used to prepend “next in line” recommendations after Recent watches in that set.
+_Avoid_: Collection (ambiguous with Catalogue), franchise (informal)
+
+**Calendar feed**:
+A provider-agnostic ICS subscribe URL the brain fetches for read-only schedule data. Multiple named feeds may be configured (`calendar.feeds` + `CALENDAR_ICS_URL_<ID>`); each event is tagged with `calendar` / `calendar_name`. Not a provider SDK and not CalDAV; swapping providers means changing the URL. Names live in config.yaml — not Preferences.
+_Avoid_: Proton calendar (as the integration type), CalDAV, calendar sync engine, Preference for calendar names
+
+**Morning brief**:
+A phrase-triggered reply (e.g. “good morning”) that uses normal chat plus weather and Calendar feed tools. Not a slash command and not a proactive push.
+_Avoid_: Daily digest (as a notification), /morning
+
+**Channel allowlist**:
+Configured Discord channel snowflake IDs (optional labels) the brain may post to. The model cannot choose a target outside this list.
+_Avoid_: Server-wide access, open guild post

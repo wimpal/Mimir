@@ -124,6 +124,41 @@ def test_chat_requires_bearer_when_token_mode(tmp_path: Path) -> None:
         assert ok.json()["reply"]
 
 
+def test_conversations_list_requires_bearer_when_token_mode(tmp_path: Path) -> None:
+    s = _settings(tmp_path, auth={"mode": "token", "token": "sekrit"})
+    with _client(s) as tc:
+        denied = tc.get("/v1/conversations")
+        assert denied.status_code == 401
+        ok = tc.get(
+            "/v1/conversations",
+            headers={"Authorization": "Bearer sekrit"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["conversations"] == []
+
+
+def test_preferences_require_bearer_when_token_mode(tmp_path: Path) -> None:
+    s = _settings(tmp_path, auth={"mode": "token", "token": "sekrit"})
+    with _client(s) as tc:
+        denied_get = tc.get("/v1/preferences")
+        assert denied_get.status_code == 401
+        denied_put = tc.put("/v1/preferences/tone", json={"value": "dry"})
+        assert denied_put.status_code == 401
+        ok_get = tc.get(
+            "/v1/preferences",
+            headers={"Authorization": "Bearer sekrit"},
+        )
+        assert ok_get.status_code == 200
+        assert len(ok_get.json()["preferences"]) == 2
+        ok_put = tc.put(
+            "/v1/preferences/tone",
+            json={"value": "dry"},
+            headers={"Authorization": "Bearer sekrit"},
+        )
+        assert ok_put.status_code == 200
+        assert ok_put.json()["value"] == "dry"
+
+
 def test_sync_host_only_rejects_remote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

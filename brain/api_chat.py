@@ -7,16 +7,16 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from brain import __version__
 from brain.config import Settings
-from brain.db import Database
+from brain.db import CONVERSATIONS_LIST_DEFAULT, Database
 from brain.jellyfin_sync import SyncManager, catalogue_status_dict
 from brain.ollama import OllamaClient
-from brain.service import BrainService
+from brain.service import BrainService, PreferenceError
 
 
 class ChatMessageIn(BaseModel):
@@ -48,6 +48,38 @@ class StoredMessageOut(BaseModel):
 class ConversationMessagesOut(BaseModel):
     conversation_id: str
     messages: list[StoredMessageOut]
+
+
+class ConversationSummaryOut(BaseModel):
+    id: str
+    created_at: str
+    updated_at: str
+    preview: str
+    message_count: int
+
+
+class ConversationsListOut(BaseModel):
+    conversations: list[ConversationSummaryOut]
+    limit: int
+    count: int
+
+
+class PreferenceItemOut(BaseModel):
+    key: str
+    value: str | None = None
+
+
+class PreferencesListOut(BaseModel):
+    preferences: list[PreferenceItemOut]
+
+
+class PreferencePutIn(BaseModel):
+    value: str
+
+
+class PreferenceOut(BaseModel):
+    key: str
+    value: str
 
 
 def _sse_data(event: dict[str, Any]) -> str:
@@ -164,6 +196,30 @@ def register_chat_routes(application: FastAPI) -> None:
         )
 
     @application.get(
+        "/v1/conversations",
+        response_model=ConversationsListOut,
+    )
+    def conversations_list(
+        request: Request, limit: int = CONVERSATIONS_LIST_DEFAULT
+    ) -> ConversationsListOut:
+        service: BrainService = request.app.state.service
+        rows, effective = service.list_conversations(limit=limit)
+        return ConversationsListOut(
+            conversations=[
+                ConversationSummaryOut(
+                    id=r.id,
+                    created_at=r.created_at,
+                    updated_at=r.updated_at,
+                    preview=r.preview,
+                    message_count=r.message_count,
+                )
+                for r in rows
+            ],
+            limit=effective,
+            count=len(rows),
+        )
+
+    @application.get(
         "/v1/conversations/{conversation_id}/messages",
         response_model=ConversationMessagesOut,
     )
@@ -181,6 +237,34 @@ def register_chat_routes(application: FastAPI) -> None:
                 for m in stored
             ],
         )
+
+    @application.get(
+        "/v1/preferences",
+        response_model=PreferencesListOut,
+    )
+    def preferences_list(request: Request) -> PreferencesListOut:
+        service: BrainService = request.app.state.service
+        rows = service.list_preferences()
+        return PreferencesListOut(
+            preferences=[
+                PreferenceItemOut(key=str(r["key"]), value=r.get("value"))
+                for r in rows
+            ]
+        )
+
+    @application.put(
+        "/v1/preferences/{key}",
+        response_model=PreferenceOut,
+    )
+    def preference_put(
+        key: str, body: PreferencePutIn, request: Request
+    ) -> PreferenceOut:
+        service: BrainService = request.app.state.service
+        try:
+            stored = service.set_preference(key, body.value)
+        except PreferenceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return PreferenceOut(key=key.strip(), value=stored)
 
     @application.post(
         "/v1/chat",

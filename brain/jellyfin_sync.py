@@ -11,7 +11,7 @@ from typing import Any
 
 from brain.config import Settings, jellyfin_sync_configured
 from brain.db import Database
-from brain.jellyfin_client import JellyfinClient, JellyfinError
+from brain.jellyfin_client import JellyfinClient, JellyfinError, apply_box_sets
 
 logger = logging.getLogger("mimir.jellyfin")
 
@@ -158,26 +158,43 @@ class SyncManager:
         total = 0
         try:
             client = self._ensure_client()
+            by_id: dict[str, Any] = {}
             for library_id in self.settings.jellyfin.library_ids:
-                batch: list = []
                 for movie in client.iter_library_movies(
                     library_id,
                     deadline_monotonic=deadline,
                 ):
-                    batch.append(movie)
-                    if len(batch) >= UPSERT_BATCH_SIZE:
-                        total += self.db.upsert_movies_batch(generation, batch)
-                        batch = []
+                    by_id[movie.jellyfin_id] = movie
                     if time.monotonic() >= deadline:
                         raise JellyfinError("sync deadline exceeded")
-                if batch:
+
+            membership: dict = {}
+            try:
+                membership = client.build_box_set_membership(
+                    set(by_id),
+                    deadline_monotonic=deadline,
+                )
+            except JellyfinError as exc:
+                logger.warning("jellyfin box set sync skipped: %s", exc)
+            except Exception:  # noqa: BLE001 — soft-fail Box sets; keep movies
+                logger.exception("jellyfin box set sync crashed; continuing without")
+
+            enriched = apply_box_sets(by_id, membership)
+            batch: list = []
+            for movie in enriched:
+                batch.append(movie)
+                if len(batch) >= UPSERT_BATCH_SIZE:
                     total += self.db.upsert_movies_batch(generation, batch)
+                    batch = []
+            if batch:
+                total += self.db.upsert_movies_batch(generation, batch)
 
             self.db.publish_sync_generation(generation, items_upserted=total)
             logger.info(
-                "jellyfin sync ok generation=%s items=%s",
+                "jellyfin sync ok generation=%s items=%s box_set_links=%s",
                 generation,
                 total,
+                sum(1 for m in enriched if m.box_sets),
             )
             return SyncResult(
                 ok=True,

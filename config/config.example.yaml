@@ -2,7 +2,7 @@
 #
 # Copy to config/config.yaml and adjust (that copy is gitignored).
 # Precedence: MIMIR_* environment variables override this file;
-# secrets (Jellyfin API key, auth token) come from .env / environment only.
+# secrets (Jellyfin API key, auth token, Calendar ICS URL) come from .env / environment only.
 
 ollama:
   url: http://127.0.0.1:11434
@@ -28,6 +28,7 @@ jellyfin:
   library_ids: []  # allowlisted movie library GUIDs only
   sync_interval_hours: 24  # 0 = periodic Sync off (on-demand still works)
   page_size: 100
+  recent_watched_days: 14  # Recent watches window for list tool + rec bias
 
 auth:
   # none | token — token required when runtime.host is not loopback (ADR 0005).
@@ -50,6 +51,20 @@ timeouts:
 weather:
   # Forecast cache TTL (seconds). Serve last success marked stale when API fails.
   cache_ttl_s: 3600
+
+calendar:
+  # Named feeds (id + display name). ICS URLs are secrets in .env:
+  #   CALENDAR_ICS_URL_<ID>  (ID uppercased, hyphens → underscores)
+  # Optional per-feed basic auth: CALENDAR_ICS_USERNAME_<ID> / _PASSWORD_<ID>
+  # Legacy single feed still works via CALENDAR_ICS_URL (no feeds list).
+  cache_ttl_s: 300
+  feeds: []
+  # Example:
+  # feeds:
+  #   - id: family
+  #     name: Fam Palland
+  #   - id: personal
+  #     name: Personal
 
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).

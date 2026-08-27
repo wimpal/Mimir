@@ -9,11 +9,17 @@ from brain.config import Settings
 from brain.db import Database
 from brain.prefs import (
     ALLOWED_KEYS,
+    PREFERENCE_KEYS,
     build_system_prompt,
     format_prefs_block,
     normalize_preference_value,
 )
 from brain.tools import build_registry, dispatch
+
+
+def test_preference_keys_order() -> None:
+    assert PREFERENCE_KEYS == ("favorite_genres", "tone")
+    assert ALLOWED_KEYS == frozenset(PREFERENCE_KEYS)
 
 
 def test_normalize_favorite_genres() -> None:

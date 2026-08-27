@@ -168,6 +168,130 @@ def test_seed_overlap_year_when_no_genres(tmp_path: Path) -> None:
     assert out["filters"]["seed_overlap"] == "year"
 
 
+def test_recent_genre_bias_ranks_matching_higher(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    settings = _settings(tmp_path)
+    db = Database(settings.runtime.data_dir / "mimir.db")
+    recent_at = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.seed_catalogue_for_tests(
+        [
+            Movie(
+                jellyfin_id="watched",
+                name="Recent Horror",
+                genres=["horror"],
+                played=True,
+                last_played_at=recent_at,
+                community_rating=5.0,
+            ),
+            Movie(
+                jellyfin_id="horror_pick",
+                name="Another Scare",
+                genres=["horror"],
+                played=False,
+                community_rating=6.0,
+            ),
+            Movie(
+                jellyfin_id="comedy_pick",
+                name="Funny Film",
+                genres=["comedy"],
+                played=False,
+                community_rating=9.0,
+            ),
+        ]
+    )
+    out = json.loads(recommend_movies(db, settings, unwatched_only=True))
+    assert out["filters"]["play_dates_available"] is True
+    assert "horror" in out["filters"]["recent_genre_bias"]
+    ids = [m["id"] for m in out["movies"]]
+    assert ids[0] == "horror_pick"
+
+
+def test_box_set_next_prepended_then_genre_outside(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from brain.db import BoxSetRef
+
+    settings = _settings(tmp_path)
+    db = Database(settings.runtime.data_dir / "mimir.db")
+    mcu = BoxSetRef(id="mcu", name="MCU")
+    recent_at = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.seed_catalogue_for_tests(
+        [
+            Movie(
+                jellyfin_id="im",
+                name="Iron Man",
+                year=2008,
+                genres=["action", "sci-fi"],
+                played=True,
+                last_played_at=recent_at,
+                box_sets=(mcu,),
+                community_rating=7.0,
+            ),
+            Movie(
+                jellyfin_id="im2",
+                name="Iron Man 2",
+                year=2010,
+                genres=["action", "sci-fi"],
+                played=True,
+                last_played_at=recent_at,
+                box_sets=(mcu,),
+                community_rating=6.5,
+            ),
+            Movie(
+                jellyfin_id="ca",
+                name="Captain America",
+                year=2011,
+                genres=["action", "sci-fi"],
+                played=False,
+                box_sets=(mcu,),
+                community_rating=7.5,
+            ),
+            Movie(
+                jellyfin_id="av",
+                name="The Avengers",
+                year=2012,
+                genres=["action", "sci-fi"],
+                played=False,
+                box_sets=(mcu,),
+                community_rating=8.0,
+            ),
+            Movie(
+                jellyfin_id="other_action",
+                name="Die Hard",
+                year=1988,
+                genres=["action"],
+                played=False,
+                community_rating=9.0,
+            ),
+            Movie(
+                jellyfin_id="other_mcu_late",
+                name="Endgame",
+                year=2019,
+                genres=["action", "sci-fi"],
+                played=False,
+                box_sets=(mcu,),
+                community_rating=9.5,
+            ),
+        ]
+    )
+    out = json.loads(recommend_movies(db, settings, unwatched_only=True))
+    assert out["filters"]["box_set_id"] == "mcu"
+    assert out["filters"]["box_set_name"] == "MCU"
+    assert out["filters"]["box_set_next_count"] >= 1
+    ids = [m["id"] for m in out["movies"]]
+    assert ids[0] == "ca"
+    assert out["movies"][0].get("box_set_next") is True
+    # Chronological next MCU titles in the head; non-MCU same-genre in the tail
+    head_ids = {m["id"] for m in out["movies"] if m.get("box_set_next")}
+    assert head_ids <= {"ca", "av", "other_mcu_late"}
+    assert "ca" in head_ids
+    tail = [m for m in out["movies"] if not m.get("box_set_next")]
+    assert any(m["id"] == "other_action" for m in tail)
+    assert all(m["id"] != "other_mcu_late" or m.get("box_set_next") for m in out["movies"])
+    assert all(m["id"] != "other_mcu_late" for m in tail)
+
+
 def test_resolve_seed_helpers() -> None:
     movies = [
         Movie(jellyfin_id="1", name="Alpha", year=2000),

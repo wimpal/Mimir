@@ -16,7 +16,7 @@ integration pointed at the brain. **Do not** use HA’s native Ollama agent.
 | Does core **OpenAI Conversation** accept an arbitrary base URL? | **Fail** — official docs: works only with the official OpenAI API endpoint |
 | Can we use HA’s **native Ollama** conversation agent for Mimir? | **Fail / forbidden** — would talk to Ollama directly and **bypass Mimir tools** |
 
-**Recommended path for Phase 9:** install a HACS OpenAI-compatible conversation
+**Recommended path for Phase 10:** install a HACS OpenAI-compatible conversation
 integration that supports a custom API base URL, point it at
 `http://<mimir-host>:8000/v1`, and select that agent in Assist. Prefer
 integrations that can run **completion-only** (or allow disabling HA-side tools)
@@ -47,7 +47,7 @@ Source: [OpenAI Conversation](https://www.home-assistant.io/integrations/openai_
 ## Working path: custom base URL integrations
 
 Community / HACS options that accept a custom base URL (examples; verify
-current maintenance before Phase 9):
+current maintenance before Phase 10):
 
 | Integration | Notes |
 |---|---|
@@ -104,7 +104,7 @@ Do **not** “fix” conflicts by pointing HA at Ollama.
 
 ---
 
-## Phase 9 checklist (when voice starts)
+## Phase 10 checklist (when voice starts)
 
 - [ ] Pick one maintained HACS OpenAI-compatible integration
 - [ ] Point base URL at Mimir `/v1`; confirm `/v1/models` discovery

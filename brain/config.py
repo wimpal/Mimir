@@ -4,7 +4,8 @@ Layered config, fail-loud:
 
 1. YAML file (non-secrets): `MIMIR_CONFIG` path or `config/config.yaml`
 2. `MIMIR_*` environment variables override YAML (container-friendly)
-3. Secrets come from `.env` / environment only (`JELLYFIN_API_KEY`, `MIMIR_AUTH_TOKEN`)
+3. Secrets come from `.env` / environment only (`JELLYFIN_API_KEY`, `MIMIR_AUTH_TOKEN`,
+   `CALENDAR_ICS_URL`, …)
 
 Proof command: `uv run python -m brain.config` prints a redacted summary.
 """
@@ -19,7 +20,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 DEFAULT_CONFIG_PATH = Path("config/config.yaml")
 
@@ -68,6 +69,7 @@ class JellyfinSettings(_Strict):
     library_ids: list[str] = Field(default_factory=list)
     sync_interval_hours: float = 24.0  # 0 = periodic Sync off
     page_size: int = 100
+    recent_watched_days: int = 14  # Recent watches window for tools / rec bias
 
 
 class AuthSettings(_Strict):
@@ -106,6 +108,122 @@ class WeatherSettings(_Strict):
     cache_ttl_s: float = 3600.0  # Forecast cache TTL when Open-Meteo fails
 
 
+class CalendarFeedSettings(_Strict):
+    """One named Calendar feed. URL/auth secrets come from env (see load_config)."""
+
+    id: str
+    name: str
+    url: str | None = None  # secret: CALENDAR_ICS_URL_<ID>
+    username: str | None = None  # secret: CALENDAR_ICS_USERNAME_<ID>
+    password: str | None = None  # secret: CALENDAR_ICS_PASSWORD_<ID>
+
+    @field_validator("id")
+    @classmethod
+    def _id_shape(cls, value: str) -> str:
+        text = (value or "").strip()
+        if not text or not all(c.isalnum() or c in "_-" for c in text):
+            raise ValueError(
+                "calendar feed id must be non-empty alphanumeric/underscore/hyphen"
+            )
+        if not text[0].isalpha():
+            raise ValueError("calendar feed id must start with a letter")
+        return text
+
+    @field_validator("name")
+    @classmethod
+    def _name_nonempty(cls, value: str) -> str:
+        text = (value or "").strip()
+        if not text:
+            raise ValueError("calendar feed name must be non-empty")
+        return text
+
+
+class CalendarSettings(_Strict):
+    # Legacy single-feed secrets (CALENDAR_ICS_URL) — used when feeds is empty.
+    url: str | None = None
+    username: str | None = None
+    password: str | None = None
+    cache_ttl_s: float = 300.0
+    feeds: list[CalendarFeedSettings] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_feed_ids(self) -> CalendarSettings:
+        ids = [f.id.lower() for f in self.feeds]
+        if len(ids) != len(set(ids)):
+            raise ValueError("calendar.feeds ids must be unique")
+        return self
+
+
+@dataclass(frozen=True)
+class ResolvedCalendarFeed:
+    """Feed ready for fetch: has a non-empty URL."""
+
+    id: str
+    name: str
+    url: str
+    username: str | None
+    password: str | None
+
+
+def calendar_feed_env_suffix(feed_id: str) -> str:
+    """Map feed id → env suffix (family → FAMILY)."""
+    return feed_id.strip().upper().replace("-", "_")
+
+
+def resolved_calendar_feeds(settings: CalendarSettings) -> list[ResolvedCalendarFeed]:
+    """Named feeds with URLs, or a legacy single feed from calendar.url.
+
+    When ``feeds`` is non-empty, only those entries with URLs are returned — legacy
+    ``calendar.url`` is not a fallback beside named feeds.
+    """
+    if settings.feeds:
+        out: list[ResolvedCalendarFeed] = []
+        for feed in settings.feeds:
+            url = (feed.url or "").strip()
+            if not url:
+                continue
+            out.append(
+                ResolvedCalendarFeed(
+                    id=feed.id,
+                    name=feed.name,
+                    url=url,
+                    username=feed.username,
+                    password=feed.password,
+                )
+            )
+        return out
+
+    legacy = (settings.url or "").strip()
+    if legacy:
+        return [
+            ResolvedCalendarFeed(
+                id="default",
+                name="Calendar",
+                url=legacy,
+                username=settings.username,
+                password=settings.password,
+            )
+        ]
+    return []
+
+
+def calendar_feeds_declared(settings: CalendarSettings) -> list[CalendarFeedSettings]:
+    """Feeds listed in YAML (may lack URLs yet), or a synthetic legacy slot."""
+    if settings.feeds:
+        return list(settings.feeds)
+    if (settings.url or "").strip():
+        return [
+            CalendarFeedSettings(
+                id="default",
+                name="Calendar",
+                url=settings.url,
+                username=settings.username,
+                password=settings.password,
+            )
+        ]
+    return []
+
+
 class MemorySettings(_Strict):
     history_pairs: int = 20  # last N user+assistant pairs injected under num_ctx
 
@@ -119,6 +237,7 @@ class Settings(_Strict):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
+    calendar: CalendarSettings = Field(default_factory=CalendarSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
 
 
@@ -172,12 +291,18 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "turn_s"): "MIMIR_TIMEOUT_TURN_S",
     ("timeouts", "jellyfin_sync_s"): "MIMIR_JELLYFIN_SYNC_TIMEOUT_S",
     ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",
+    ("calendar", "cache_ttl_s"): "MIMIR_CALENDAR_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
 }
 
 _SECRET_ENV: dict[str, dict[str, str]] = {
     "jellyfin": {"api_key": "JELLYFIN_API_KEY"},
     "auth": {"token": "MIMIR_AUTH_TOKEN"},
+    "calendar": {
+        "url": "CALENDAR_ICS_URL",
+        "username": "CALENDAR_ICS_USERNAME",
+        "password": "CALENDAR_ICS_PASSWORD",
+    },
 }
 
 
@@ -229,6 +354,8 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
             if value is not None:
                 target[key] = value
 
+    _apply_calendar_feed_secrets(data, cfg_path)
+
     try:
         settings = Settings.model_validate(data)
     except ValidationError as exc:
@@ -236,6 +363,31 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
 
     validate_bind_auth(settings)
     return settings
+
+
+def _apply_calendar_feed_secrets(data: dict, cfg_path: Path) -> None:
+    """Overlay CALENDAR_ICS_URL_<ID> (and username/password) onto calendar.feeds."""
+    cal = data.get("calendar")
+    if not isinstance(cal, dict):
+        return
+    feeds = cal.get("feeds")
+    if not isinstance(feeds, list):
+        return
+    for feed in feeds:
+        if not isinstance(feed, dict):
+            raise ConfigError(f"{cfg_path}: calendar.feeds entries must be mappings")
+        raw_id = feed.get("id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            continue
+        suffix = calendar_feed_env_suffix(raw_id)
+        for key, prefix in (
+            ("url", "CALENDAR_ICS_URL_"),
+            ("username", "CALENDAR_ICS_USERNAME_"),
+            ("password", "CALENDAR_ICS_PASSWORD_"),
+        ):
+            value = os.environ.get(f"{prefix}{suffix}")
+            if value is not None:
+                feed[key] = value
 
 
 def jellyfin_sync_configured(settings: Settings) -> bool:
@@ -256,6 +408,22 @@ def redacted_view(settings: Settings) -> dict:
         data["jellyfin"]["api_key"] = "***set***"
     if data["auth"].get("token"):
         data["auth"]["token"] = "***set***"
+    cal = data.get("calendar") or {}
+    if cal.get("url"):
+        cal["url"] = "***set***"
+    if cal.get("username"):
+        cal["username"] = "***set***"
+    if cal.get("password"):
+        cal["password"] = "***set***"
+    for feed in cal.get("feeds") or []:
+        if not isinstance(feed, dict):
+            continue
+        if feed.get("url"):
+            feed["url"] = "***set***"
+        if feed.get("username"):
+            feed["username"] = "***set***"
+        if feed.get("password"):
+            feed["password"] = "***set***"
     return data
 
 

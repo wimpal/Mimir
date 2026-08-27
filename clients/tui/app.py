@@ -22,15 +22,19 @@ from clients.tui.brain_client import (
     normalize_brain_url,
 )
 from clients.tui.brain_launcher import ensure_brain_running
+from clients.tui.history import HistoryScreen
+from clients.tui.settings import SettingsScreen
 from clients.tui.splash import Splash
 from clients.tui.state import ChatState, save_state
 from clients.tui.window_title import set_console_title
 
 HELP_TEXT = """Commands:
-  /new   — start a new Conversation
-  /quit  — exit
-  /help  — show this help
-  Esc    — interrupt the current turn while working
+  /new      — start a new Conversation
+  /history  — browse and resume a past Conversation
+  /settings — view and edit Preferences
+  /quit     — exit
+  /help     — show this help
+  Esc       — interrupt the current turn while working
 
 Chat normally by typing a message and pressing Enter.
 If the brain is down, Mimir tries to start it (needs `uv` + repo)."""
@@ -229,7 +233,10 @@ class MimirApp(App[None]):
         self._client: BrainClient | None = None
         self._conversation_id: str | None = None
         self._busy = False
+        self._busy_kind: str | None = None
         self._restore_gen = 0
+        self._history_gen = 0
+        self._settings_gen = 0
         self._stream_task: asyncio.Task[None] | None = None
         self._assistant_widget: Static | None = None
         self._assistant_text = ""
@@ -244,7 +251,10 @@ class MimirApp(App[None]):
         yield Static("", id="work-status", classes="hidden")
         with Vertical(id="input-wrap"):
             yield Input(placeholder="Message Mimir…", id="input")
-        yield Static("/new  /help  /quit  ·  Esc interrupt", id="hints")
+        yield Static(
+            "/new  /history  /settings  /help  /quit  ·  Esc interrupt",
+            id="hints",
+        )
 
     def on_mount(self) -> None:
         set_console_title("Mimir")
@@ -252,13 +262,12 @@ class MimirApp(App[None]):
         self._client = BrainClient(
             self.brain_url, turn_timeout_s=self.turn_timeout_s
         )
-        # Always start a fresh Conversation; saved id kept for a future /resume.
+        # Always start a fresh Conversation; resume is explicit via /history.
         self._conversation_id = None
         self._persist()
-        self._refresh_meta("connecting…")
         self._show_splash(True)
-        self._set_work_status(None)
-        self.query_one("#input", Input).focus()
+        self._set_busy(True, note="Connecting…", kind="startup")
+        self._focus_input()
         self._startup()
 
     async def on_unmount(self) -> None:
@@ -305,15 +314,36 @@ class MimirApp(App[None]):
             self.state_path,
         )
 
-    def _set_busy(self, busy: bool, *, note: str | None = None) -> None:
+    def _focus_input(self) -> None:
+        self.query_one("#input", Input).focus()
+
+    def _set_busy(
+        self,
+        busy: bool,
+        *,
+        note: str | None = None,
+        kind: str | None = None,
+    ) -> None:
         self._busy = busy
+        self._busy_kind = kind if busy else None
         inp = self.query_one("#input", Input)
-        inp.disabled = busy
+        # Keep the field usable during connect so typing works on open.
+        inp.disabled = busy and kind != "startup"
         if busy:
-            self._set_work_status(
-                note or "Working… (esc to interrupt)"
-            )
-            self._refresh_meta("working")
+            if kind == "startup":
+                self._set_work_status(note or "Connecting…")
+                self._refresh_meta("connecting…")
+            elif kind == "history":
+                self._set_work_status(note or "Loading history…")
+                self._refresh_meta("working")
+            elif kind == "settings":
+                self._set_work_status(note or "Loading settings…")
+                self._refresh_meta("working")
+            else:
+                self._set_work_status(
+                    note or "Working… (esc to interrupt)"
+                )
+                self._refresh_meta("working")
         else:
             self._set_work_status(None)
             self._refresh_meta("ready")
@@ -331,11 +361,28 @@ class MimirApp(App[None]):
     async def action_interrupt(self) -> None:
         if not self._busy:
             return
+        kind = self._busy_kind
+        if kind == "startup":
+            return
+        if kind == "history":
+            self._history_gen += 1
+            self._restore_gen += 1
+            self._set_busy(False)
+            self._focus_input()
+            return
+        if kind == "settings":
+            self._settings_gen += 1
+            self._set_busy(False)
+            self._focus_input()
+            return
+        self._history_gen += 1
+        self._settings_gen += 1
+        self._restore_gen += 1
         await self._cancel_stream()
         self._hide_splash_for_chat()
         self._transcript().append_system("Interrupted.")
         self._set_busy(False)
-        self.query_one("#input", Input).focus()
+        self._focus_input()
 
     @work(exclusive=True)
     async def _startup(self) -> None:
@@ -352,7 +399,8 @@ class MimirApp(App[None]):
                 self._hide_splash_for_chat()
                 self._transcript().append_error(result.message)
                 self._refresh_meta("offline")
-                self._set_work_status(None)
+                self._set_busy(False)
+                self._focus_input()
                 return
             try:
                 health = await self._client.health()
@@ -362,7 +410,8 @@ class MimirApp(App[None]):
                     f"Brain still unreachable: {exc}"
                 )
                 self._refresh_meta("offline")
-                self._set_work_status(None)
+                self._set_busy(False)
+                self._focus_input()
                 return
 
         if health.status != "ok":
@@ -372,7 +421,14 @@ class MimirApp(App[None]):
         else:
             self._refresh_meta("ready")
 
-        self._set_busy(False)
+        # Don't clear busy if /history or /settings already owns the UI.
+        if (
+            self._history_gen == 0
+            and self._settings_gen == 0
+            and self._busy_kind == "startup"
+        ):
+            self._set_busy(False)
+            self._focus_input()
 
     async def _restore_history(self) -> None:
         assert self._client is not None
@@ -406,6 +462,8 @@ class MimirApp(App[None]):
                 self._transcript().append_assistant(content)
 
     def _new_conversation(self) -> None:
+        self._history_gen += 1
+        self._settings_gen += 1
         self._restore_gen += 1
         self._conversation_id = None
         self._persist()
@@ -415,10 +473,16 @@ class MimirApp(App[None]):
         self._refresh_meta("ready")
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = (event.value or "").strip()
-        event.input.value = ""
-        if not text or self._busy:
+        # Ignore nested Inputs (e.g. /settings modal owns its own field).
+        if event.input.id != "input":
             return
+        text = (event.value or "").strip()
+        if not text:
+            return
+        # Don't wipe typed text if Enter lands during connect / another busy state.
+        if self._busy:
+            return
+        event.input.value = ""
 
         if text.startswith("/"):
             await self._handle_command(text)
@@ -435,6 +499,12 @@ class MimirApp(App[None]):
             await self._cancel_stream()
             self._new_conversation()
             return
+        if cmd == "/history":
+            self._open_history()
+            return
+        if cmd == "/settings":
+            self._open_settings()
+            return
         if cmd == "/help":
             self._hide_splash_for_chat()
             self._transcript().append_system(HELP_TEXT)
@@ -443,6 +513,112 @@ class MimirApp(App[None]):
         self._transcript().append_error(
             f"Unknown command: {cmd}. Try /help."
         )
+
+    @work
+    async def _open_history(self) -> None:
+        assert self._client is not None
+        self._history_gen += 1
+        op = self._history_gen
+        self._restore_gen += 1
+        self._set_busy(True, note="Loading history…", kind="history")
+        try:
+            try:
+                rows = await self._client.list_conversations()
+            except BrainClientError as exc:
+                if op != self._history_gen:
+                    return
+                self._hide_splash_for_chat()
+                self._transcript().append_error(
+                    f"Could not load history: {exc}"
+                )
+                return
+            if op != self._history_gen:
+                return
+            if not rows:
+                self._hide_splash_for_chat()
+                self._transcript().append_system("No past Conversations.")
+                return
+            self._set_work_status(None)
+            selected = await self.push_screen_wait(HistoryScreen(rows))
+            if op != self._history_gen:
+                return
+            if not selected:
+                return
+            self._set_work_status("Restoring…")
+            await self._resume_conversation(selected, history_gen=op)
+        finally:
+            if op == self._history_gen:
+                self._set_busy(False)
+                self._focus_input()
+
+    @work
+    async def _open_settings(self) -> None:
+        assert self._client is not None
+        self._settings_gen += 1
+        op = self._settings_gen
+        self._set_busy(True, note="Loading settings…", kind="settings")
+        try:
+            try:
+                rows = await self._client.get_preferences()
+            except BrainClientError as exc:
+                if op != self._settings_gen:
+                    return
+                self._hide_splash_for_chat()
+                self._transcript().append_error(
+                    f"Could not load preferences: {exc}"
+                )
+                return
+            if op != self._settings_gen:
+                return
+            if not rows:
+                self._hide_splash_for_chat()
+                self._transcript().append_system("No preferences available.")
+                return
+            self._set_work_status(None)
+            edited = await self.push_screen_wait(SettingsScreen(rows))
+            if op != self._settings_gen:
+                return
+            if not edited:
+                return
+            self._set_work_status("Saving…")
+            try:
+                saved = await self._client.put_preference(
+                    edited.key, edited.value
+                )
+            except BrainClientError as exc:
+                if op != self._settings_gen:
+                    return
+                self._hide_splash_for_chat()
+                self._transcript().append_error(
+                    f"Could not save preference: {exc}"
+                )
+                return
+            if op != self._settings_gen:
+                return
+            self._hide_splash_for_chat()
+            stored = saved.get("value", edited.value)
+            self._transcript().append_system(
+                f"Preference saved: {edited.key} = {stored}"
+            )
+        finally:
+            if op == self._settings_gen:
+                self._set_busy(False)
+                self._focus_input()
+
+    async def _resume_conversation(
+        self, conversation_id: str, *, history_gen: int
+    ) -> None:
+        if history_gen != self._history_gen:
+            return
+        self._conversation_id = conversation_id.strip()
+        self._persist()
+        self._transcript().remove_children()
+        self._refresh_meta("restoring…")
+        self._set_work_status("Restoring…")
+        await self._restore_history()
+        if history_gen != self._history_gen:
+            return
+        self._refresh_meta("ready")
 
     async def _send_message(self, text: str) -> None:
         assert self._client is not None
@@ -454,7 +630,9 @@ class MimirApp(App[None]):
         tr.append_user(text)
         self._assistant_text = ""
         self._assistant_widget = tr.append_assistant("")
-        self._set_busy(True, note="Working… (esc to interrupt)")
+        self._set_busy(
+            True, note="Working… (esc to interrupt)", kind="stream"
+        )
 
         async def run_stream() -> None:
             assert self._client is not None
@@ -506,13 +684,14 @@ class MimirApp(App[None]):
             finally:
                 self._stream_task = None
                 self._set_busy(False)
-                self.query_one("#input", Input).focus()
+                self._focus_input()
 
         self._stream_task = asyncio.create_task(run_stream())
         try:
             await self._stream_task
         except asyncio.CancelledError:
             self._set_busy(False)
+            self._focus_input()
 
 
 def build_parser() -> argparse.ArgumentParser:

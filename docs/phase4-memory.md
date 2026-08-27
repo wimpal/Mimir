@@ -17,7 +17,7 @@ Persisted **Messages** = user text + final assistant reply (including user-facin
 
 **History window:** last `memory.history_pairs` (default **20**) user+assistant pairs from SQLite; full history retained.
 
-**Preferences:** allowlist `favorite_genres`, `tone`. Tools `get_preference` / `set_preference`; inject a “Known preferences” block into the system prompt; refresh mid-turn after a successful set.
+**Preferences:** allowlist `favorite_genres`, `tone`. Tools `get_preference` / `set_preference`; HTTP `GET/PUT /v1/preferences` (TUI `/settings`, Phase 8c — see [`phase8c-settings.md`](./phase8c-settings.md)); inject a “Known preferences” block into the system prompt; refresh mid-turn after a successful set.
 
 ## Schema
 

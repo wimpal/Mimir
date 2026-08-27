@@ -69,6 +69,9 @@ def test_successful_sync_replaces_catalogue(tmp_path: Path) -> None:
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if params.get("IncludeItemTypes") == "BoxSet":
+            return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0})
         return httpx.Response(
             200,
             json={

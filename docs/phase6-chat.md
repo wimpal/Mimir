@@ -13,6 +13,7 @@ See also: [`CONTEXT.md`](../CONTEXT.md),
 |---|---|
 | `POST /v1/chat` `stream:false` | JSON reply |
 | `POST /v1/chat` `stream:true` | SSE: `meta` → `tool_*` → `token`+ → `done` / `error` |
+| `GET /v1/conversations` | List Conversations (preview + timestamps); empty rows omitted |
 | `GET /v1/conversations/{id}/messages` | Full Conversation Messages; unknown id → `[]` (no create) |
 | `POST /v1/chat/completions` `stream:true` | Still **501** |
 
@@ -22,8 +23,8 @@ See also: [`CONTEXT.md`](../CONTEXT.md),
 - Base URL: `--url` / `MIMIR_BRAIN_URL` (default `http://127.0.0.1:8000`)
 - On launch: `GET /health`; if brain down, start `uv run uvicorn` from the repo
   (`MIMIR_REPO_ROOT` or discover); brain stays up after TUI exit
-- Each launch starts a **new** Conversation (auto-resume backlog); `/new` mid-session
-- Slash commands: `/new`, `/quit`, `/help`; Esc interrupts in-flight turn
+- Each launch starts a **new** Conversation; `/history` resumes a past one (Phase 8b); `/settings` edits Preferences (Phase 8c); `/new` clears the current Conversation
+- Slash commands: `/new`, `/history`, `/settings`, `/quit`, `/help`; Esc interrupts in-flight turn
 - Blend chrome: world-tree splash, bordered input, tool cards, green accent
 - Tokens may arrive as a post-tool-loop burst (brain contract)
 

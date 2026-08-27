@@ -127,6 +127,9 @@ def test_jellyfin_sync_ok(tmp_path: Path) -> None:
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if params.get("IncludeItemTypes") == "BoxSet":
+            return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0})
         return httpx.Response(
             200,
             json={
@@ -281,6 +284,48 @@ def test_conversation_messages_empty_unknown(settings: Settings) -> None:
     assert db.message_count("does-not-exist") == 0
 
 
+def test_conversations_list_empty(settings: Settings) -> None:
+    with _client(settings, ScriptedOllama([])) as tc:
+        resp = tc.get("/v1/conversations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["conversations"] == []
+    assert body["count"] == 0
+    assert body["limit"] == 50
+
+
+def test_conversations_list_shape_and_clamp(settings: Settings) -> None:
+    ollama = ScriptedOllama(
+        [
+            ChatMessage(role="assistant", content="a"),
+            ChatMessage(role="assistant", content="b"),
+        ]
+    )
+    with _client(settings, ollama) as tc:
+        r1 = tc.post("/v1/chat", json={"message": "alpha topic"})
+        cid_a = r1.json()["conversation_id"]
+        r2 = tc.post("/v1/chat", json={"message": "beta topic"})
+        cid_b = r2.json()["conversation_id"]
+        resp = tc.get("/v1/conversations?limit=1")
+        all_rows = tc.get("/v1/conversations")
+        clamped = tc.get("/v1/conversations?limit=999")
+        over_zero = tc.get("/v1/conversations?limit=0")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["limit"] == 1
+    assert body["count"] == 1
+    assert len(body["conversations"]) == 1
+    row = body["conversations"][0]
+    assert set(row) >= {"id", "created_at", "updated_at", "preview", "message_count"}
+    assert row["id"] in {cid_a, cid_b}
+    assert row["preview"] in {"alpha topic", "beta topic"}
+    assert row["message_count"] >= 2
+    ids = {c["id"] for c in all_rows.json()["conversations"]}
+    assert ids == {cid_a, cid_b}
+    assert clamped.json()["limit"] == 200
+    assert over_zero.json()["limit"] == 1
+
+
 def test_conversation_messages_full_history(settings: Settings) -> None:
     ollama = ScriptedOllama(
         [
@@ -302,6 +347,47 @@ def test_conversation_messages_full_history(settings: Settings) -> None:
         ("assistant", "two"),
     ]
     assert all(m.get("created_at") for m in msgs)
+
+
+def test_preferences_list_empty_keys(settings: Settings) -> None:
+    with _client(settings, ScriptedOllama([])) as tc:
+        resp = tc.get("/v1/preferences")
+    assert resp.status_code == 200
+    body = resp.json()
+    prefs = body["preferences"]
+    assert [p["key"] for p in prefs] == ["favorite_genres", "tone"]
+    assert all(p["value"] is None for p in prefs)
+
+
+def test_preferences_put_roundtrip_and_errors(settings: Settings) -> None:
+    with _client(settings, ScriptedOllama([])) as tc:
+        ok = tc.put("/v1/preferences/tone", json={"value": "  dry  "})
+        assert ok.status_code == 200
+        assert ok.json() == {"key": "tone", "value": "dry"}
+
+        genres = tc.put(
+            "/v1/preferences/favorite_genres",
+            json={"value": "sci-fi, drama"},
+        )
+        assert genres.status_code == 200
+        assert genres.json()["value"] == '["sci-fi","drama"]'
+
+        listed = tc.get("/v1/preferences")
+        assert listed.status_code == 200
+        by_key = {p["key"]: p["value"] for p in listed.json()["preferences"]}
+        assert by_key["tone"] == "dry"
+        assert by_key["favorite_genres"] == '["sci-fi","drama"]'
+
+        bad_key = tc.put("/v1/preferences/nope", json={"value": "x"})
+        assert bad_key.status_code == 400
+        assert "unknown" in bad_key.json()["detail"].lower()
+
+        bad_val = tc.put("/v1/preferences/tone", json={"value": "   "})
+        assert bad_val.status_code == 400
+        assert "invalid" in bad_val.json()["detail"].lower()
+
+        bad_body = tc.put("/v1/preferences/tone", json={})
+        assert bad_body.status_code == 422
 
 
 def test_chat_missing_message_400(settings: Settings) -> None:
@@ -364,7 +450,7 @@ def test_db_schema_version(tmp_path: Path) -> None:
     db = Database(tmp_path / "mimir.db")
     assert db.ping() is True
     assert db.schema_version() == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 2
+    assert SCHEMA_VERSION == 4
 
 
 def test_load_system_prompt(tmp_path: Path) -> None:

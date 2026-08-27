@@ -12,13 +12,28 @@ from typing import Any
 
 from brain.agent import StoppedReason, TurnResult, run_turn
 from brain.config import Settings
-from brain.db import Database, StoredMessage
+from brain.db import (
+    CONVERSATIONS_LIST_DEFAULT,
+    ConversationSummary,
+    Database,
+    StoredMessage,
+    clamp_conversations_limit,
+)
 from brain.ollama import ChatMessage, OllamaClient
-from brain.prefs import build_system_prompt
+from brain.prefs import (
+    ALLOWED_KEYS,
+    PREFERENCE_KEYS,
+    build_system_prompt,
+    normalize_preference_value,
+)
 from brain.tools import Tool, build_registry
 from brain.turn_log import append_turn_trace
 
 logger = logging.getLogger("mimir.service")
+
+
+class PreferenceError(ValueError):
+    """Unknown key or invalid Preference value (maps to HTTP 400)."""
 
 MSG_OLLAMA_DOWN = "The brain can't reach the language model right now."
 MSG_TURN_TIMEOUT = "That request took too long and was stopped. Please try again."
@@ -164,6 +179,41 @@ class BrainService:
         if cid is None:
             return []
         return self.db.list_messages(cid)
+
+    def list_conversations(
+        self, *, limit: int = CONVERSATIONS_LIST_DEFAULT
+    ) -> tuple[list[ConversationSummary], int]:
+        """List Conversations for `/history`. Returns (rows, effective_limit)."""
+        capped = clamp_conversations_limit(limit)
+        if self.db is None:
+            return [], capped
+        return self.db.list_conversations(limit=capped), capped
+
+    def list_preferences(self) -> list[dict[str, str | None]]:
+        """Allowlisted Preferences in ``PREFERENCE_KEYS`` order; unset → null."""
+        stored: dict[str, str] = {}
+        if self.db is not None:
+            stored = self.db.get_preferences()
+        return [
+            {"key": key, "value": stored.get(key)}
+            for key in PREFERENCE_KEYS
+        ]
+
+    def set_preference(self, key: str, value: str) -> str:
+        """Normalize and store a Preference. Raises ``PreferenceError`` on bad input."""
+        key = (key or "").strip()
+        if key not in ALLOWED_KEYS:
+            allowed = ", ".join(PREFERENCE_KEYS)
+            raise PreferenceError(
+                f"unknown preference key '{key}' (allowed: {allowed})"
+            )
+        stored = normalize_preference_value(key, value)
+        if stored is None:
+            raise PreferenceError(f"invalid value for preference '{key}'")
+        if self.db is None:
+            raise PreferenceError("preferences store unavailable")
+        self.db.set_preference(key, stored)
+        return stored
 
     def _run_persist_turn(
         self,

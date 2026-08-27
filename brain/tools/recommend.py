@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from brain.config import Settings
-from brain.db import Database, Movie
+from brain.db import BOX_SET_HEAD_CAP, BoxSetRef, Database, Movie
 from brain.jellyfin_sync import catalogue_status_dict
 from brain.tools import Tool
 
@@ -35,8 +35,12 @@ def _genres_folded(genres: tuple[str, ...] | list[str]) -> set[str]:
     return {g.casefold() for g in genres if g}
 
 
-def _movie_public(m: Movie) -> dict[str, Any]:
-    return {
+def _movie_in_box_set(m: Movie, box_set_id: str) -> bool:
+    return any(b.id == box_set_id for b in m.box_sets)
+
+
+def _movie_public(m: Movie, *, box_set_next: bool = False) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "id": m.jellyfin_id,
         "name": m.name,
         "year": m.year,
@@ -49,6 +53,13 @@ def _movie_public(m: Movie) -> dict[str, Any]:
         "played": m.played,
         "in_progress": m.playback_position_ticks > 0 and not m.played,
     }
+    if m.last_played_at:
+        out["last_played_at"] = m.last_played_at
+    if m.box_sets:
+        out["box_sets"] = [{"id": b.id, "name": b.name} for b in m.box_sets]
+    if box_set_next:
+        out["box_set_next"] = True
+    return out
 
 
 def resolve_seed(
@@ -93,15 +104,87 @@ def _seed_overlap_ok(m: Movie, seed: Movie) -> bool:
     return True
 
 
-def _rank_key(m: Movie, *, seed: Movie | None) -> tuple:
+def _rank_key(
+    m: Movie,
+    *,
+    seed: Movie | None,
+    recent_genres: set[str],
+) -> tuple:
     shared = 0
     year_close = 0
     if seed is not None:
         shared = len(_genres_folded(m.genres) & _genres_folded(seed.genres))
         if m.year is not None and seed.year is not None:
             year_close = 1 if abs(m.year - seed.year) <= 10 else 0
+    recent_overlap = len(_genres_folded(m.genres) & recent_genres) if recent_genres else 0
     rating = m.community_rating if m.community_rating is not None else -1.0
-    return (-shared, -year_close, -rating, m.name.casefold())
+    return (-shared, -year_close, -recent_overlap, -rating, m.name.casefold())
+
+
+def dominant_box_set(
+    recent: list[Movie],
+) -> BoxSetRef | None:
+    """Most frequent Box set among Recent watches; ties → most recently played."""
+    if not recent:
+        return None
+    counts: dict[str, int] = {}
+    names: dict[str, str] = {}
+    latest: dict[str, str] = {}
+    for m in recent:
+        for bs in m.box_sets:
+            counts[bs.id] = counts.get(bs.id, 0) + 1
+            names[bs.id] = bs.name
+            if m.last_played_at and (
+                bs.id not in latest or m.last_played_at > latest[bs.id]
+            ):
+                latest[bs.id] = m.last_played_at
+    if not counts:
+        return None
+    best_id = max(
+        counts.keys(),
+        key=lambda bid: (counts[bid], latest.get(bid, ""), bid),
+    )
+    return BoxSetRef(id=best_id, name=names[best_id])
+
+
+def box_set_next_movies(
+    all_movies: list[Movie],
+    *,
+    box_set: BoxSetRef,
+    recent: list[Movie],
+    unwatched_only: bool,
+    cap: int = BOX_SET_HEAD_CAP,
+) -> list[Movie]:
+    """Next unwatched members by ProductionYear (prefer year >= last recent in set)."""
+    recent_ids = {m.jellyfin_id for m in recent}
+    recent_in_set = [m for m in recent if _movie_in_box_set(m, box_set.id)]
+    last_year: int | None = None
+    years = [m.year for m in recent_in_set if m.year is not None]
+    if years:
+        last_year = max(years)
+
+    members = [
+        m
+        for m in all_movies
+        if _movie_in_box_set(m, box_set.id) and m.jellyfin_id not in recent_ids
+    ]
+    if unwatched_only:
+        members = [m for m in members if not m.played]
+
+    def sort_key(m: Movie) -> tuple:
+        y = m.year if m.year is not None else 9999
+        return (y, m.name.casefold())
+
+    preferred = [
+        m
+        for m in members
+        if last_year is None or (m.year is not None and m.year >= last_year)
+    ]
+    preferred.sort(key=sort_key)
+    if preferred:
+        return preferred[:cap]
+    members.sort(key=sort_key)
+    return members[:cap]
 
 
 def recommend_movies(
@@ -123,8 +206,20 @@ def recommend_movies(
     sync_status_stale = bool(status["stale"])
     last_success_at = status["last_success_at"]
 
+    recent_days = int(settings.jellyfin.recent_watched_days)
+    play_dates_available = db.has_any_last_played_at()
+    recent_movies: list[Movie] = []
+    recent_genres: set[str] = set()
+    if play_dates_available:
+        recent_movies = db.list_recently_watched(recent_days)
+        for recent in recent_movies:
+            recent_genres |= _genres_folded(recent.genres)
+
     filters_applied: dict[str, Any] = {
         "unwatched_only": unwatched_only,
+        "recent_watched_days": recent_days,
+        "play_dates_available": play_dates_available,
+        "recent_genre_bias": sorted(recent_genres) if recent_genres else [],
     }
 
     seed: Movie | None = None
@@ -188,17 +283,34 @@ def recommend_movies(
             continue
         candidates.append(m)
 
-    if seed is not None:
-        candidates.sort(key=lambda m: _rank_key(m, seed=seed))
-    else:
-        candidates.sort(
-            key=lambda m: (
-                -(m.community_rating if m.community_rating is not None else -1.0),
-                m.name.casefold(),
-            )
+    dominant = dominant_box_set(recent_movies)
+    head: list[Movie] = []
+    if dominant is not None:
+        head = box_set_next_movies(
+            all_movies,
+            box_set=dominant,
+            recent=recent_movies,
+            unwatched_only=unwatched_only,
         )
+        filters_applied["box_set_id"] = dominant.id
+        filters_applied["box_set_name"] = dominant.name
+        filters_applied["box_set_next_count"] = len(head)
+        filters_applied["box_set_excluded_from_tail"] = True
 
-    subset = candidates[:SUBSET_CAP]
+    head_ids = {m.jellyfin_id for m in head}
+    if dominant is not None:
+        tail_pool = [
+            m
+            for m in candidates
+            if m.jellyfin_id not in head_ids and not _movie_in_box_set(m, dominant.id)
+        ]
+    else:
+        tail_pool = [m for m in candidates if m.jellyfin_id not in head_ids]
+
+    tail_pool.sort(key=lambda m: _rank_key(m, seed=seed, recent_genres=recent_genres))
+    tail = tail_pool[: max(0, SUBSET_CAP - len(head))]
+    subset = head + tail
+
     if not subset:
         return json.dumps(
             {
@@ -216,7 +328,10 @@ def recommend_movies(
         "stale": sync_status_stale,
         "last_success_at": last_success_at,
         "filters": filters_applied,
-        "movies": [_movie_public(m) for m in subset],
+        "movies": [
+            _movie_public(m, box_set_next=(m.jellyfin_id in head_ids))
+            for m in subset
+        ],
     }
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -247,6 +362,8 @@ def recommend_tools(settings: Settings, db: Database) -> dict[str, Tool]:
             "Use for movie suggestions, 'something like X', unwatched picks, "
             "or genre/mood requests. Returns a small subset — pick and explain "
             "from the tool output only; never invent titles. "
+            "When filters include box_set_next movies, prefer those first "
+            "(next in a Box set the user has been watching). "
             "Optional seed_title for 'like X': if missing from the Catalogue, "
             "the tool reports seed_missing and falls back to genre/mood filters."
         ),

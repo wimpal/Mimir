@@ -75,7 +75,7 @@ Configurable data dir for SQLite/logs (env or config). Use `pathlib`; no hardcod
 
 ## Out of scope until Roadmap says otherwise
 
-Voice / Wyoming / Home Assistant Assist (until Phase 9 + HA spike), LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin, calendar/shopping/smart-home/proactive notify, exposing the brain to the public internet (LAN + optional Tailscale later).
+Voice / Wyoming / Home Assistant Assist (until Phase 10 + HA spike), LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin, shopping/smart-home/proactive notify, email inbox sync, exposing the brain to the public internet (LAN + optional Tailscale later). Calendar ICS read and Discord send are ROADMAP Phases 8d/8f — not free-form scope.
 
 ## Done means
 

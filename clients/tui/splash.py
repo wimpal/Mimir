@@ -27,12 +27,12 @@ TREE_ART = r"""
 )
 
 WELCOME = "Welcome to Mimir"
-TIP = "Ask anything  ·  /help  ·  /new"
+TIP = "Ask anything  ·  /help  ·  /history  ·  /settings  ·  /new"
 FLAVOR = "Wisdom drawn from the well beneath the world tree."
 
 
 class Splash(Vertical):
-    """Empty-session welcome with world-tree art."""
+    """Empty-Conversation welcome with world-tree art."""
 
     DEFAULT_CSS = """
     Splash {

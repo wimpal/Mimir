@@ -9,7 +9,7 @@
 - No API key; soft network dependency — fail fast within `timeouts.tool_s`
 - Config: `location.latitude` / `longitude` / `timezone` (default `Europe/Amsterdam`)
 
-Buienradar-style 5-minute rain nowcast remains Phase 10 backlog.
+Buienradar-style 5-minute rain nowcast remains Phase 11 backlog.
 
 ## Tool
 

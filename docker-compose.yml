@@ -2,7 +2,7 @@
 #
 # During Windows GPU bring-up, Ollama runs natively on the host (AMD ROCm/HIP path)
 # and the brain runs via `uv run uvicorn brain.main:app`. This file becomes the
-# deploy unit when we move to the Linux compute box (ROADMAP Phase 8).
+# deploy unit when we move to the Linux compute box (ROADMAP Phase 9).
 #
 # Target topology:
 #
@@ -10,7 +10,7 @@
 #   brain:
 #     build:
 #       context: .
-#       dockerfile: brain/Dockerfile      # written in Phase 8
+#       dockerfile: brain/Dockerfile      # written in Phase 9
 #     ports:
 #       # Prefer publishing loopback; for LAN chat publish host port and set
 #       # runtime.host + auth.mode: token (ADR 0005). Sync/debug stay Host-only.

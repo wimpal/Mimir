@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from brain.prefs import ALLOWED_KEYS, normalize_preference_value
+from brain.prefs import ALLOWED_KEYS, PREFERENCE_KEYS, normalize_preference_value
 
 if TYPE_CHECKING:
     from brain.db import Database
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 def preference_tools(db: Database) -> dict[str, Tool]:
     from brain.tools import Tool
 
-    keys_help = ", ".join(sorted(ALLOWED_KEYS))
+    keys_help = ", ".join(PREFERENCE_KEYS)
 
     def get_preference(*, key: str) -> str:
         if key not in ALLOWED_KEYS:

@@ -308,7 +308,7 @@ The Phase 6 web static UI was replaced by the TUI.
 
 - Full-screen Textual TUI (`uv run mimir` / `dist/mimir.exe`)
 - On launch: health-check brain; if down, start `uv run uvicorn` from the repo (does not stop brain on exit)
-- Each launch starts a **new** Conversation (resume-previous is backlog); `/new` clears mid-session
+- Each launch starts a **new** Conversation; `/history` resumes a past one (Phase 8b); `/settings` edits Preferences (Phase 8c); `/new` clears the current Conversation
 - Brain base URL via `--url` / `MIMIR_BRAIN_URL` (default `http://127.0.0.1:8000`)
 - Consume SSE on `POST /v1/chat`; OpenAI-compat streaming stays deferred
 - `GET /v1/conversations/{id}/messages` available (full Conversation); not auto-restored on launch
@@ -343,7 +343,7 @@ The Phase 6 web static UI was replaced by the TUI.
 | ------------- | ---- |
 | Reliability   | Timeouts already landed; **Forecast cache** (~60 min TTL, `stale` + `fetched_at`) when Open-Meteo fails; `/health` for clients |
 | Security      | Default bind loopback + `auth.mode: none`. Non-loopback `runtime.host` **refuses startup** unless `auth.mode: token` + Auth token (ADR 0005). Bearer on `/v1/*` when token mode. `/health` always open. Sync + `/debug/*` are **Host-only** |
-| Remote access | **Deferred** to Phase 10 backlog (Tailscale/WireGuard). This phase = local network only |
+| Remote access | **Deferred** to Phase 11 backlog (Tailscale/WireGuard). This phase = local network only |
 | Observability | `GET /debug/recent-traces` — last N Turn trace summaries, Host-only |
 | Personality   | Jarvis-led rewrite of system prompt — **re-run tool suite** after edits; see `docs/phase7-personality.md` |
 | Data          | Document SQLite backup (copy `data_dir`); retention still “keep all” unless disk hurts |
@@ -355,7 +355,104 @@ The Phase 6 web static UI was replaced by the TUI.
 
 
 
-## Phase 8 — Deployment packaging (1–2 days)
+## Phase 8a — Recently watched (Jellyfin) (1–2 days)
+
+**Status: done** — see `[docs/phase8a-recent-watches.md](./docs/phase8a-recent-watches.md)`.
+
+Catalogue already knows Watched/`played`, but not **when**. Sync (or equivalent) must retain recent play timing so Mimir can answer “what did I watch lately” (~last 1–2 weeks) and bias `recommend_movies` with that Recent watches signal.
+
+**Tasks**
+
+- Persist last-played (or equivalent) from Jellyfin UserData into the Catalogue
+- Tool or filter path: list Recently watched in a configurable window (default ~14 days)
+- Recommendation path: take Recent watches into account (not only `unwatched_only`)
+- Fail clear when Sync/Catalogue lacks play dates
+
+**Exit criteria:** “What did I watch last week?” returns grounded titles; recs change sensibly when Recent watches exist.
+
+---
+
+
+
+## Phase 8b — `/history` resume (1–2 days)
+
+**Status: done** — see [`docs/phase8b-history.md`](./docs/phase8b-history.md).
+
+Chat client: browse past Conversations and resume one.
+
+**Tasks**
+
+- Brain API: list Conversations (id + summary metadata enough to choose)
+- TUI `/history`: list → arrow keys → Enter resumes that Conversation
+- Launch behavior can stay “new Conversation”; resume is explicit via `/history`
+
+**Exit criteria:** Pick an old Conversation from `/history` and continue chatting with its History window.
+
+---
+
+
+
+## Phase 8c — `/settings` Preferences UI (1 day)
+
+**Status: done** — see [`docs/phase8c-settings.md`](./docs/phase8c-settings.md).
+
+TUI screen to view/edit allowlisted Preferences (same store as `get_preference` / `set_preference`). Not `config.yaml` / `.env` / Auth token.
+
+**Exit criteria:** Change a Preference in `/settings`; later turns see it (inject/tools) without editing YAML.
+
+---
+
+
+
+## Phase 8d — Calendar feed (ICS URL) (1–2 days)
+
+**Status: done** — see [`docs/phase8d-calendar.md`](./docs/phase8d-calendar.md).
+
+Read-only **Calendar feed(s)** via configured ICS subscribe URL(s) — **provider-agnostic** (Proton share link first; Google/Fastmail/etc. by swapping the URL). No provider SDK. Local CalDAV bridge deferred until ICS publish lag is unacceptable.
+
+**Tasks**
+
+- Config: one or more named feeds (`calendar.feeds` id + display name); ICS URL + optional basic auth in `.env` (`CALENDAR_ICS_URL_<ID>`, or legacy `CALENDAR_ICS_URL`)
+- Tool `get_calendar`: full calendar day in `location.timezone` (midnight→midnight); timeout + fail clear; tag events with `calendar` / `calendar_name`
+- Optional short TTL cache (weather-like: serve in-TTL stale on fetch failure); document provider publish lag (e.g. Proton share up to ~8h)
+
+**Exit criteria:** “What’s on my calendar today?” returns events from the feed(s); wrong/missing URL fails loud (or returns in-TTL stale cache marked `stale=true` when a prior fetch succeeded).
+
+See [`docs/adr/0007-calendar-via-ics-url.md`](./docs/adr/0007-calendar-via-ics-url.md).
+
+---
+
+
+
+## Phase 8e — Morning brief (½–1 day)
+
+Phrase-triggered (“good morning”): normal chat + prompt/tool discipline calls weather + Calendar feed. No `/morning`, no proactive push. Contents: **weather + today’s schedule** only (no news).
+
+**Exit criteria:** Typed “good morning” yields a short brief grounded in tool output; works the same later when spoken in Phase 10.
+
+---
+
+
+
+## Phase 8f — Discord send tool (1–2 days)
+
+Brain tool posts a message to Discord. **Not** a Chat client front door (ADR 0006).
+
+**Locked**
+
+- Bot token in env; **Channel allowlist** = snowflake IDs (+ optional labels) in config
+- Tool: send message to an allowlisted channel only; expand (read/DM) later
+- Timeout + fail clear when Discord is down
+
+**Exit criteria:** User asks Mimir to post something; message appears only on an allowlisted channel; inventing a channel id outside the allowlist fails.
+
+---
+
+
+
+## Phase 9 — Deployment packaging (1–2 days)
+
+*(Was Phase 8.)*
 
 **Tasks**
 
@@ -370,9 +467,9 @@ The Phase 6 web static UI was replaced by the TUI.
 
 
 
-## Phase 9 — Voice v2 (1–2+ weeks after v1 is stable)
+## Phase 10 — Voice v2 (1–2+ weeks after v1 is stable)
 
-Do not start until chat + tools are trustworthy **and** the Phase 2 HA spike passed.
+*(Was Phase 9.)* Do not start until chat + tools are trustworthy **and** the Phase 2 HA spike passed.
 
 **Stack (from Concept)**
 
@@ -398,19 +495,24 @@ Do not start until chat + tools are trustworthy **and** the Phase 2 HA spike pas
 
 
 
-## Phase 10 — Future features (backlog, post-v2)
+## Phase 11 — Future features (backlog, post-v2)
 
-Order by leverage once HA is in the loop:
+*(Was Phase 10.)* Order by leverage once HA is in the loop:
 
 1. **Smart home control** — mostly free via HA after conversation agent works
-2. **Shopping lists / calendar** — HA or CalDAV; new tools on the same brain loop
-3. **Proactive notifications** — worker watches Jellyfin “new episode”; notify via HA
-4. **Play music** — Jellyfin playback / HA media player tool
-5. **Vector search for catalogue** — only if Phase 5 quality plateaus
-6. **History compaction / summarization** — when last-N under `num_ctx` is not enough
-7. **Voice ID / multi-user** — only if multi-profile was deferred and becomes painful
-8. **Buienradar / Buienalarm rain nowcast** — 5-minute precip if Open-Meteo hourly is not enough
-9. **Remote access docs** — Tailscale/WireGuard only; no port-forward recipe as default (deferred from Phase 7)
+2. **Shopping lists** — HA or similar; new tools on the same brain loop
+3. **Email read** (provider-agnostic if practical) — backlog; not scheduled
+4. **Calendar deepen** — CalDAV/local bridge if ICS lag hurts; write access only if needed
+5. **Proactive notifications** — worker watches Jellyfin “new episode”; notify via HA (or Discord send)
+6. **Play music** — Jellyfin playback / HA media player tool
+7. **Vector search for catalogue** — only if Phase 5 quality plateaus
+8. **History compaction / summarization** — when last-N under `num_ctx` is not enough
+9. **Voice ID / multi-user** — only if multi-profile was deferred and becomes painful
+10. **Buienradar / Buienalarm rain nowcast** — 5-minute precip if Open-Meteo hourly is not enough
+11. **Remote access docs** — Tailscale/WireGuard only; no port-forward recipe as default (deferred from Phase 7)
+12. **Discord expand** — read channels / DM after send-only proves useful
+
+**Personality:** not a phase — small Jarvis-led prompt iterations anytime; re-run the tool suite after edits.
 
 ---
 
@@ -424,10 +526,12 @@ Order by leverage once HA is in the loop:
 | 0–1   | Decisions + Ollama proof                       | ~1 week        |
 | 2–3   | Brain + weather                                | ~1 week        |
 | 4–5   | Memory + Jellyfin                              | ~1–2 weeks     |
-| 6–8   | Chat + harden + Docker                         | ~1–2 weeks     |
+| 6–7   | Chat + harden                                  | ~1–2 weeks     |
+| 8a–8f | Recent watches, TUI polish, calendar, Discord  | ~1–2 weeks     |
+| 9     | Deployment packaging                           | ~1–2 days      |
 | —     | **v1 usable** (see Concept definition of done) |                |
-| 9     | Voice pipeline                                 | ~2+ weeks      |
-| 10    | Backlog                                        | ongoing        |
+| 10    | Voice pipeline                                 | ~2+ weeks      |
+| 11    | Backlog                                        | ongoing        |
 
 
 ---
@@ -444,7 +548,7 @@ Order by leverage once HA is in the loop:
 6. **Over-building** — no LangChain, no vector DB, no Open WebUI as core — Concept is explicit.
 7. **AMD / RDNA4 GPU stack on Windows** — ROCm/HIP or Vulkan may misbehave; if `ollama ps` shows CPU, try Vulkan builds / driver updates, then **CPU-offload and accept slower iteration** rather than blocking the brain work. Do not judge model quality on a CPU-only path.
 8. **Silent context truncation** — always set `num_ctx`; misattributing truncation to “bad model” causes unnecessary swaps.
-9. **HA bypasses the brain** — native Ollama conversation agent would drop tools; verify OpenAI-compat / custom agent path in Phase 2 before Phase 9.
+9. **HA bypasses the brain** — native Ollama conversation agent would drop tools; verify OpenAI-compat / custom agent path in Phase 2 before Phase 10.
 
 ---
 
@@ -484,15 +588,4 @@ Notes:
 - Longer context (`num_ctx`) and multi-turn tool loops grow the KV cache; thinking mode uses more tokens too.
 - CPU/RAM offload works but is much slower; keep the model fully on GPU/unified memory for voice latency.
 - Start on **8B**; upgrade to **30B-A3B** later without changing the rest of the stack.
-
-Todo(mostly loose thoughts, some things might already be on the roadmap):
-
-- /history command: see a list of past conversations
-- /settings command: easily tweak some settings
-- jellyfin watch history aware
-- Calendar read access for mimir
-- When i say Good morning  i would like mimir to reply witha  daily overview: weather, schedule, perhaps some overnight news
-- Personality adjustments: more like jarvis from the marvel movies ( have to do some research to create an accurate persona) (perhaps even a mix between jarvis from marvel and mimir from god of war
-- Discord bot integration, at some point i will create a discord bot and i would like mimir to be able to interact with the discord bot. So, this is with the condition of the discord bot being up and running
-- 
 

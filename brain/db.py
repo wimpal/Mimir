@@ -9,11 +9,73 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+
+RECENT_WATCHED_CAP = 50
+BOX_SET_HEAD_CAP = 3
+CONVERSATIONS_LIST_DEFAULT = 50
+CONVERSATIONS_LIST_MAX = 200
+CONVERSATION_PREVIEW_CHARS = 80
+
+
+def clamp_conversations_limit(limit: int) -> int:
+    """Clamp list-conversations limit to ``1..CONVERSATIONS_LIST_MAX``."""
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return CONVERSATIONS_LIST_DEFAULT
+    return max(1, min(n, CONVERSATIONS_LIST_MAX))
+
+
+def _preview_text(raw: str | None) -> str:
+    """Single-line truncated preview for Conversation list rows."""
+    if not raw:
+        return ""
+    text = " ".join(str(raw).split())
+    if len(text) <= CONVERSATION_PREVIEW_CHARS:
+        return text
+    return text[: CONVERSATION_PREVIEW_CHARS - 1].rstrip() + "…"
 
 
 def _utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_jellyfin_datetime(raw: object) -> str | None:
+    """Normalize Jellyfin ISO timestamps to ``YYYY-MM-DDTHH:MM:SSZ``."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_stored_utc(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt
 
 
 @dataclass(frozen=True)
@@ -21,6 +83,25 @@ class StoredMessage:
     role: str
     content: str
     created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ConversationSummary:
+    """Enough metadata to pick a Conversation from a list."""
+
+    id: str
+    created_at: str
+    updated_at: str
+    preview: str
+    message_count: int
+
+
+@dataclass(frozen=True)
+class BoxSetRef:
+    """Jellyfin BoxSet membership for a Catalogue Movie."""
+
+    id: str
+    name: str
 
 
 @dataclass(frozen=True)
@@ -38,6 +119,8 @@ class Movie:
     official_rating: str | None = None
     played: bool = False
     playback_position_ticks: int = 0
+    last_played_at: str | None = None
+    box_sets: tuple[BoxSetRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,7 +147,39 @@ def _parse_json_list(raw: str | None) -> list[str]:
     return [str(x) for x in data if str(x).strip()]
 
 
+def _parse_box_sets(raw: str | None) -> tuple[BoxSetRef, ...]:
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(data, list):
+        return ()
+    out: list[BoxSetRef] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        bid = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not bid or bid in seen:
+            continue
+        seen.add(bid)
+        out.append(BoxSetRef(id=bid, name=name or bid))
+    return tuple(out)
+
+
+def _box_sets_json(box_sets: tuple[BoxSetRef, ...] | Sequence[BoxSetRef]) -> str | None:
+    if not box_sets:
+        return None
+    payload = [{"id": b.id, "name": b.name} for b in box_sets]
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
 def _row_to_movie(row: sqlite3.Row) -> Movie:
+    keys = row.keys()
+    box_raw = row["box_set_ids_json"] if "box_set_ids_json" in keys else None
     return Movie(
         jellyfin_id=str(row["jellyfin_id"]),
         name=str(row["name"]),
@@ -81,6 +196,10 @@ def _row_to_movie(row: sqlite3.Row) -> Movie:
         ),
         played=bool(row["played"]),
         playback_position_ticks=int(row["playback_position_ticks"] or 0),
+        last_played_at=(
+            str(row["last_played_at"]) if row["last_played_at"] is not None else None
+        ),
+        box_sets=_parse_box_sets(box_raw),
     )
 
 
@@ -235,6 +354,58 @@ class Database:
             for r in rows
         ]
 
+    def list_conversations(
+        self, *, limit: int = CONVERSATIONS_LIST_DEFAULT
+    ) -> list[ConversationSummary]:
+        """Recent Conversations with Messages, newest ``updated_at`` first.
+
+        Empty Conversations (no Messages) are omitted. ``limit`` is clamped to
+        ``1..CONVERSATIONS_LIST_MAX``. Preview prefers the first user Message.
+        """
+        capped = clamp_conversations_limit(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.id AS id,
+                    c.created_at AS created_at,
+                    c.updated_at AS updated_at,
+                    COUNT(m.id) AS message_count,
+                    (
+                        SELECT m2.content FROM messages m2
+                        WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                        ORDER BY m2.id ASC
+                        LIMIT 1
+                    ) AS user_preview,
+                    (
+                        SELECT m3.content FROM messages m3
+                        WHERE m3.conversation_id = c.id
+                        ORDER BY m3.id ASC
+                        LIMIT 1
+                    ) AS any_preview
+                FROM conversations c
+                LEFT JOIN messages m ON m.conversation_id = c.id
+                GROUP BY c.id
+                HAVING COUNT(m.id) > 0
+                ORDER BY c.updated_at DESC, c.id DESC
+                LIMIT ?
+                """,
+                (capped,),
+            ).fetchall()
+        out: list[ConversationSummary] = []
+        for r in rows:
+            preview_src = r["user_preview"] if r["user_preview"] else r["any_preview"]
+            out.append(
+                ConversationSummary(
+                    id=str(r["id"]),
+                    created_at=str(r["created_at"]),
+                    updated_at=str(r["updated_at"]),
+                    preview=_preview_text(preview_src),
+                    message_count=int(r["message_count"]),
+                )
+            )
+        return out
+
     def message_count(self, conversation_id: str | None = None) -> int:
         with self._connect() as conn:
             if conversation_id is None:
@@ -377,6 +548,8 @@ class Database:
                 m.official_rating,
                 1 if m.played else 0,
                 int(m.playback_position_ticks),
+                m.last_played_at,
+                _box_sets_json(m.box_sets),
                 now,
             )
             for m in movies
@@ -387,8 +560,9 @@ class Database:
                 INSERT INTO movies (
                     jellyfin_id, sync_generation, name, year, overview, director,
                     cast_json, genres_json, community_rating, official_rating,
-                    played, playback_position_ticks, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    played, playback_position_ticks, last_played_at,
+                    box_set_ids_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(jellyfin_id, sync_generation) DO UPDATE SET
                     name = excluded.name,
                     year = excluded.year,
@@ -400,6 +574,8 @@ class Database:
                     official_rating = excluded.official_rating,
                     played = excluded.played,
                     playback_position_ticks = excluded.playback_position_ticks,
+                    last_played_at = excluded.last_played_at,
+                    box_set_ids_json = excluded.box_set_ids_json,
                     updated_at = excluded.updated_at
                 """,
                 rows,
@@ -506,6 +682,83 @@ class Database:
             ).fetchall()
         return [_row_to_movie(r) for r in rows]
 
+    def has_any_last_played_at(self) -> bool:
+        """True if the active Catalogue has at least one non-null last_played_at."""
+        state = self.get_sync_state()
+        if state.active_generation is None:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 AS ok FROM movies
+                WHERE sync_generation = ?
+                  AND last_played_at IS NOT NULL
+                LIMIT 1
+                """,
+                (state.active_generation,),
+            ).fetchone()
+        return row is not None
+
+    def has_played_without_dates(self) -> bool:
+        """True when played movies exist but no last_played_at anywhere (needs Sync)."""
+        state = self.get_sync_state()
+        if state.active_generation is None:
+            return False
+        with self._connect() as conn:
+            played = conn.execute(
+                """
+                SELECT 1 AS ok FROM movies
+                WHERE sync_generation = ? AND played = 1
+                LIMIT 1
+                """,
+                (state.active_generation,),
+            ).fetchone()
+            if played is None:
+                return False
+            dated = conn.execute(
+                """
+                SELECT 1 AS ok FROM movies
+                WHERE sync_generation = ?
+                  AND last_played_at IS NOT NULL
+                LIMIT 1
+                """,
+                (state.active_generation,),
+            ).fetchone()
+        return dated is None
+
+    def list_recently_watched(
+        self,
+        days: int,
+        *,
+        now: datetime | None = None,
+        cap: int = RECENT_WATCHED_CAP,
+    ) -> list[Movie]:
+        """Active Movies with last_played_at inside the window, newest first."""
+        if days < 1:
+            return []
+        state = self.get_sync_state()
+        if state.active_generation is None:
+            return []
+        anchor = now if now is not None else datetime.now(UTC)
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=UTC)
+        else:
+            anchor = anchor.astimezone(UTC)
+        cutoff = anchor.timestamp() - (days * 86400.0)
+
+        movies = self.list_active_movies()
+        recent: list[tuple[float, Movie]] = []
+        for m in movies:
+            played_at = _parse_stored_utc(m.last_played_at)
+            if played_at is None:
+                continue
+            ts = played_at.timestamp()
+            if ts < cutoff or ts > anchor.timestamp() + 60.0:
+                continue
+            recent.append((ts, m))
+        recent.sort(key=lambda item: (-item[0], item[1].name.casefold()))
+        return [m for _, m in recent[:cap]]
+
     def seed_catalogue_for_tests(self, movies: Sequence[Movie]) -> None:
         """Publish a generation with the given movies (suite / unit fixtures)."""
         gen = self.begin_sync_attempt()
@@ -590,7 +843,17 @@ def _migrate_1_to_2(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_2_to_3(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE movies ADD COLUMN last_played_at TEXT")
+
+
+def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE movies ADD COLUMN box_set_ids_json TEXT")
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     0: _migrate_0_to_1,
     1: _migrate_1_to_2,
+    2: _migrate_2_to_3,
+    3: _migrate_3_to_4,
 }

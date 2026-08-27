@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-ALLOWED_KEYS = frozenset({"favorite_genres", "tone"})
+# Stable order for GET /v1/preferences and TUI /settings.
+PREFERENCE_KEYS: tuple[str, ...] = ("favorite_genres", "tone")
+ALLOWED_KEYS = frozenset(PREFERENCE_KEYS)
 
 
 def normalize_preference_value(key: str, value: Any) -> str | None:

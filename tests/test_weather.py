@@ -86,7 +86,7 @@ def test_normalize_forecast_compact() -> None:
 
 def test_build_registry_includes_weather(tmp_path: Path) -> None:
     reg = build_registry(_settings(tmp_path))
-    assert set(reg) == {"get_server_time", "echo", "get_weather"}
+    assert set(reg) == {"get_server_time", "echo", "get_weather", "get_calendar"}
     assert set(TOOLS) == {"get_server_time", "echo"}
 
 
@@ -125,6 +125,8 @@ def test_get_weather_with_mock_transport(tmp_path: Path) -> None:
 def test_get_weather_serves_stale_cache(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     data_dir = settings.runtime.data_dir
+    from datetime import UTC, datetime, timedelta
+
     from brain.tools.weather import normalize_forecast
     from brain.weather_cache import weather_cache_path, write_cache
 
@@ -132,7 +134,9 @@ def test_get_weather_serves_stale_cache(tmp_path: Path) -> None:
         SAMPLE_RAW,
         home=settings.location.as_home(),
     )
-    write_cache(weather_cache_path(data_dir), compact, fetched_at="2026-08-26T10:00:00+00:00")
+    # Within default weather.cache_ttl_s so failure path can serve stale.
+    fetched_at = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    write_cache(weather_cache_path(data_dir), compact, fetched_at=fetched_at)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="down")
@@ -150,7 +154,7 @@ def test_get_weather_serves_stale_cache(tmp_path: Path) -> None:
     assert not out.startswith("error:")
     data = json.loads(out)
     assert data["stale"] is True
-    assert data["fetched_at"] == "2026-08-26T10:00:00+00:00"
+    assert data["fetched_at"] == fetched_at
     assert data["current"]["temperature_c"] == 18.5
 
 

@@ -119,10 +119,13 @@ def build_registry(
     *,
     db: Database | None = None,
     weather_fetch_override: Callable[[], str] | None = None,
+    calendar_fetch_override: Callable[[], str] | None = None,
     data_dir: Path | None = None,
 ) -> dict[str, Tool]:
-    """Dummy tools + weather + optional preference / recommend tools bound to SQLite."""
+    """Dummy tools + weather + calendar + optional preference / recommend tools."""
+    from brain.tools.calendar import calendar_tools
     from brain.tools.preferences import preference_tools
+    from brain.tools.recently_watched import recently_watched_tools
     from brain.tools.recommend import recommend_tools
     from brain.tools.weather import weather_tools
 
@@ -135,10 +138,16 @@ def build_registry(
             fetch_override=weather_fetch_override,
             data_dir=resolved_data,
         ),
+        **calendar_tools(
+            settings,
+            fetch_override=calendar_fetch_override,
+            data_dir=resolved_data,
+        ),
     }
     if db is not None:
         registry.update(preference_tools(db))
         registry.update(recommend_tools(settings, db))
+        registry.update(recently_watched_tools(settings, db))
     return registry
 
 

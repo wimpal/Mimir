@@ -5,7 +5,10 @@ Endpoints:
   POST /v1/chat
   POST /v1/chat/completions   (OpenAI-compatible; tools run server-side)
   GET  /v1/models
+  GET  /v1/conversations
   GET  /v1/conversations/{id}/messages
+  GET  /v1/preferences
+  PUT  /v1/preferences/{key}
   POST /v1/jellyfin/sync
   GET  /debug/recent-traces   (Host-only)
 """

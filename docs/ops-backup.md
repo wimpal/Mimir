@@ -26,4 +26,4 @@ On Linux compose, back up the mounted volume that maps to `MIMIR_DATA_DIR`.
 2. Replace `{data_dir}/mimir.db` (and optionally `logs/`, `cache/`) from the backup.
 3. Start the brain; confirm `GET /health` shows `db.ok` and expected schema version.
 
-There is no backup script in Phase 7 — a one-shot helper can land with Phase 8 packaging if needed.
+There is no backup script in Phase 7 — a one-shot helper can land with Phase 9 packaging if needed.

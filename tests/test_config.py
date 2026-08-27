@@ -38,8 +38,13 @@ _ENV_VARS = [
     "MIMIR_TIMEOUT_TOOL_S",
     "MIMIR_TIMEOUT_TURN_S",
     "MIMIR_HISTORY_PAIRS",
+    "MIMIR_WEATHER_CACHE_TTL_S",
+    "MIMIR_CALENDAR_CACHE_TTL_S",
     "JELLYFIN_API_KEY",
     "MIMIR_AUTH_TOKEN",
+    "CALENDAR_ICS_URL",
+    "CALENDAR_ICS_USERNAME",
+    "CALENDAR_ICS_PASSWORD",
 ]
 
 
@@ -78,6 +83,10 @@ def test_minimal_config_loads_with_defaults(tmp_path: Path) -> None:
     assert s.jellyfin.user_id == ""
     assert s.jellyfin.library_ids == []
     assert s.jellyfin.sync_interval_hours == 24.0
+    assert s.jellyfin.recent_watched_days == 14
+    assert s.calendar.url is None
+    assert s.calendar.cache_ttl_s == 300.0
+    assert s.calendar.feeds == []
 
 
 def test_repo_example_config_loads() -> None:
@@ -94,6 +103,8 @@ def test_repo_example_config_loads() -> None:
     assert s.timeouts.jellyfin_sync_s == 300.0
     assert s.jellyfin.sync_interval_hours == 24.0
     assert s.weather.cache_ttl_s == 3600.0
+    assert s.calendar.cache_ttl_s == 300.0
+    assert s.calendar.feeds == []
 
 
 def test_validate_bind_via_load_config(tmp_path: Path) -> None:
@@ -119,6 +130,7 @@ def test_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("MIMIR_JELLYFIN_USER_ID", "uid-9")
     monkeypatch.setenv("MIMIR_JELLYFIN_LIBRARY_IDS", "lib-a, lib-b")
     monkeypatch.setenv("MIMIR_JELLYFIN_SYNC_TIMEOUT_S", "120")
+    monkeypatch.setenv("MIMIR_CALENDAR_CACHE_TTL_S", "120")
     s = load_config(write_config(tmp_path), use_dotenv=False)
     assert s.ollama.model == "qwen3:14b"
     assert s.ollama.num_ctx == 16384
@@ -132,6 +144,7 @@ def test_env_overrides_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert s.jellyfin.user_id == "uid-9"
     assert s.jellyfin.library_ids == ["lib-a", "lib-b"]
     assert s.timeouts.jellyfin_sync_s == 120.0
+    assert s.calendar.cache_ttl_s == 120.0
 
 
 def test_jellyfin_sync_configured_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,9 +164,39 @@ def test_jellyfin_sync_configured_helper(tmp_path: Path, monkeypatch: pytest.Mon
 def test_secrets_come_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JELLYFIN_API_KEY", "sekrit")
     monkeypatch.setenv("MIMIR_AUTH_TOKEN", "tok-123")
+    monkeypatch.setenv("CALENDAR_ICS_URL", "https://example.com/cal.ics?token=abc")
+    monkeypatch.setenv("CALENDAR_ICS_USERNAME", "user")
+    monkeypatch.setenv("CALENDAR_ICS_PASSWORD", "pass")
     s = load_config(write_config(tmp_path), use_dotenv=False)
     assert s.jellyfin.api_key == "sekrit"
     assert s.auth.token == "tok-123"
+    assert s.calendar.url == "https://example.com/cal.ics?token=abc"
+    assert s.calendar.username == "user"
+    assert s.calendar.password == "pass"
+
+
+def test_calendar_feed_secrets_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALENDAR_ICS_URL_FAMILY", "https://example.com/family.ics")
+    monkeypatch.setenv("CALENDAR_ICS_URL_WORK", "https://example.com/work.ics")
+    yaml_text = VALID_YAML + (
+        "calendar:\n"
+        "  feeds:\n"
+        "    - id: family\n"
+        "      name: Fam Palland\n"
+        "    - id: work\n"
+        "      name: Work\n"
+    )
+    s = load_config(write_config(tmp_path, yaml_text), use_dotenv=False)
+    assert len(s.calendar.feeds) == 2
+    assert s.calendar.feeds[0].url == "https://example.com/family.ics"
+    assert s.calendar.feeds[1].name == "Work"
+    assert s.calendar.feeds[1].url == "https://example.com/work.ics"
+    from brain.config import redacted_view, resolved_calendar_feeds
+
+    resolved = resolved_calendar_feeds(s.calendar)
+    assert [f.id for f in resolved] == ["family", "work"]
+    view = redacted_view(s)
+    assert view["calendar"]["feeds"][0]["url"] == "***set***"
 
 
 def test_missing_file_fails_loud(tmp_path: Path) -> None:
@@ -177,5 +220,9 @@ def test_redacted_view_masks_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyP
     from brain.config import redacted_view
 
     monkeypatch.setenv("JELLYFIN_API_KEY", "sekrit")
+    monkeypatch.setenv("CALENDAR_ICS_URL", "https://example.com/secret.ics")
+    monkeypatch.setenv("CALENDAR_ICS_PASSWORD", "p")
     view = redacted_view(load_config(write_config(tmp_path), use_dotenv=False))
     assert view["jellyfin"]["api_key"] == "***set***"
+    assert view["calendar"]["url"] == "***set***"
+    assert view["calendar"]["password"] == "***set***"

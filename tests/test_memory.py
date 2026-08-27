@@ -198,6 +198,24 @@ def test_prefs_set_inject_and_mid_turn_refresh(settings: Settings) -> None:
     assert _db(settings).get_preference("favorite_genres") == '["sci-fi"]'
 
 
+def test_preferences_http_put_injects_on_next_chat(settings: Settings) -> None:
+    ollama = ScriptedOllama(
+        [ChatMessage(role="assistant", content="Noted your tone.")]
+    )
+    with _client(settings, ollama) as tc:
+        put = tc.put("/v1/preferences/tone", json={"value": "dry understatement"})
+        assert put.status_code == 200
+        assert put.json()["value"] == "dry understatement"
+        resp = tc.post("/v1/chat", json={"message": "hello"})
+        assert resp.status_code == 200
+
+    assert len(ollama.calls) == 1
+    system = _system_text(ollama.calls[0])
+    assert "Known preferences" in system
+    assert "tone: dry understatement" in system
+    assert _db(settings).get_preference("tone") == "dry understatement"
+
+
 def test_error_reply_persisted(settings: Settings) -> None:
     ollama = ScriptedOllama([OllamaError("down")])
     with _client(settings, ollama) as tc:

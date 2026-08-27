@@ -183,6 +183,132 @@ def test_client_auth_token_arg_overrides_env(monkeypatch: pytest.MonkeyPatch) ->
     assert client._client.headers["Authorization"] == "Bearer arg-tok"
 
 
+def test_list_conversations_and_encoded_messages() -> None:
+    from clients.tui.history import format_history_option
+
+    rows_payload = {
+        "conversations": [
+            {
+                "id": "abc-123",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "preview": "hello world",
+                "message_count": 2,
+            }
+        ],
+        "limit": 50,
+        "count": 1,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/conversations":
+            assert request.url.params.get("limit") == "50"
+            return httpx.Response(200, json=rows_payload)
+        # Path is percent-encoded for unsafe characters (space → %20).
+        if request.url.path == "/v1/conversations/id%20with%20space/messages":
+            return httpx.Response(
+                200,
+                json={
+                    "conversation_id": "id with space",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        # httpx may present a decoded path; accept that too if raw matched encode.
+        raw = request.url.raw_path.decode("ascii", errors="replace")
+        if "id%20with%20space" in raw or request.url.path.endswith(
+            "/id with space/messages"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "conversation_id": "id with space",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    async def _run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as raw:
+            client = BrainClient("http://test", client=raw)
+            rows = await client.list_conversations()
+            msgs = await client.list_messages("id with space")
+        assert len(rows) == 1
+        assert rows[0]["id"] == "abc-123"
+        assert msgs == [{"role": "user", "content": "hi"}]
+
+    asyncio.run(_run())
+    label = format_history_option(rows_payload["conversations"][0])
+    assert "hello world" in label
+    assert "abc-123"[:8] in label
+
+
+def test_list_conversations_bad_shape_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"conversations": "nope"})
+
+    async def _run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as raw:
+            client = BrainClient("http://test", client=raw)
+            with pytest.raises(BrainClientError, match="unexpected JSON"):
+                await client.list_conversations()
+
+    asyncio.run(_run())
+
+
+def test_preferences_client_and_display() -> None:
+    from clients.tui.settings import (
+        edit_seed_value,
+        format_preference_display,
+    )
+
+    assert format_preference_display("tone", None) == "tone  ·  (unset)"
+    assert format_preference_display("tone", "dry") == "tone  ·  dry"
+    assert (
+        format_preference_display("favorite_genres", '["sci-fi","drama"]')
+        == "favorite_genres  ·  sci-fi, drama"
+    )
+    assert edit_seed_value("favorite_genres", '["sci-fi"]') == "sci-fi"
+    assert edit_seed_value("tone", None) == ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/preferences":
+            return httpx.Response(
+                200,
+                json={
+                    "preferences": [
+                        {"key": "favorite_genres", "value": None},
+                        {"key": "tone", "value": "dry"},
+                    ]
+                },
+            )
+        if request.method == "PUT" and request.url.path == "/v1/preferences/tone":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body == {"value": "wry"}
+            return httpx.Response(
+                200, json={"key": "tone", "value": "wry"}
+            )
+        return httpx.Response(404, json={"detail": request.url.path})
+
+    async def _run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as raw:
+            client = BrainClient("http://test", client=raw)
+            rows = await client.get_preferences()
+            assert [r["key"] for r in rows] == ["favorite_genres", "tone"]
+            saved = await client.put_preference("tone", "wry")
+            assert saved["value"] == "wry"
+
+    asyncio.run(_run())
+
+
 def test_host_port_from_url() -> None:
     assert host_port_from_url("http://127.0.0.1:8000") == ("127.0.0.1", 8000)
     assert host_port_from_url("http://localhost:9000/v1") == ("localhost", 9000)
