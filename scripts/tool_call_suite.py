@@ -554,6 +554,64 @@ def _echo_not_calendar(expected: str) -> Callable[[TurnResult], CheckResult]:
     return check
 
 
+def _require_morning_brief() -> Callable[[TurnResult], CheckResult]:
+    """Both get_weather and get_calendar; reply grounded in each payload."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        seq = result.tools_used()
+        if "get_weather" not in seq or "get_calendar" not in seq:
+            return _fail_right("no_tool_when_required")
+        weather_raw = _weather_payload(result)
+        calendar_raw = _calendar_payload(result)
+        if (
+            not weather_raw
+            or weather_raw.startswith("error:")
+            or not calendar_raw
+            or calendar_raw.startswith("error:")
+        ):
+            return _fail_args("malformed_args")
+        try:
+            weather = json.loads(weather_raw)
+            calendar = json.loads(calendar_raw)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        temp = weather.get("current", {}).get("temperature_c")
+        conditions = (weather.get("current", {}).get("conditions") or "").lower()
+        weather_ok = _temp_in_content(temp, content) or _condition_in_content(
+            conditions, content
+        )
+        if not weather_ok:
+            return _fail_used("tool_not_used_in_answer")
+        events = calendar.get("events") or []
+        if not isinstance(events, list) or not events:
+            return _fail_args("malformed_args")
+        calendar_ok = False
+        for ev in events:
+            summary = str(ev.get("summary") or "").strip()
+            start = str(ev.get("start") or "").strip()
+            if summary and summary.lower() in content:
+                calendar_ok = True
+                break
+            if len(start) >= 10 and start[:10] in content:
+                calendar_ok = True
+                break
+            if "T" in start:
+                hhmm = start[11:16] if len(start) >= 16 else ""
+                if hhmm and hhmm in content:
+                    calendar_ok = True
+                    break
+        if not calendar_ok:
+            return _fail_used("tool_not_used_in_answer")
+        return _ok()
+
+    return check
+
+
 def _require_set_preference(key: str, needle: str) -> Callable[[TurnResult], CheckResult]:
     def check(result: TurnResult) -> CheckResult:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
@@ -911,6 +969,24 @@ CASES: list[Case] = [
         "Echo exactly: no-calendar-55",
         _echo_not_calendar("no-calendar-55"),
     ),
+    Case(
+        "morning_1",
+        "must_call_weather_and_calendar",
+        "Good morning",
+        _require_morning_brief(),
+    ),
+    Case(
+        "morning_2",
+        "must_call_weather_and_calendar",
+        "Morning — what's the day look like?",
+        _require_morning_brief(),
+    ),
+    Case(
+        "morning_3",
+        "must_call_weather_and_calendar",
+        "Goodmorning",
+        _require_morning_brief(),
+    ),
 ]
 
 
@@ -927,6 +1003,8 @@ def _system_messages() -> list[ChatMessage]:
         "- `echo`: use when asked to echo or repeat a specific string.\n"
         "- `get_weather`: use for weather, rain, umbrella, temperature, or forecast "
         "at the configured home location.\n"
+        "- `get_calendar`: use for calendar / schedule / what's on today "
+        "(no arguments — full calendar day).\n"
         "- `set_preference` / `get_preference`: use for lasting likes (favorite_genres, "
         "tone). Do not invent preferences.\n"
         "- `recommend_movies`: use for movie recommendations from the Jellyfin "
@@ -935,9 +1013,12 @@ def _system_messages() -> list[ChatMessage]:
         "- `list_recently_watched`: use when asked what they watched lately / "
         "last week; ground the answer in the tool list only.\n"
         "Call a tool when it clearly applies; otherwise answer directly.\n"
+        "On morning greetings (good morning / morning), call get_weather and "
+        "get_calendar in the same step, then brief weather + today's schedule only.\n"
         "When both time and echo are needed, call get_server_time first, "
         "then echo the returned timestamp — never invent a time.\n"
         "Never invent weather; if get_weather fails, say so briefly.\n"
+        "Never invent appointments; if get_calendar fails, say so briefly.\n"
         "Never invent movie titles; if recommend_movies or "
         "list_recently_watched fails or the catalogue is empty, say so briefly.\n"
     )

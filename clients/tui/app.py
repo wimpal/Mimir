@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -32,12 +34,54 @@ HELP_TEXT = """Commands:
   /new      — start a new Conversation
   /history  — browse and resume a past Conversation
   /settings — view and edit Preferences
+  /copy     — copy the last reply to the clipboard
   /quit     — exit
   /help     — show this help
   Esc       — interrupt the current turn while working
+  Ctrl+Shift+C — copy the last reply
+  Drag to select, then Ctrl+C — copy selection (does not quit)
 
 Chat normally by typing a message and pressing Enter.
 If the brain is down, Mimir tries to start it (needs `uv` + repo)."""
+
+
+def host_clipboard_copy(text: str) -> bool:
+    """Best-effort OS clipboard write (complements Textual's OSC 52)."""
+    if not text:
+        return False
+    data_utf8 = text.encode("utf-8")
+    if sys.platform == "win32":
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            completed = subprocess.run(
+                ["clip"],
+                input=text.encode("utf-16le"),
+                check=False,
+                creationflags=flags,
+            )
+            return completed.returncode == 0
+        except OSError:
+            return False
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["pbcopy"], input=data_utf8, check=False
+            )
+            return completed.returncode == 0
+        except OSError:
+            return False
+    for cmd in (
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+    ):
+        try:
+            completed = subprocess.run(cmd, input=data_utf8, check=False)
+            if completed.returncode == 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _host_label(url: str) -> str:
@@ -78,8 +122,8 @@ class Transcript(VerticalScroll):
     def append_assistant(self, text: str = "") -> Static:
         return self.append_line(text, classes="assistant")
 
-    def append_tool_card(self, text: str) -> Static:
-        return self.append_line(text, classes="tool-card")
+    def append_tool_line(self, text: str) -> Static:
+        return self.append_line(text, classes="tool-line")
 
     def append_system(self, text: str) -> Static:
         return self.append_line(text, classes="system")
@@ -153,14 +197,16 @@ class MimirApp(App[None]):
         margin-top: 1;
         padding: 0 1;
     }
-    #transcript .tool-card {
-        margin-top: 1;
-        margin-left: 1;
-        margin-right: 1;
+    #transcript .tool-line {
+        color: #5c6370;
+        text-style: dim;
+        height: 1;
+        min-height: 1;
+        max-height: 1;
+        margin: 0;
         padding: 0 1;
-        color: #9aa0a6;
-        border: round #3d4a38;
-        background: #141914;
+        border: none;
+        background: transparent;
     }
     #transcript .error {
         color: #e57373;
@@ -214,8 +260,15 @@ class MimirApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False),
+        # Do not bind ctrl+c to quit — Textual uses it to copy a selection.
         Binding("ctrl+d", "quit", "Quit", show=False),
+        Binding("ctrl+q", "quit", "Quit", show=False),
+        Binding(
+            "ctrl+shift+c",
+            "copy_last_reply",
+            "Copy last reply",
+            show=False,
+        ),
         Binding("escape", "interrupt", "Interrupt", show=False),
     ]
 
@@ -240,6 +293,7 @@ class MimirApp(App[None]):
         self._stream_task: asyncio.Task[None] | None = None
         self._assistant_widget: Static | None = None
         self._assistant_text = ""
+        self._last_assistant_text = ""
         self._showing_splash = True
 
     def compose(self) -> ComposeResult:
@@ -252,9 +306,23 @@ class MimirApp(App[None]):
         with Vertical(id="input-wrap"):
             yield Input(placeholder="Message Mimir…", id="input")
         yield Static(
-            "/new  /history  /settings  /help  /quit  ·  Esc interrupt",
+            "/new  /history  /settings  /copy  /help  /quit  ·  "
+            "Ctrl+Shift+C copy  ·  Esc interrupt",
             id="hints",
         )
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """OSC 52 via Textual, plus host clipboard on Windows/macOS/Linux."""
+        super().copy_to_clipboard(text)
+        host_clipboard_copy(text)
+
+    def action_copy_last_reply(self) -> None:
+        text = (self._last_assistant_text or "").strip()
+        if not text:
+            self.notify("Nothing to copy yet", severity="warning")
+            return
+        self.copy_to_clipboard(text)
+        self.notify("Copied last reply")
 
     def on_mount(self) -> None:
         set_console_title("Mimir")
@@ -453,6 +521,7 @@ class MimirApp(App[None]):
             self._show_splash(True)
             return
         self._hide_splash_for_chat()
+        last_assistant = ""
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content") or ""
@@ -460,12 +529,16 @@ class MimirApp(App[None]):
                 self._transcript().append_user(content)
             elif role == "assistant":
                 self._transcript().append_assistant(content)
+                if content.strip():
+                    last_assistant = content
+        self._last_assistant_text = last_assistant
 
     def _new_conversation(self) -> None:
         self._history_gen += 1
         self._settings_gen += 1
         self._restore_gen += 1
         self._conversation_id = None
+        self._last_assistant_text = ""
         self._persist()
         self._transcript().remove_children()
         self._show_splash(True)
@@ -504,6 +577,9 @@ class MimirApp(App[None]):
             return
         if cmd == "/settings":
             self._open_settings()
+            return
+        if cmd == "/copy":
+            self.action_copy_last_reply()
             return
         if cmd == "/help":
             self._hide_splash_for_chat()
@@ -650,15 +726,11 @@ class MimirApp(App[None]):
                             self._refresh_meta("working")
                     elif etype == "tool_start":
                         name = event.get("name") or "tool"
-                        tr.append_tool_card(f"→ {name} …")
                         self._set_work_status(
                             f"{name}… (esc to interrupt)"
                         )
                     elif etype == "tool_end":
-                        name = event.get("name") or "tool"
-                        ok = event.get("ok", True)
-                        mark = "ok" if ok else "fail"
-                        tr.append_tool_card(f"← {name} ({mark})")
+                        pass
                     elif etype == "token":
                         chunk = event.get("text")
                         if isinstance(chunk, str) and assistant is not None:
@@ -677,11 +749,23 @@ class MimirApp(App[None]):
                         if isinstance(cid, str) and cid.strip():
                             self._conversation_id = cid.strip()
                             self._persist()
+                        tools = event.get("tools_used") or []
+                        if isinstance(tools, list) and tools:
+                            # One dim line under the reply (dedupe, keep order).
+                            seen: list[str] = []
+                            for name in tools:
+                                label = str(name).strip()
+                                if label and label not in seen:
+                                    seen.append(label)
+                            if seen:
+                                tr.append_tool_line(" · ".join(seen))
             except asyncio.CancelledError:
                 raise
             except BrainClientError as exc:
                 tr.append_error(str(exc))
             finally:
+                if self._assistant_text.strip():
+                    self._last_assistant_text = self._assistant_text
                 self._stream_task = None
                 self._set_busy(False)
                 self._focus_input()

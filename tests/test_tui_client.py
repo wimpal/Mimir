@@ -323,3 +323,19 @@ def test_find_repo_root_via_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 def test_brain_reachable_false_on_connect_error() -> None:
     assert brain_reachable("http://127.0.0.1:1", timeout_s=0.2) is False
+
+
+def test_ctrl_c_not_bound_to_quit() -> None:
+    from clients.tui.app import MimirApp
+
+    quit_keys = {
+        b.key for b in MimirApp.BINDINGS if b.action == "quit"
+    }
+    assert "ctrl+c" not in quit_keys
+    assert "ctrl+d" in quit_keys
+
+
+def test_host_clipboard_copy_empty_is_false() -> None:
+    from clients.tui.app import host_clipboard_copy
+
+    assert host_clipboard_copy("") is False

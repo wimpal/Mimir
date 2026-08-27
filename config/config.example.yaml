@@ -53,7 +53,9 @@ weather:
   cache_ttl_s: 3600
 
 calendar:
-  # Named feeds (id + display name). ICS URLs are secrets in .env:
+  # Named feeds (id + display name). Optional context: short note for the LLM
+  # about what the calendar is (work vs family, whose it is, etc.).
+  # ICS URLs are secrets in .env:
   #   CALENDAR_ICS_URL_<ID>  (ID uppercased, hyphens → underscores)
   # Optional per-feed basic auth: CALENDAR_ICS_USERNAME_<ID> / _PASSWORD_<ID>
   # Legacy single feed still works via CALENDAR_ICS_URL (no feeds list).
@@ -63,8 +65,10 @@ calendar:
   # feeds:
   #   - id: family
   #     name: Fam Palland
-  #   - id: personal
-  #     name: Personal
+  #     context: Shared household / family schedule
+  #   - id: work
+  #     name: Work
+  #     context: Photographer and videographer client shoots and jobs
 
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).

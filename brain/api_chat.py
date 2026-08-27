@@ -117,10 +117,14 @@ def register_chat_routes(application: FastAPI) -> None:
         else:
             jellyfin_sync = catalogue_status_dict(db, s, configured=False)
 
+        # CONVENTIONS.md required keys; extras (ollama, db detail, jellyfin) stay.
         return {
+            "service": "mimir",
             "status": status,
-            "service": "mimir-brain",
             "version": __version__,
+            "checks": {
+                "db": "ok" if db_ok else "fail",
+            },
             "config_loaded": True,
             "single_user": True,
             "ollama": {

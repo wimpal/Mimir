@@ -80,6 +80,7 @@ def events_in_window(
     end: datetime,
     calendar_id: str | None = None,
     calendar_name: str | None = None,
+    calendar_context: str | None = None,
 ) -> list[dict[str, Any]]:
     """Parse ICS, expand RRULEs, return compact events overlapping [start, end)."""
     try:
@@ -124,6 +125,8 @@ def events_in_window(
             item["calendar"] = calendar_id
         if calendar_name:
             item["calendar_name"] = calendar_name
+        if calendar_context:
+            item["calendar_context"] = calendar_context
         events.append(item)
 
     events.sort(key=lambda e: (e["start"], e["summary"]))
@@ -175,9 +178,13 @@ def _record_feed_error(
     feed_id: str,
     name: str,
     error: str,
+    context: str | None = None,
 ) -> None:
     errors.append({"id": feed_id, "error": error})
-    feed_meta.append({"id": feed_id, "name": name, "ok": False, "error": error})
+    entry: dict[str, Any] = {"id": feed_id, "name": name, "ok": False, "error": error}
+    if context:
+        entry["context"] = context
+    feed_meta.append(entry)
 
 
 def _load_feed_body(
@@ -253,6 +260,7 @@ def _execute_get_calendar(
                 feed_id=slot.id,
                 name=slot.name,
                 error="not configured",
+                context=slot.context,
             )
             continue
 
@@ -274,6 +282,7 @@ def _execute_get_calendar(
                 feed_id=resolved.id,
                 name=resolved.name,
                 error=loaded,
+                context=resolved.context,
             )
             continue
 
@@ -289,6 +298,7 @@ def _execute_get_calendar(
                 end=end,
                 calendar_id=resolved.id,
                 calendar_name=resolved.name,
+                calendar_context=resolved.context,
             )
         except ValueError as exc:
             _record_feed_error(
@@ -297,20 +307,22 @@ def _execute_get_calendar(
                 feed_id=resolved.id,
                 name=resolved.name,
                 error=f"bad response: {exc}",
+                context=resolved.context,
             )
             continue
 
         events.extend(feed_events)
-        feed_meta.append(
-            {
-                "id": resolved.id,
-                "name": resolved.name,
-                "ok": True,
-                "fetched_at": fetched_at,
-                "stale": stale,
-                "event_count": len(feed_events),
-            }
-        )
+        meta: dict[str, Any] = {
+            "id": resolved.id,
+            "name": resolved.name,
+            "ok": True,
+            "fetched_at": fetched_at,
+            "stale": stale,
+            "event_count": len(feed_events),
+        }
+        if resolved.context:
+            meta["context"] = resolved.context
+        feed_meta.append(meta)
 
     events.sort(key=lambda e: (e["start"], e.get("calendar_name") or "", e["summary"]))
 
@@ -348,6 +360,14 @@ def make_get_calendar_tool(
     feeds = resolved_calendar_feeds(cal)
     declared = calendar_feeds_declared(cal)
 
+    feed_blurb_parts: list[str] = []
+    for slot in declared:
+        bit = f"{slot.name} ({slot.id})"
+        if slot.context:
+            bit = f"{bit}: {slot.context}"
+        feed_blurb_parts.append(bit)
+    feed_blurb = "; ".join(feed_blurb_parts) if feed_blurb_parts else "none configured"
+
     def execute() -> str:
         if fetch_override is not None:
             return fetch_override()
@@ -367,9 +387,13 @@ def make_get_calendar_tool(
             "Return today's events from the user's Calendar feed(s) (ICS subscribe "
             "URLs in server config). Covers the full calendar day in the home timezone "
             "(midnight to midnight), including morning appointments already past. "
-            "Each event includes calendar / calendar_name when multiple feeds are "
-            "configured — mention the calendar name when it helps. No arguments. "
-            "Do not invent events. Payload may include stale=true and per-feed errors."
+            f"Configured feeds: {feed_blurb}. "
+            "Each event includes calendar / calendar_name / calendar_context when "
+            "configured — use calendar_context to interpret titles (e.g. on a "
+            "photographer/videographer work calendar, 'filmen X' is a shoot with "
+            "client X, not watching a movie). Mention the calendar name when it "
+            "helps. No arguments. Do not invent events. Payload may include "
+            "stale=true and per-feed errors."
         ),
         parameters={
             "type": "object",

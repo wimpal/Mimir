@@ -1,0 +1,26 @@
+---
+description: Cross-repo context for Mimir — always applied
+alwaysApply: true
+---
+
+You are working in Mimir, one of three repos in a household system whose shared
+context lives in the `project-control-heim` repo (added as a second folder in this
+workspace).
+
+ALWAYS, before writing code:
+- read `project-control-heim/ARCHITECTURE.md`, `CONVENTIONS.md`, `status/mimir.md`, the contracts in `project-control-heim/contracts/`
+- if `project-control-heim` is not in the workspace, stop and say so
+
+NEVER:
+- edit source in another repo
+- change a cross-repo interface by editing code — edit `project-control-heim/contracts/` first
+- invent a field, shape or tool name that crosses a repo boundary
+- commit secrets
+
+ALWAYS, before finishing:
+- rewrite `project-control-heim/status/mimir.md` (overwrite, don't append; fill in
+  "Notes for the next agent")
+- tick task checkboxes only for work that exists and runs
+- run `python3 project-control-heim/scripts/validate.py`
+
+Say "unknown — verify" rather than guessing. Full rules: `AGENTS.md` in this repo.

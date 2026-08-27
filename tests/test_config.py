@@ -183,18 +183,23 @@ def test_calendar_feed_secrets_from_env(tmp_path: Path, monkeypatch: pytest.Monk
         "  feeds:\n"
         "    - id: family\n"
         "      name: Fam Palland\n"
+        "      context: Shared household schedule\n"
         "    - id: work\n"
         "      name: Work\n"
+        "      context: Photographer and videographer jobs\n"
     )
     s = load_config(write_config(tmp_path, yaml_text), use_dotenv=False)
     assert len(s.calendar.feeds) == 2
     assert s.calendar.feeds[0].url == "https://example.com/family.ics"
+    assert s.calendar.feeds[0].context == "Shared household schedule"
     assert s.calendar.feeds[1].name == "Work"
     assert s.calendar.feeds[1].url == "https://example.com/work.ics"
+    assert s.calendar.feeds[1].context == "Photographer and videographer jobs"
     from brain.config import redacted_view, resolved_calendar_feeds
 
     resolved = resolved_calendar_feeds(s.calendar)
     assert [f.id for f in resolved] == ["family", "work"]
+    assert resolved[1].context == "Photographer and videographer jobs"
     view = redacted_view(s)
     assert view["calendar"]["feeds"][0]["url"] == "***set***"
 

@@ -89,7 +89,10 @@ def test_health_ok(settings: Settings) -> None:
         resp = tc.get("/health")
     assert resp.status_code == 200
     body = resp.json()
+    assert body["service"] == "mimir"
     assert body["status"] == "ok"
+    assert body["version"]
+    assert body["checks"]["db"] == "ok"
     assert body["ollama"]["reachable"] is True
     assert body["db"]["ok"] is True
     assert body["db"]["schema_version"] == SCHEMA_VERSION

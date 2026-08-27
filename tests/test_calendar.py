@@ -183,8 +183,18 @@ def test_multi_feed_merges_and_tags(tmp_path: Path) -> None:
         tmp_path,
         url=None,
         feeds=[
-            {"id": "family", "name": "Fam Palland", "url": "https://example.com/family.ics"},
-            {"id": "work", "name": "Work", "url": "https://example.com/work.ics"},
+            {
+                "id": "family",
+                "name": "Fam Palland",
+                "url": "https://example.com/family.ics",
+                "context": "Shared household schedule",
+            },
+            {
+                "id": "work",
+                "name": "Work",
+                "url": "https://example.com/work.ics",
+                "context": "Photographer and videographer jobs",
+            },
         ],
     )
 
@@ -205,10 +215,18 @@ def test_multi_feed_merges_and_tags(tmp_path: Path) -> None:
     by_summary = {e["summary"]: e for e in data["events"]}
     assert by_summary["Standup"]["calendar"] == "family"
     assert by_summary["Standup"]["calendar_name"] == "Fam Palland"
+    assert by_summary["Standup"]["calendar_context"] == "Shared household schedule"
     assert by_summary["Sprint planning"]["calendar"] == "work"
     assert by_summary["Sprint planning"]["calendar_name"] == "Work"
+    assert (
+        by_summary["Sprint planning"]["calendar_context"]
+        == "Photographer and videographer jobs"
+    )
     assert len(data["feeds"]) == 2
     assert all(f["ok"] for f in data["feeds"])
+    by_feed = {f["id"]: f for f in data["feeds"]}
+    assert by_feed["family"]["context"] == "Shared household schedule"
+    assert by_feed["work"]["context"] == "Photographer and videographer jobs"
 
 
 def test_multi_feed_partial_failure(tmp_path: Path) -> None:

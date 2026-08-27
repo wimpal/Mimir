@@ -15,6 +15,17 @@ python -m clients.tui
 Quick “new window” shortcut (still uses uv): double-click
 [`scripts/launch_mimir.bat`](../../scripts/launch_mimir.bat).
 
+Full restart (stop brain + TUI, start both fresh — picks up prompt/config changes):
+
+```powershell
+powershell -File scripts/restart_mimir.ps1
+# brain only: powershell -File scripts/restart_mimir.ps1 -BrainOnly
+# packaged exe: powershell -File scripts/restart_mimir.ps1 -UseExe
+```
+
+Or double-click [`scripts/restart_mimir.bat`](../../scripts/restart_mimir.bat).
+Default restart uses `uv run mimir` so source changes apply; pass `-UseExe` for `dist\mimir.exe`.
+
 ## Windows .exe (double-click → terminal + TUI)
 
 ```powershell
@@ -34,8 +45,10 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 - Compact status line (host / conversation) under the window caption
 - World-tree splash when the Conversation is empty; `/new` restores it
 - Each launch starts a **new** Conversation; `/history` resumes a past one; `/settings` edits Preferences
-- Highlighted user strips, bordered tool cards, Amp-style input border
+- Highlighted user strips, one dim tool summary line under the reply, Amp-style input border
 - Esc interrupts the current turn while working
+- Copy: drag to select then Ctrl+C, or `/copy` / Ctrl+Shift+C for the last reply
+  (Ctrl+C no longer quits — use Ctrl+Q, Ctrl+D, or `/quit`)
 
 ## Commands
 
@@ -45,6 +58,7 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 | `/new` | New Conversation |
 | `/history` | Browse and resume a past Conversation |
 | `/settings` | View and edit allowlisted Preferences |
+| `/copy` | Copy the last assistant reply |
 | `/quit` | Exit |
 | `/help` | Help |
 | Esc | Interrupt in-flight turn (or dismiss `/history` / `/settings`) |

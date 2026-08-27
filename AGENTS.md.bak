@@ -6,11 +6,11 @@
 
 ## Read this first
 
-You are working in **Mimir**, one of three repositories in a household system.
+You are working in **Mimir**, one of four repositories in a household system.
 The shared context lives in the **`project-control-heim`** repo, which should be open
 as a second folder in this workspace. Before writing any code, read:
 
-- `project-control-heim/ARCHITECTURE.md` — how the three repos relate, and why
+- `project-control-heim/ARCHITECTURE.md` — how the four repos relate, and why
 - `project-control-heim/CONVENTIONS.md` — naming, IDs, dates, money, errors, versioning
 - `project-control-heim/status/mimir.md` — what state this repo is in right now
 - `project-control-heim/contracts/` — every service's tool surface; this repo consumes them
@@ -19,13 +19,14 @@ as a second folder in this workspace. Before writing any code, read:
 If `project-control-heim` is not available in this workspace, **stop and say so.**
 Do not proceed from guesses about the other repos.
 
-## The system in three lines
+## The system in four lines
 
 | Repo | Role | Port |
 |---|---|---|
 | Mimir | orchestrator | 8000 |
 | Homebase | service | 3000 |
 | BudgetTracker | service | 8080 |
+| Grimoire | service | 8040 |
 
 **Mimir is the only client. The services never call each other.** Cross-service
 orchestration lives in Mimir. Each service owns its data exclusively — no service

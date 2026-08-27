@@ -6,7 +6,8 @@
 
 - Transport: HTTP GET of configured **Calendar feed(s)** (ICS subscribe URL)
 - No provider SDK — Proton share link first; Google/Fastmail/etc. by swapping the URL
-- **Multiple named feeds:** `calendar.feeds` in YAML (`id` + display `name`); secrets
+- **Multiple named feeds:** `calendar.feeds` in YAML (`id` + display `name` +
+  optional `context` note for the LLM); secrets
   `CALENDAR_ICS_URL_<ID>` (ID uppercased, hyphens → underscores)
 - **Legacy single feed:** `CALENDAR_ICS_URL` only when `feeds` is empty (not a fallback
   beside named feeds)
@@ -28,8 +29,8 @@ Names are **config**, not Preferences (`/settings`).
 Compact JSON for the LLM includes:
 
 - `timezone` / `window` — query bounds
-- `events` — `{summary, start, end, all_day, location?, calendar, calendar_name}`
-- `feeds` — per-feed ok/stale/fetched_at (or error)
+- `events` — `{summary, start, end, all_day, location?, calendar, calendar_name, calendar_context?}`
+- `feeds` — per-feed ok/stale/fetched_at (or error); optional `context` from config
 - `errors` — optional list when a feed fails but others succeed
 - `fetched_at` / `stale` / `lag_note`
 
@@ -47,6 +48,7 @@ calendar:
   feeds:
     - id: family
       name: Fam Palland
+      context: Shared household / family schedule
     - id: personal
       name: Personal
 ```

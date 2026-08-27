@@ -73,11 +73,11 @@ A Jellyfin BoxSet grouping of Movies (e.g. MCU), cached on Catalogue rows at Syn
 _Avoid_: Collection (ambiguous with Catalogue), franchise (informal)
 
 **Calendar feed**:
-A provider-agnostic ICS subscribe URL the brain fetches for read-only schedule data. Multiple named feeds may be configured (`calendar.feeds` + `CALENDAR_ICS_URL_<ID>`); each event is tagged with `calendar` / `calendar_name`. Not a provider SDK and not CalDAV; swapping providers means changing the URL. Names live in config.yaml — not Preferences.
+A provider-agnostic ICS subscribe URL the brain fetches for read-only schedule data. Multiple named feeds may be configured (`calendar.feeds` + `CALENDAR_ICS_URL_<ID>`); each event is tagged with `calendar` / `calendar_name` / optional `calendar_context`. Optional per-feed `context` in config.yaml is a short note for the LLM (what the calendar is) and is copied onto events. Not a provider SDK and not CalDAV; swapping providers means changing the URL. Names and context live in config.yaml — not Preferences.
 _Avoid_: Proton calendar (as the integration type), CalDAV, calendar sync engine, Preference for calendar names
 
 **Morning brief**:
-A phrase-triggered reply (e.g. “good morning”) that uses normal chat plus weather and Calendar feed tools. Not a slash command and not a proactive push.
+A phrase-triggered reply (e.g. “good morning” / “goedemorgen”) that uses normal chat plus weather and Calendar feed tools, in the user’s language. Not a slash command and not a proactive push.
 _Avoid_: Daily digest (as a notification), /morning
 
 **Channel allowlist**:

@@ -426,6 +426,8 @@ See [`docs/adr/0007-calendar-via-ics-url.md`](./docs/adr/0007-calendar-via-ics-u
 
 ## Phase 8e — Morning brief (½–1 day)
 
+**Status: done** — see [`docs/phase8e-morning-brief.md`](./docs/phase8e-morning-brief.md).
+
 Phrase-triggered (“good morning”): normal chat + prompt/tool discipline calls weather + Calendar feed. No `/morning`, no proactive push. Contents: **weather + today’s schedule** only (no news).
 
 **Exit criteria:** Typed “good morning” yields a short brief grounded in tool output; works the same later when spoken in Phase 10.

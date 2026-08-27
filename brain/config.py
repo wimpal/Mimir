@@ -113,6 +113,7 @@ class CalendarFeedSettings(_Strict):
 
     id: str
     name: str
+    context: str | None = None  # optional note for the LLM (what this calendar is)
     url: str | None = None  # secret: CALENDAR_ICS_URL_<ID>
     username: str | None = None  # secret: CALENDAR_ICS_USERNAME_<ID>
     password: str | None = None  # secret: CALENDAR_ICS_PASSWORD_<ID>
@@ -136,6 +137,14 @@ class CalendarFeedSettings(_Strict):
         if not text:
             raise ValueError("calendar feed name must be non-empty")
         return text
+
+    @field_validator("context")
+    @classmethod
+    def _context_strip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        return text or None
 
 
 class CalendarSettings(_Strict):
@@ -163,6 +172,7 @@ class ResolvedCalendarFeed:
     url: str
     username: str | None
     password: str | None
+    context: str | None = None
 
 
 def calendar_feed_env_suffix(feed_id: str) -> str:
@@ -189,6 +199,7 @@ def resolved_calendar_feeds(settings: CalendarSettings) -> list[ResolvedCalendar
                     url=url,
                     username=feed.username,
                     password=feed.password,
+                    context=feed.context,
                 )
             )
         return out
@@ -202,6 +213,7 @@ def resolved_calendar_feeds(settings: CalendarSettings) -> list[ResolvedCalendar
                 url=legacy,
                 username=settings.username,
                 password=settings.password,
+                context=None,
             )
         ]
     return []
