@@ -20,10 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from brain.agent import StoppedReason, TurnResult, run_turn
-from brain.config import ConfigError, load_config
+from brain.config import ConfigError, Settings, load_config
 from brain.db import Database, Movie
 from brain.ollama import ChatMessage, OllamaClient
-from brain.tools import build_registry, tool_schemas
+from brain.prefs import build_system_prompt
+from brain.tools import Tool, build_registry, tool_schemas
 
 
 def _iso_days_ago(days: float) -> str:
@@ -105,6 +106,7 @@ class Case:
     category: str
     prompt: str
     check: Callable[[TurnResult], CheckResult]
+    prior_turns: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -139,6 +141,190 @@ def _fail_used(reason: str) -> CheckResult:
 
 def _fail_all(reason: str) -> CheckResult:
     return CheckResult(False, False, False, reason)
+
+
+def _tools_called(result: TurnResult) -> list[str]:
+    seq = result.tools_used()
+    if seq:
+        return seq
+    names: list[str] = []
+    for m in result.messages:
+        if m.role != "assistant":
+            continue
+        for tc in m.tool_calls:
+            names.append(tc.function.name)
+    return names
+
+
+def _tool_call_args(result: TurnResult, tool_name: str) -> list[dict]:
+    out: list[dict] = []
+    for m in result.messages:
+        if m.role != "assistant":
+            continue
+        for tc in m.tool_calls:
+            if tc.function.name != tool_name:
+                continue
+            raw = tc.function.arguments
+            if isinstance(raw, dict):
+                out.append(raw)
+                continue
+            try:
+                out.append(json.loads(raw or "{}"))
+            except json.JSONDecodeError:
+                out.append({})
+    return out
+
+
+def _suite_weather_payload() -> str:
+    return json.dumps(
+        {
+            "current": {
+                "time": "2026-08-28T12:00",
+                "temperature_c": 18.0,
+                "conditions": "overcast",
+                "precipitation_mm": 0.1,
+            },
+            "today": {
+                "date": "2026-08-28",
+                "temp_max_c": 19.0,
+                "temp_min_c": 12.0,
+                "conditions": "overcast",
+                "precipitation_mm": 0.5,
+            },
+            "tomorrow": {
+                "date": "2026-08-29",
+                "temp_max_c": 22.0,
+                "temp_min_c": 14.0,
+                "conditions": "mainly clear",
+                "precipitation_mm": 0.0,
+            },
+            "fetched_at": "2026-08-28T10:00:00+00:00",
+            "stale": False,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _budget_search_execute(**kwargs: object) -> str:
+    person = str(kwargs.get("person") or "").strip().lower()
+    if person == "ilse":
+        return json.dumps(
+            [
+                {
+                    "amount": 15755,
+                    "spent_euros": 157.55,
+                    "category": "Boodschappen",
+                    "person": "Ilse",
+                    "currency": "EUR",
+                }
+            ]
+        )
+    if person == "wim":
+        return json.dumps(
+            [
+                {
+                    "amount": 9900,
+                    "spent_euros": 99.0,
+                    "category": "Boodschappen",
+                    "person": "Wim",
+                    "currency": "EUR",
+                }
+            ]
+        )
+    return "[]"
+
+
+def _suite_budget_registry(settings: Settings, db: Database) -> dict[str, Tool]:
+    base = build_registry(
+        settings,
+        db=db,
+        weather_fetch_override=_suite_weather_payload,
+        calendar_fetch_override=_suite_calendar_ok,
+    )
+    search = Tool(
+        name="budgettracker.transactions.search",
+        description=(
+            "Search household expenses by text, category, person, and date range. "
+            "Amounts are integer cents; use spent_euros in replies."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "category": {"type": "string"},
+                "person": {"type": "string"},
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+            },
+        },
+        execute=_budget_search_execute,
+        service="budgettracker",
+    )
+    base[search.name] = search
+    return base
+
+
+def _require_followup_weather_tomorrow() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "get_weather" not in _tools_called(result):
+            return _fail_right("no_tool_when_required")
+        payload = _weather_payload(result)
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        tomorrow = data.get("tomorrow") or {}
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        tmax = tomorrow.get("temp_max_c")
+        tmin = tomorrow.get("temp_min_c")
+        cond = (tomorrow.get("conditions") or "").lower()
+        if (
+            _temp_in_content(tmax, content)
+            or _temp_in_content(tmin, content)
+            or _condition_in_content(cond, content)
+            or "morgen" in content
+            or "tomorrow" in content
+        ):
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
+
+
+def _require_followup_budget_wim() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        seq = _tools_called(result)
+        tool_name = None
+        if "budgettracker.transactions.search" in seq:
+            tool_name = "budgettracker.transactions.search"
+        elif "budgettracker.summary.by_category" in seq:
+            tool_name = "budgettracker.summary.by_category"
+        if tool_name is None:
+            return _fail_right("no_tool_when_required")
+        arg_sets = _tool_call_args(result, tool_name)
+        if not arg_sets:
+            return _fail_args("malformed_args")
+        person_ok = any(
+            "wim" in str(args.get("person") or "").lower() for args in arg_sets
+        )
+        if not person_ok:
+            return _fail_args("missing_person_wim")
+        content = result.content or ""
+        if "99" in content.replace(",", "."):
+            return _ok()
+        if "9900" in content:
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
 
 
 def _weather_payload(result: TurnResult) -> str | None:
@@ -612,6 +798,39 @@ def _require_morning_brief() -> Callable[[TurnResult], CheckResult]:
     return check
 
 
+_ENGLISH_LEAK_IN_DUTCH: tuple[str, ...] = (
+    "it is overcast",
+    "the rest of the day",
+    "heavy rain",
+    "good morning",
+    "temperature of",
+    "scheduled for",
+    "you have a family event",
+    "with a temperature",
+    "will see",
+)
+
+
+def _require_morning_brief_dutch() -> Callable[[TurnResult], CheckResult]:
+    """Morning brief in Dutch — same grounding as EN, no English mid-reply."""
+
+    base = _require_morning_brief()
+
+    def check(result: TurnResult) -> CheckResult:
+        grounded = base(result)
+        if not grounded.passed:
+            return grounded
+        content = (result.content or "").lower()
+        if "goedemorgen" not in content:
+            return _fail_used("reply_missing_dutch_greeting")
+        for pat in _ENGLISH_LEAK_IN_DUTCH:
+            if pat in content:
+                return _fail_used(f"english_in_dutch_reply:{pat}")
+        return _ok()
+
+    return check
+
+
 def _require_set_preference(key: str, needle: str) -> Callable[[TurnResult], CheckResult]:
     def check(result: TurnResult) -> CheckResult:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
@@ -987,10 +1206,40 @@ CASES: list[Case] = [
         "Goodmorning",
         _require_morning_brief(),
     ),
+    Case(
+        "morning_4",
+        "must_call_weather_and_calendar",
+        "Goedemorgen",
+        _require_morning_brief_dutch(),
+    ),
+    Case(
+        "followup_weather_1",
+        "followup_turn",
+        "tomorrow?",
+        _require_followup_weather_tomorrow(),
+        prior_turns=(
+            (
+                "What's the weather today?",
+                "Overcast today, about 18 degrees — steady, if uninspiring.",
+            ),
+        ),
+    ),
+    Case(
+        "followup_budget_1",
+        "followup_turn",
+        "en wim?",
+        _require_followup_budget_wim(),
+        prior_turns=(
+            (
+                "wat heeft ilse deze maand uitgegeven aan boodschappen",
+                "Ilse heeft deze maand €157,55 uitgegeven aan boodschappen.",
+            ),
+        ),
+    ),
 ]
 
 
-def _system_messages() -> list[ChatMessage]:
+def _system_messages(settings: Settings, registry: dict[str, Tool] | None = None) -> list[ChatMessage]:
     if not PROMPT_PATH.is_file():
         raise FileNotFoundError(
             f"system prompt required for suite: {PROMPT_PATH} "
@@ -1013,8 +1262,9 @@ def _system_messages() -> list[ChatMessage]:
         "- `list_recently_watched`: use when asked what they watched lately / "
         "last week; ground the answer in the tool list only.\n"
         "Call a tool when it clearly applies; otherwise answer directly.\n"
-        "On morning greetings (good morning / morning), call get_weather and "
-        "get_calendar in the same step, then brief weather + today's schedule only.\n"
+        "On morning greetings (good morning / morning / goedemorgen), call get_weather and "
+        "get_calendar in the same step, then brief weather + today's schedule only. "
+        "Reply in the user's language — Dutch prompts get a fully Dutch reply.\n"
         "When both time and echo are needed, call get_server_time first, "
         "then echo the returned timestamp — never invent a time.\n"
         "Never invent weather; if get_weather fails, say so briefly.\n"
@@ -1022,7 +1272,25 @@ def _system_messages() -> list[ChatMessage]:
         "Never invent movie titles; if recommend_movies or "
         "list_recently_watched fails or the catalogue is empty, say so briefly.\n"
     )
-    return [ChatMessage(role="system", content=text)]
+    if registry:
+        for name in sorted(registry):
+            if name.startswith("budgettracker."):
+                text += f"- `{name}`: {registry[name].description}\n"
+    content = build_system_prompt(
+        text,
+        {},
+        timezone=settings.location.timezone,
+    )
+    return [ChatMessage(role="system", content=content)]
+
+
+def build_case_messages(case: Case, settings: Settings, registry: dict[str, Tool]) -> list[ChatMessage]:
+    messages = _system_messages(settings, registry)
+    for user_text, assistant_text in case.prior_turns:
+        messages.append(ChatMessage(role="user", content=user_text))
+        messages.append(ChatMessage(role="assistant", content=assistant_text))
+    messages.append(ChatMessage(role="user", content=case.prompt))
+    return messages
 
 
 def run_case(
@@ -1032,8 +1300,9 @@ def run_case(
     think: bool,
     tools: dict,
     tool_timeout_s: float,
+    settings: Settings,
 ) -> CaseResult:
-    messages = _system_messages() + [ChatMessage(role="user", content=case.prompt)]
+    messages = build_case_messages(case, settings, tools)
     t0 = time.perf_counter()
     result = run_turn(
         client,
@@ -1118,7 +1387,9 @@ def main() -> int:
         settings,
         db=db,
         calendar_fetch_override=_suite_calendar_ok,
+        weather_fetch_override=_suite_weather_payload,
     )
+    budget_reg = _suite_budget_registry(settings, db)
     offline_reg = build_registry(
         settings,
         db=db,
@@ -1158,6 +1429,10 @@ def main() -> int:
                 tools = calendar_offline_reg
             elif case.id == "jellyfin_4":
                 tools = empty_reg
+            elif case.id.startswith("followup_budget_"):
+                tools = budget_reg
+            elif case.id.startswith("followup_weather_"):
+                tools = registry
             else:
                 tools = registry
             cr = run_case(
@@ -1166,6 +1441,7 @@ def main() -> int:
                 think=settings.ollama.think,
                 tools=tools,
                 tool_timeout_s=settings.timeouts.tool_s,
+                settings=settings,
             )
             results.append(cr)
             mark = "PASS" if cr.passed else "FAIL"
@@ -1232,6 +1508,11 @@ def main() -> int:
     if calendar_cases:
         c_pass = sum(1 for r in calendar_cases if r.passed)
         print(f"calendar_pinned={c_pass}/{len(calendar_cases)}")
+
+    followup_cases = [r for r in results if r.id.startswith("followup_")]
+    if followup_cases:
+        f_pass = sum(1 for r in followup_cases if r.passed)
+        print(f"followup_pinned={f_pass}/{len(followup_cases)}")
 
     if rate >= PASS_THRESHOLD:
         print(f"\nEXIT OK (>= {PASS_THRESHOLD:.0%})")

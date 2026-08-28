@@ -37,8 +37,9 @@ greeting discipline, language match, Style examples (EN/NL).
 
 ## Exit checks
 
-Pinned suite cases `morning_1`, `morning_2` in `scripts/tool_call_suite.py`
-(both tools required; reply grounded in weather and calendar payloads).
+Pinned suite cases `morning_1`, `morning_2`, `morning_4` in `scripts/tool_call_suite.py`
+(both tools required; reply grounded in weather and calendar payloads; `morning_4`
+checks Dutch greeting with no English mid-reply).
 
 ```powershell
 uv run python scripts/tool_call_suite.py

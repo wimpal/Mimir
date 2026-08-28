@@ -47,6 +47,9 @@ timeouts:
   turn_s: 180
   # Overall wall-clock budget for one Jellyfin Catalogue Sync.
   jellyfin_sync_s: 300
+  # MCP tool calls (contracts/mimir.client.md).
+  mcp_default_s: 10
+  mcp_search_s: 30
 
 weather:
   # Forecast cache TTL (seconds). Serve last success marked stale when API fails.
@@ -73,6 +76,17 @@ calendar:
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).
   history_pairs: 20
+
+# MCP services Mimir consumes (mirrors project-control-heim/registry.yaml).
+# Bearer token per service in .env: BUDGETTRACKER_TOKEN, HOMEBASE_TOKEN, …
+services:
+  budgettracker:
+    host: 192.168.0.170
+    port: 8080
+    path: /mcp
+    enabled: true
+    # rmcp allows loopback Host only by default; required when host is a LAN IP.
+    host_header: localhost
 
 runtime:
   # SQLite + logs + weather cache live here. Relative paths resolve against cwd.

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from brain.mcp.names import display_service_name
 
 # Stable order for GET /v1/preferences and TUI /settings.
 PREFERENCE_KEYS: tuple[str, ...] = ("favorite_genres", "tone")
@@ -64,8 +68,50 @@ def format_prefs_block(prefs: dict[str, str]) -> str:
     return "## Known preferences\n\n" + "\n".join(lines)
 
 
-def build_system_prompt(base: str, prefs: dict[str, str]) -> str:
+def format_clock_block(*, timezone: str) -> str:
+    """Inject household-local date/time so relative periods resolve correctly."""
+    try:
+        now = datetime.now(ZoneInfo(timezone))
+    except Exception:  # noqa: BLE001 — bad tz name; omit block
+        return ""
+    return (
+        "## Current date and time\n\n"
+        f"- now: {now.strftime('%Y-%m-%dT%H:%M:%S')} ({timezone})\n"
+        f"- today: {now.date().isoformat()}\n"
+        '- Use this for "today", "this month", "last month" / "vorige maand", etc. '
+        "Never guess the year or month."
+    )
+
+
+def format_unavailable_services_block(unavailable: list[str]) -> str:
+    """Note for the system prompt when MCP services failed to connect."""
+    if not unavailable:
+        return ""
+    lines = [
+        f"- {display_service_name(sid)} is unreachable — do not invent data from that "
+        f"service; tell the user plainly that you cannot reach {display_service_name(sid)} "
+        "right now."
+        for sid in unavailable
+    ]
+    return "## Unavailable services\n\n" + "\n".join(lines)
+
+
+def build_system_prompt(
+    base: str,
+    prefs: dict[str, str],
+    *,
+    unavailable_services: list[str] | None = None,
+    timezone: str | None = None,
+) -> str:
+    parts = [base.rstrip()]
+    if timezone:
+        clock = format_clock_block(timezone=timezone)
+        if clock:
+            parts.append(clock)
     block = format_prefs_block(prefs)
-    if not block:
-        return base
-    return f"{base.rstrip()}\n\n{block}\n"
+    if block:
+        parts.append(block)
+    unavail = format_unavailable_services_block(unavailable_services or [])
+    if unavail:
+        parts.append(unavail)
+    return "\n\n".join(parts) + "\n"

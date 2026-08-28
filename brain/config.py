@@ -102,6 +102,8 @@ class TimeoutSettings(_Strict):
     tool_s: float = 30.0  # enforced when tools become I/O-bound (Phase 3+)
     turn_s: float = 180.0  # overall wall-clock budget for one chat turn
     jellyfin_sync_s: float = 300.0  # overall Sync wall clock
+    mcp_default_s: float = 10.0  # MCP tool call default (contracts/mimir.client.md)
+    mcp_search_s: float = 30.0  # MCP tools whose name ends with .search
 
 
 class WeatherSettings(_Strict):
@@ -240,6 +242,40 @@ class MemorySettings(_Strict):
     history_pairs: int = 20  # last N user+assistant pairs injected under num_ctx
 
 
+class McpServiceSettings(_Strict):
+    """One MCP service Mimir consumes (shape mirrors project-control-heim/registry.yaml)."""
+
+    host: str = "127.0.0.1"
+    port: int
+    path: str = "/mcp"
+    enabled: bool = True
+    token: str | None = None  # secret: <SERVICE>_TOKEN e.g. BUDGETTRACKER_TOKEN
+    # rmcp Streamable HTTP defaults to loopback-only Host allowlist. When connecting
+    # by LAN IP, send Host: localhost (matches BudgetTracker mcp_smoke.rs).
+    host_header: str | None = None
+
+
+def mcp_service_url(service_id: str, svc: McpServiceSettings) -> str:
+    """Build the streamable HTTP MCP endpoint URL."""
+    path = svc.path if svc.path.startswith("/") else f"/{svc.path}"
+    return f"http://{svc.host}:{svc.port}{path}"
+
+
+def mcp_token_env_name(service_id: str) -> str:
+    """Env var for bearer token — BUDGETTRACKER_TOKEN for budgettracker."""
+    return f"{service_id.upper()}_TOKEN"
+
+
+def mcp_request_host_header(svc: McpServiceSettings) -> str | None:
+    """Host header for MCP HTTP requests (rmcp DNS-rebinding allowlist)."""
+    if svc.host_header is not None:
+        text = svc.host_header.strip()
+        return text or None
+    if is_loopback_host(svc.host):
+        return None
+    return "localhost"
+
+
 class Settings(_Strict):
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     location: LocationSettings
@@ -251,6 +287,7 @@ class Settings(_Strict):
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
     calendar: CalendarSettings = Field(default_factory=CalendarSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    services: dict[str, McpServiceSettings] = Field(default_factory=dict)
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -302,6 +339,8 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "tool_s"): "MIMIR_TIMEOUT_TOOL_S",
     ("timeouts", "turn_s"): "MIMIR_TIMEOUT_TURN_S",
     ("timeouts", "jellyfin_sync_s"): "MIMIR_JELLYFIN_SYNC_TIMEOUT_S",
+    ("timeouts", "mcp_default_s"): "MIMIR_TIMEOUT_MCP_DEFAULT_S",
+    ("timeouts", "mcp_search_s"): "MIMIR_TIMEOUT_MCP_SEARCH_S",
     ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",
     ("calendar", "cache_ttl_s"): "MIMIR_CALENDAR_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
@@ -367,6 +406,7 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
                 target[key] = value
 
     _apply_calendar_feed_secrets(data, cfg_path)
+    _apply_mcp_service_tokens(data)
 
     try:
         settings = Settings.model_validate(data)
@@ -375,6 +415,20 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
 
     validate_bind_auth(settings)
     return settings
+
+
+def _apply_mcp_service_tokens(data: dict) -> None:
+    """Overlay BUDGETTRACKER_TOKEN etc. onto services.<id>.token from env."""
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return
+    for service_id, entry in services.items():
+        if not isinstance(entry, dict):
+            continue
+        env_name = mcp_token_env_name(str(service_id))
+        value = os.environ.get(env_name)
+        if value is not None:
+            entry["token"] = value
 
 
 def _apply_calendar_feed_secrets(data: dict, cfg_path: Path) -> None:
@@ -436,6 +490,9 @@ def redacted_view(settings: Settings) -> dict:
             feed["username"] = "***set***"
         if feed.get("password"):
             feed["password"] = "***set***"
+    for svc_id, svc in (data.get("services") or {}).items():
+        if isinstance(svc, dict) and svc.get("token"):
+            svc["token"] = "***set***"
     return data
 
 

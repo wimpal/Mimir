@@ -19,6 +19,8 @@ class Tool:
     description: str
     parameters: dict[str, Any]
     execute: Callable[..., str]
+    timeout_s: float | None = None
+    service: str | None = None  # MCP service id when remote
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -121,8 +123,9 @@ def build_registry(
     weather_fetch_override: Callable[[], str] | None = None,
     calendar_fetch_override: Callable[[], str] | None = None,
     data_dir: Path | None = None,
+    mcp: Any | None = None,
 ) -> dict[str, Tool]:
-    """Dummy tools + weather + calendar + optional preference / recommend tools."""
+    """Dummy tools + weather + calendar + optional preference / recommend / MCP tools."""
     from brain.tools.calendar import calendar_tools
     from brain.tools.preferences import preference_tools
     from brain.tools.recently_watched import recently_watched_tools
@@ -148,6 +151,10 @@ def build_registry(
         registry.update(preference_tools(db))
         registry.update(recommend_tools(settings, db))
         registry.update(recently_watched_tools(settings, db))
+    if mcp is not None:
+        from brain.mcp.tools import build_mcp_tools
+
+        registry.update(build_mcp_tools(mcp, settings))
     return registry
 
 

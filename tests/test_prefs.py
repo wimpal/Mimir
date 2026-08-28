@@ -32,6 +32,25 @@ def test_normalize_favorite_genres() -> None:
     assert normalize_preference_value("tone", "") is None
 
 
+def test_format_clock_block() -> None:
+    from brain.prefs import format_clock_block
+
+    block = format_clock_block(timezone="Europe/Amsterdam")
+    assert "Current date and time" in block
+    assert "today:" in block
+    assert "vorige maand" in block
+
+
+def test_build_system_prompt_includes_clock() -> None:
+    prompt = build_system_prompt(
+        "You are Mimir.",
+        {},
+        timezone="Europe/Amsterdam",
+    )
+    assert "Current date and time" in prompt
+    assert "2026-" in prompt or "today:" in prompt
+
+
 def test_format_prefs_block() -> None:
     assert format_prefs_block({}) == ""
     block = format_prefs_block({"favorite_genres": '["sci-fi"]', "tone": "dry"})

@@ -103,9 +103,15 @@ def _dispatch_with_timeout(
 
     pool = ThreadPoolExecutor(max_workers=1)
     try:
+        registry = TOOLS if tools is None else tools
+        tool = registry.get(name)
+        effective = timeout_s
+        if tool is not None and tool.timeout_s is not None:
+            effective = min(tool.timeout_s, timeout_s)
+
         future = pool.submit(dispatch, name, arguments, tools=tools)
         try:
-            return future.result(timeout=timeout_s)
+            return future.result(timeout=effective)
         except FuturesTimeoutError:
             future.cancel()
             return f"error: tool '{name}' timed out"

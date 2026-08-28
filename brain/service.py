@@ -143,6 +143,7 @@ class BrainService:
         data_dir: Any,
         db: Database | None = None,
         tools: dict[str, Tool] | None = None,
+        unavailable_services: list[str] | None = None,
     ) -> None:
         self.settings = settings
         self.client = client
@@ -150,10 +151,22 @@ class BrainService:
         self.prompt_id = prompt_id
         self.data_dir = data_dir
         self.db = db
+        self.unavailable_services = list(unavailable_services or [])
         if tools is not None:
             self.tools = tools
         else:
             self.tools = build_registry(settings, db=db, data_dir=data_dir)
+
+    def _system_prompt_for_turn(self, prefs: dict[str, str] | None = None) -> str:
+        stored = prefs
+        if stored is None:
+            stored = self.db.get_preferences() if self.db is not None else {}
+        return build_system_prompt(
+            self.system_prompt,
+            stored,
+            unavailable_services=self.unavailable_services,
+            timezone=self.settings.location.timezone,
+        )
 
     def _refresh_system_after_pref_tool(
         self,
@@ -168,7 +181,7 @@ class BrainService:
         prefs = self.db.get_preferences()
         working[0] = ChatMessage(
             role="system",
-            content=build_system_prompt(self.system_prompt, prefs),
+            content=self._system_prompt_for_turn(prefs),
         )
 
     def list_conversation_messages(self, conversation_id: str) -> list[StoredMessage]:
@@ -228,7 +241,7 @@ class BrainService:
         limit = max(0, self.settings.memory.history_pairs) * 2
         history = self.db.list_recent_messages(conversation_id, limit=limit)
         prefs = self.db.get_preferences()
-        system = build_system_prompt(self.system_prompt, prefs)
+        system = self._system_prompt_for_turn(prefs)
         chat_messages: list[ChatMessage] = [
             ChatMessage(role="system", content=system),
             *[ChatMessage(role=m.role, content=m.content) for m in history],
@@ -280,7 +293,7 @@ class BrainService:
     ) -> ChatOutcome:
         try:
             chat_messages = build_messages(
-                self.system_prompt, message=message, messages=messages
+                self._system_prompt_for_turn(), message=message, messages=messages
             )
         except ValueError as exc:
             return ChatOutcome(
