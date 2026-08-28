@@ -299,6 +299,82 @@ def test_agent_loop_calls_mcp_tool(tmp_path: Path) -> None:
         assert "budgettracker.transactions.search" in result.tools_used()
 
 
+def test_agent_blocks_mcp_write_without_mutation_intent(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    server = _make_budget_server()
+    with _BridgeRunner(settings, {"budgettracker": server}) as runner:
+        client = _ScriptedClient(
+            [
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            function=ToolCallFunction(
+                                name="budgettracker.transactions.add",
+                                arguments={"description": "groceries", "amount": 6200},
+                            )
+                        )
+                    ],
+                ),
+                ChatMessage(role="assistant", content="I did not record that."),
+            ]
+        )
+        data_dir = settings.runtime.data_dir
+        result = run_turn(
+            client,
+            [ChatMessage(role="user", content="what did we spend on groceries?")],
+            tools=runner.registry,
+            default_tool_timeout_s=30.0,
+            data_dir=data_dir,
+        )
+        assert result.stopped_reason == StoppedReason.FINAL
+        tool_msgs = [m for m in result.messages if m.role == "tool"]
+        assert any("write blocked" in (m.content or "") for m in tool_msgs)
+        log_path = mcp_tools_log_path(data_dir)
+        blocked = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(line.get("outcome") == "blocked" for line in blocked)
+
+
+def test_agent_allows_mcp_write_with_mutation_intent(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    server = _make_budget_server()
+    with _BridgeRunner(settings, {"budgettracker": server}) as runner:
+        client = _ScriptedClient(
+            [
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            function=ToolCallFunction(
+                                name="budgettracker.transactions.add",
+                                arguments={"description": "supermarket", "amount": 6200},
+                            )
+                        )
+                    ],
+                ),
+                ChatMessage(role="assistant", content="Recorded €62."),
+            ]
+        )
+        data_dir = settings.runtime.data_dir
+        result = run_turn(
+            client,
+            [ChatMessage(role="user", content="We spent €62 at the supermarket")],
+            tools=runner.registry,
+            default_tool_timeout_s=30.0,
+            data_dir=data_dir,
+        )
+        assert result.stopped_reason == StoppedReason.FINAL
+        tool_msgs = [m for m in result.messages if m.role == "tool"]
+        assert any("tx-1" in (m.content or "") for m in tool_msgs)
+        assert not any("write blocked" in (m.content or "") for m in tool_msgs)
+
+
 def test_append_mcp_tool_log_never_raises(tmp_path: Path) -> None:
     append_mcp_tool_log(
         tmp_path / "nope" / "deep",

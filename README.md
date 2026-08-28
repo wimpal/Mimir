@@ -28,7 +28,8 @@ uv sync
 
 # 2. Local config (gitignored) + secrets template
 Copy-Item config/config.example.yaml config/config.yaml
-# edit config/config.yaml (lat/long!) — optional: Copy-Item .env.example .env
+Copy-Item .env.example .env
+# edit config/config.yaml (lat/long!); set MIMIR_CLIENT_TOKEN in .env and restart brain
 
 # 3. Prove config loads
 uv run python -m brain.config
@@ -39,16 +40,20 @@ uv run python scripts/tool_call_suite.py
 # 5. Run the brain (host/port must match config runtime.host / runtime.port)
 uv run uvicorn brain.main:app --host 127.0.0.1 --port 8000 --reload
 
-# 6. Chat TUI (auto-starts brain if needed; sends MIMIR_AUTH_TOKEN when set)
+# 6. Chat TUI (auto-starts brain if needed; sends MIMIR_CLIENT_TOKEN when set)
 uv run mimir
 # optional: uv run mimir --url http://127.0.0.1:8000
 ```
 
-Health + curl still work. With `auth.mode: token`, pass a Bearer header on `/v1/*`:
+Health stays open. With `auth.mode: token` (default via `MIMIR_AUTH_MODE=token` in `.env`),
+pass a Bearer header on `/v1/*`:
 
 ```powershell
 curl http://127.0.0.1:8000/health
-curl http://127.0.0.1:8000/v1/chat -H "Content-Type: application/json" -d "{\"message\":\"What time is it on the server?\"}"
+curl -X POST http://127.0.0.1:8000/v1/chat `
+  -H "Content-Type: application/json" `
+  -H "Authorization: Bearer $env:MIMIR_CLIENT_TOKEN" `
+  -d "{\"message\":\"What time is it on the server?\"}"
 ```
 
 OpenAI-compatible surface (for Home Assistant later): `POST /v1/chat/completions`,
@@ -77,6 +82,6 @@ If layers stay on CPU: update AMD drivers, retry, and only then judge model qual
 ## Config precedence
 
 `MIMIR_*` env vars > `config/config.yaml`; secrets (`JELLYFIN_API_KEY`,
-`MIMIR_AUTH_TOKEN`) come from `.env`/environment only. See `.env.example`.
+`MIMIR_CLIENT_TOKEN`) come from `.env`/environment only. See `.env.example`.
 TUI-only: `MIMIR_BRAIN_URL`, `MIMIR_TURN_TIMEOUT_S`, `MIMIR_STATE_DIR`.
 Non-loopback bind requires Auth token — [`docs/adr/0005-non-loopback-requires-auth-token.md`](./docs/adr/0005-non-loopback-requires-auth-token.md).

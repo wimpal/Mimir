@@ -4,7 +4,7 @@ Layered config, fail-loud:
 
 1. YAML file (non-secrets): `MIMIR_CONFIG` path or `config/config.yaml`
 2. `MIMIR_*` environment variables override YAML (container-friendly)
-3. Secrets come from `.env` / environment only (`JELLYFIN_API_KEY`, `MIMIR_AUTH_TOKEN`,
+3. Secrets come from `.env` / environment only (`JELLYFIN_API_KEY`, `MIMIR_CLIENT_TOKEN`,
    `CALENDAR_ICS_URL`, …)
 
 Proof command: `uv run python -m brain.config` prints a redacted summary.
@@ -74,7 +74,7 @@ class JellyfinSettings(_Strict):
 
 class AuthSettings(_Strict):
     mode: Literal["none", "token"] = "none"
-    token: str | None = None  # secret: MIMIR_AUTH_TOKEN
+    token: str | None = None  # secret: MIMIR_CLIENT_TOKEN (MIMIR_AUTH_TOKEN deprecated)
 
 
 class RuntimeSettings(_Strict):
@@ -298,18 +298,27 @@ def is_loopback_host(host: str) -> bool:
     return (host or "").strip().lower() in _LOOPBACK_HOSTS
 
 
+def client_token_from_env() -> str | None:
+    """Read brain client auth token; MIMIR_CLIENT_TOKEN wins over deprecated alias."""
+    for name in ("MIMIR_CLIENT_TOKEN", "MIMIR_AUTH_TOKEN"):
+        value = os.environ.get(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
 def validate_bind_auth(settings: Settings) -> None:
     """Refuse insecure bind: non-loopback requires Auth token (ADR 0005)."""
     token = (settings.auth.token or "").strip()
     if settings.auth.mode == "token" and not token:
         raise ConfigError(
-            "auth.mode is 'token' but MIMIR_AUTH_TOKEN is empty — set the token"
+            "auth.mode is 'token' but MIMIR_CLIENT_TOKEN is empty — set the token"
         )
     if not is_loopback_host(settings.runtime.host):
         if settings.auth.mode != "token" or not token:
             raise ConfigError(
                 f"runtime.host is {settings.runtime.host!r} (not loopback); "
-                "set auth.mode: token and MIMIR_AUTH_TOKEN, or bind 127.0.0.1 "
+                "set auth.mode: token and MIMIR_CLIENT_TOKEN, or bind 127.0.0.1 "
                 "(see docs/adr/0005-non-loopback-requires-auth-token.md)"
             )
 
@@ -348,7 +357,6 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
 
 _SECRET_ENV: dict[str, dict[str, str]] = {
     "jellyfin": {"api_key": "JELLYFIN_API_KEY"},
-    "auth": {"token": "MIMIR_AUTH_TOKEN"},
     "calendar": {
         "url": "CALENDAR_ICS_URL",
         "username": "CALENDAR_ICS_USERNAME",
@@ -407,6 +415,13 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
 
     _apply_calendar_feed_secrets(data, cfg_path)
     _apply_mcp_service_tokens(data)
+
+    client_token = client_token_from_env()
+    if client_token is not None:
+        auth_section = data.setdefault("auth", {})
+        if not isinstance(auth_section, dict):
+            raise ConfigError(f"{cfg_path}: section 'auth' must be a mapping")
+        auth_section["token"] = client_token
 
     try:
         settings = Settings.model_validate(data)

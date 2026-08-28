@@ -18,7 +18,7 @@
 #     environment:
 #       MIMIR_CONFIG: /config/config.yaml
 #       MIMIR_DATA_DIR: /data
-#       # MIMIR_AUTH_TOKEN: from .env when auth.mode is token
+#       # MIMIR_CLIENT_TOKEN: from .env when auth.mode is token
 
 #     volumes:
 #       - ./data:/data                    # SQLite + logs

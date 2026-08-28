@@ -140,7 +140,7 @@ Discord is a send tool with a Channel allowlist (ADR 0006), not a chat front doo
 The Phase 6 web UI was superseded.
 
 **Network / auth:** Default bind is loopback with no Auth token. Opening
-`runtime.host` past loopback requires `auth.mode: token` and `MIMIR_AUTH_TOKEN`
+`runtime.host` past loopback requires `auth.mode: token` and `MIMIR_CLIENT_TOKEN`
 (ADR 0005) — refuse startup otherwise. LAN clients may call chat with Bearer;
 Sync and debug traces stay Host-only. No public-internet exposure; remote VPN
 docs are backlog.

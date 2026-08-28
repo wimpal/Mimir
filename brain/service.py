@@ -260,6 +260,7 @@ class BrainService:
             after_tool=self._refresh_system_after_pref_tool,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
+            data_dir=self.data_dir,
         )
 
         reply = _user_facing_reply(result)
@@ -322,6 +323,7 @@ class BrainService:
             default_tool_timeout_s=self.settings.timeouts.tool_s,
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
+            data_dir=self.data_dir,
         )
 
         reply = _user_facing_reply(result)

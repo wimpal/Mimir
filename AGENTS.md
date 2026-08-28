@@ -45,6 +45,15 @@ reads another's storage, ever.
 
 ## This repo
 
+### Current task — none (T-014 done 2026-08-28)
+
+**Next:** M4 daily driver — see `project-control-heim/status/mimir.md` and `ROADMAP.md`.
+
+Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
+`MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.
+
+---
+
 ### Role in the household system
 
 Mimir is the **orchestrator** and the only MCP client. It exposes no tools of its own.
@@ -93,13 +102,15 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 | Memory | **SQLite** (history, prefs, Jellyfin cache); hand-rolled migrations (`schema_version`, Phase 4+) |
 | Weather | **Open-Meteo** (no API key) → **KNMI HARMONIE** for NL; lat/long + timezone in config |
 | Media | **Jellyfin REST** → SQLite cache (paginated sync); LLM reasons over a **filtered subset** |
-| Chat UI | Thin Textual TUI (`uv run mimir` / `dist/mimir.exe`); may auto-start brain; no direct Ollama/Jellyfin calls |
+| Chat UI (desktop) | Thin Textual TUI in `clients/tui/` (`uv run mimir` / `dist/mimir.exe`); may auto-start brain; no direct Ollama/Jellyfin/MCP calls |
+| Chat UI (mobile) | `clients/mobile/` — **Android**, **Kotlin + Jetpack Compose**; TUI-equivalent UX + push-to-talk; brain-side STT/TTS (M5); bearer auth via `MIMIR_CLIENT_TOKEN` |
 | Deploy target | Linux compute box later; keep code **OS-agnostic** now (Windows + AMD 9070 XT 16 GB) |
 | Language/tooling | **Python 3.12+** · **uv** · **ruff**; profiles: **single-user v1** (locked Phase 0) |
 
 ## Architecture invariants
 
-- The **brain** owns tools, prompts, history, timeouts, and Jellyfin sync. Clients are front doors only. Ollama never calls external APIs.
+- The **brain** owns tools, prompts, history, timeouts, and Jellyfin sync. **Clients** under `clients/` are front doors only. Ollama never calls external APIs; clients never call MCP services.
+- **`clients/tui/`** (desktop) and **`clients/mobile/`** (phone, M5) are sibling packages. Share the chat API and UX language; do not share platform UI code. See `project-control-heim/ARCHITECTURE.md` — *Mimir: brain and clients*.
 - Prefer an **OpenAI-compatible** chat endpoint (or thin adapter) so Home Assistant can call the same brain in v2 — **after** the Phase 2 HA spike confirms the path. Never point HA at native Ollama for Mimir (bypasses tools).
 - Tool loop: user message → Ollama (+ tool schemas) → execute tool → feed result → final reply. Cap iterations. Time out every external call.
 - Fail loud and short: if Ollama/Jellyfin/weather is down, return a clear message — never hang.
@@ -111,8 +122,10 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ## Repo shape (target)
 
 ```
-brain/           # FastAPI service, tools, agent loop, SQLite
-clients/tui/     # Textual Chat client (`uv run mimir`)
+brain/           # FastAPI service, tools, agent loop, SQLite — only layer that calls MCP
+clients/
+  tui/           # Desktop Textual chat (`uv run mimir`) — today
+  mobile/        # Android (Kotlin + Jetpack Compose): TUI-equivalent UX + push-to-talk (M5)
 config/          # Examples + system prompt — real config.yaml gitignored
 scripts/         # try_prompt.py, tool_call_suite.py (standing regression)
 docs/            # Phase notes (tool-calling, HA spike, …)
@@ -132,7 +145,7 @@ Configurable data dir for SQLite/logs (env or config). Use `pathlib`; no hardcod
 - **Small slices:** dummy tool → weather → memory → Jellyfin → chat UI → harden → compose → voice last.
 - **Standing tool suite:** re-run `uv run python scripts/tool_call_suite.py` on model, system-prompt, tool-schema, or `num_ctx`/`think` changes. Viability bar ≥80%; track right-tool / valid-args / result-used separately when extending cases.
 - If the model drops/malforms calls after prompt/`num_ctx` fixes, **swap model** (named fallbacks in ROADMAP) — do not bury it under a framework.
-- Keep the brain **frontend-agnostic**. Chat-specific UX stays in `clients/`.
+- Keep the brain **frontend-agnostic**. All chat UX lives under `clients/` (`tui/` today, `mobile/` at M5). Never put MCP or tool-loop logic in a client.
 - Log prompt id, tool name, latency, success/fail (file or SQLite) once the loop exists.
 - Secrets (Jellyfin key, auth tokens) only via env / local config gitignored; ship `.env.example`.
 - Prefer `docker-compose.yml` as the Linux deploy unit even if you run Ollama natively on Windows during GPU bring-up.
@@ -140,7 +153,7 @@ Configurable data dir for SQLite/logs (env or config). Use `pathlib`; no hardcod
 
 ## Out of scope until Roadmap says otherwise
 
-Voice / Wyoming / Home Assistant Assist (until Phase 10 + HA spike), LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin, shopping/smart-home/proactive notify, email inbox sync, exposing the brain to the public internet (LAN + optional Tailscale later). Calendar ICS read and Discord send are ROADMAP Phases 8d/8f — not free-form scope.
+Mobile voice client (`clients/mobile/`, M5) and always-on Wyoming / Home Assistant Assist (after M5), LangChain-class frameworks, Open WebUI as the product UI, vector DB for Jellyfin, shopping/smart-home/proactive notify, email inbox sync, remote access before M6/M7 or via public internet (see ADR-004 — VPN mesh only, after compute box). Calendar ICS read and Discord send are ROADMAP Phases 8d/8f — not free-form scope.
 
 ## Done means
 

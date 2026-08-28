@@ -42,6 +42,7 @@ _ENV_VARS = [
     "MIMIR_CALENDAR_CACHE_TTL_S",
     "JELLYFIN_API_KEY",
     "MIMIR_AUTH_TOKEN",
+    "MIMIR_CLIENT_TOKEN",
     "CALENDAR_ICS_URL",
     "CALENDAR_ICS_USERNAME",
     "CALENDAR_ICS_PASSWORD",
@@ -161,7 +162,8 @@ def test_jellyfin_sync_configured_helper(tmp_path: Path, monkeypatch: pytest.Mon
     assert jellyfin_sync_configured(s) is True
 
 
-def test_secrets_come_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_secrets_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIMIR_CLIENT_TOKEN", raising=False)
     monkeypatch.setenv("JELLYFIN_API_KEY", "sekrit")
     monkeypatch.setenv("MIMIR_AUTH_TOKEN", "tok-123")
     monkeypatch.setenv("CALENDAR_ICS_URL", "https://example.com/cal.ics?token=abc")
@@ -173,6 +175,26 @@ def test_secrets_come_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert s.calendar.url == "https://example.com/cal.ics?token=abc"
     assert s.calendar.username == "user"
     assert s.calendar.password == "pass"
+
+
+def test_secrets_from_mimir_client_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIMIR_CLIENT_TOKEN", "client-tok")
+    s = load_config(write_config(tmp_path), use_dotenv=False)
+    assert s.auth.token == "client-tok"
+
+
+def test_mimir_client_token_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIMIR_CLIENT_TOKEN", "canonical")
+    monkeypatch.setenv("MIMIR_AUTH_TOKEN", "legacy")
+    s = load_config(write_config(tmp_path), use_dotenv=False)
+    assert s.auth.token == "canonical"
+
+
+def test_mimir_auth_token_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MIMIR_CLIENT_TOKEN", raising=False)
+    monkeypatch.setenv("MIMIR_AUTH_TOKEN", "legacy-only")
+    s = load_config(write_config(tmp_path), use_dotenv=False)
+    assert s.auth.token == "legacy-only"
 
 
 def test_calendar_feed_secrets_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

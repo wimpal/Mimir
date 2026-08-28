@@ -8,8 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Protocol
 
+from brain.mcp.write_guard import check_write_allowed, log_blocked_write
 from brain.ollama import ChatMessage, OllamaClient, OllamaError, ToolCall
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 
@@ -90,6 +92,14 @@ def _deadline_exceeded(deadline_monotonic: float | None) -> bool:
     return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
 
 
+def _latest_user_message(messages: list[ChatMessage]) -> str:
+    """Last user message in the transcript (current turn when history precedes it)."""
+    for msg in reversed(messages):
+        if msg.role == "user" and (msg.content or "").strip():
+            return msg.content.strip()
+    return ""
+
+
 def _dispatch_with_timeout(
     name: str,
     arguments: dict[str, Any] | None,
@@ -132,6 +142,7 @@ def run_turn(
     after_tool: AfterToolCallback | None = None,
     on_tool_start: OnToolStartCallback | None = None,
     on_tool_end: OnToolEndCallback | None = None,
+    data_dir: Path | None = None,
 ) -> TurnResult:
     """Run one user turn through Ollama with optional tools.
 
@@ -147,6 +158,7 @@ def run_turn(
     working = list(messages)
     steps: list[StepTrace] = []
     last_content = ""
+    user_message = _latest_user_message(working)
 
     for _ in range(max_iterations):
         if _deadline_exceeded(deadline_monotonic):
@@ -256,12 +268,24 @@ def run_turn(
             if on_tool_start is not None:
                 on_tool_start(tc.function.name, tc.function.arguments)
 
-            result = _dispatch_with_timeout(
-                tc.function.name,
-                tc.function.arguments,
-                tools=registry,
-                timeout_s=per_tool,
-            )
+            write_block = check_write_allowed(tc.function.name, user_message)
+            if write_block is not None:
+                if data_dir is not None:
+                    tool_entry = registry.get(tc.function.name)
+                    log_blocked_write(
+                        data_dir,
+                        service=tool_entry.service if tool_entry else None,
+                        tool_name=tc.function.name,
+                        args=tc.function.arguments,
+                    )
+                result = write_block
+            else:
+                result = _dispatch_with_timeout(
+                    tc.function.name,
+                    tc.function.arguments,
+                    tools=registry,
+                    timeout_s=per_tool,
+                )
             ok = not result.startswith("error:")
             if on_tool_end is not None:
                 preview = result if len(result) <= 200 else result[:197] + "..."

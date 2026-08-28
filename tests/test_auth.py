@@ -80,7 +80,7 @@ def test_validate_bind_auth_rejects_non_loopback_without_token(tmp_path: Path) -
 
 def test_validate_bind_auth_requires_token_when_mode_token(tmp_path: Path) -> None:
     s = _settings(tmp_path, auth={"mode": "token", "token": None})
-    with pytest.raises(ConfigError, match="MIMIR_AUTH_TOKEN"):
+    with pytest.raises(ConfigError, match="MIMIR_CLIENT_TOKEN"):
         validate_bind_auth(s)
 
 

@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
+from dotenv import load_dotenv
 
+from brain.config import client_token_from_env
 from brain.db import CONVERSATIONS_LIST_DEFAULT
 
 DEFAULT_BRAIN_URL = "http://127.0.0.1:8000"
@@ -95,7 +96,8 @@ class BrainClient:
             pool=CONNECT_TIMEOUT_S,
         )
         headers: dict[str, str] = {"Accept": "application/json"}
-        env_token = os.environ.get("MIMIR_AUTH_TOKEN", "")
+        load_dotenv()  # TUI may run before load_config; pick up .env for Bearer
+        env_token = client_token_from_env() or ""
         token = (auth_token if auth_token is not None else env_token).strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
