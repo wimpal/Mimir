@@ -307,6 +307,43 @@ def client_token_from_env() -> str | None:
     return None
 
 
+def _looks_like_mimir_repo(path: Path) -> bool:
+    return (path / "pyproject.toml").is_file() and (path / "brain").is_dir()
+
+
+def find_mimir_repo_root() -> Path | None:
+    """Locate the Mimir repo (``pyproject.toml`` + ``brain/``)."""
+    env = os.environ.get("MIMIR_REPO_ROOT", "").strip()
+    if env:
+        candidate = Path(env).expanduser().resolve()
+        if _looks_like_mimir_repo(candidate):
+            return candidate
+
+    starts: list[Path] = []
+    if getattr(sys, "frozen", False):
+        starts.append(Path(sys.executable).resolve().parent)
+    starts.append(Path(__file__).resolve().parent.parent)
+    starts.append(Path.cwd().resolve())
+
+    seen: set[Path] = set()
+    for start in starts:
+        for candidate in [start, *start.parents]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if _looks_like_mimir_repo(candidate):
+                return candidate
+    return None
+
+
+def load_mimir_dotenv() -> None:
+    """Load ``.env`` from repo root, then cwd. Does not override existing env vars."""
+    root = find_mimir_repo_root()
+    if root is not None:
+        load_dotenv(root / ".env")
+    load_dotenv()
+
+
 def validate_bind_auth(settings: Settings) -> None:
     """Refuse insecure bind: non-loopback requires Auth token (ADR 0005)."""
     token = (settings.auth.token or "").strip()
@@ -368,7 +405,7 @@ _SECRET_ENV: dict[str, dict[str, str]] = {
 def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> Settings:
     """Load and validate configuration. Raises ConfigError with specifics."""
     if use_dotenv:
-        load_dotenv()  # no-op when .env is absent
+        load_mimir_dotenv()
 
     if path is None:
         path = os.environ.get("MIMIR_CONFIG", DEFAULT_CONFIG_PATH)

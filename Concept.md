@@ -43,8 +43,9 @@ Reasoning:
 - llama.cpp directly remains the fallback for fine-grained control later.
 
 **Model (locked for this hardware):** stock **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on
-the current AMD box; optional **Qwen3 30B-A3B** only on a later compute box with
-enough VRAM. See ROADMAP hardware + VRAM tables.
+the current AMD box; optional **Qwen3 14B** on the same 16 GB GPU (middle tier —
+try before buying 24 GB hardware); **Qwen3 30B-A3B** only on a later compute box
+with **24 GB** VRAM. See ROADMAP hardware + VRAM tables.
 
 **Why Qwen3:** chosen for local tool-calling reliability via Ollama’s tools API.
 Do not treat comparative “beats Llama / Gemma on benchmarks” claims as fact
@@ -200,8 +201,9 @@ tools. Do not discover this at voice bring-up.
 
 ## Hardware
 
-**Locked now:** Windows dev box, **AMD RX 9070 XT 16 GB**, Qwen3 8B.
-**Later:** separate Linux (or HA OS) compute box; optional 30B-A3B if VRAM allows.
+**Locked now:** Windows dev box, **AMD RX 9070 XT 16 GB**, Qwen3 8B (14B optional).
+**Later:** separate Linux compute box — **14B** on a 16 GB GPU tier, or **30B-A3B**
+on a 24 GB tier.
 
 Living-room vs compute stay decoupled: pretty satellite in the room, GPU in a
 closet. Detailed SKUs, VRAM tables, AMD/ROCm notes, and Windows→Linux portability

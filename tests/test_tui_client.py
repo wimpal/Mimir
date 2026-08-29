@@ -193,6 +193,24 @@ def test_client_auth_token_arg_overrides_env(monkeypatch: pytest.MonkeyPatch) ->
     assert client._client.headers["Authorization"] == "Bearer arg-tok"
 
 
+def test_client_loads_token_from_repo_env_when_cwd_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MIMIR_CLIENT_TOKEN", raising=False)
+    monkeypatch.delenv("MIMIR_AUTH_TOKEN", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (repo / "brain").mkdir()
+    (repo / ".env").write_text("MIMIR_CLIENT_TOKEN=from-repo-env\n", encoding="utf-8")
+    monkeypatch.setenv("MIMIR_REPO_ROOT", str(repo))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    client = BrainClient("http://127.0.0.1:8000")
+    assert client._client.headers["Authorization"] == "Bearer from-repo-env"
+
+
 def test_list_conversations_and_encoded_messages() -> None:
     from clients.tui.history import format_history_option
 

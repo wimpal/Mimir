@@ -15,16 +15,16 @@ python -m clients.tui
 Quick “new window” shortcut (still uses uv): double-click
 [`scripts/launch_mimir.bat`](../../scripts/launch_mimir.bat).
 
-Full restart (stop brain + TUI, start both fresh — picks up prompt/config changes):
+Full restart (stop brain + TUI, rebuild `dist\mimir.exe`, start both):
 
 ```powershell
 powershell -File scripts/restart_mimir.ps1
 # brain only: powershell -File scripts/restart_mimir.ps1 -BrainOnly
-# packaged exe: powershell -File scripts/restart_mimir.ps1 -UseExe
+# skip PyInstaller (faster dev): powershell -File scripts/restart_mimir.ps1 -SkipExeBuild
 ```
 
 Or double-click [`scripts/restart_mimir.bat`](../../scripts/restart_mimir.bat).
-Default restart uses `uv run mimir` so source changes apply; pass `-UseExe` for `dist\mimir.exe`.
+Default full restart rebuilds `dist\mimir.exe` then launches it (pinned taskbar shortcut stays current).
 
 ## Windows .exe (double-click → terminal + TUI)
 
@@ -39,6 +39,10 @@ The in-app header does not repeat the name.
 Output: `dist/mimir.exe`. On startup the TUI checks `/health`; if the brain
 is down it starts `uv run uvicorn …` from the repo (keep the exe under
 `dist/`, or set `MIMIR_REPO_ROOT`). Brain logs: `data/logs/brain_launch.log`.
+
+**T-016 auto-start:** Windows Task Scheduler is the **primary** way the brain
+starts after login (`scripts/install_login_tasks.ps1`). The TUI launcher is a
+**backup** when `/health` fails — it does not replace scheduled startup.
 
 ## UI
 

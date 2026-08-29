@@ -4,17 +4,24 @@
 #   powershell -File scripts/restart_mimir.ps1
 #   powershell -File scripts/restart_mimir.ps1 -BrainOnly
 #   powershell -File scripts/restart_mimir.ps1 -Url http://127.0.0.1:8000
-#   powershell -File scripts/restart_mimir.ps1 -UseExe
+#   powershell -File scripts/restart_mimir.ps1 -SkipExeBuild
+#
+# Full restart (default) stops TUI, rebuilds dist\mimir.exe, starts brain, opens the exe.
+# Use -SkipExeBuild for a faster dev loop (uv run mimir, no PyInstaller).
+#
+# For login auto-start (T-016), use start_brain_at_login.ps1 instead of -BrainOnly —
+# that script is idempotent and does not kill an existing healthy brain.
 #
 # Stops listeners on the brain port, stops running TUI (uv run mimir / mimir.exe),
-# starts a fresh brain, waits for /health, then opens the TUI in a new window.
+# rebuilds mimir.exe (unless -SkipExeBuild / -BrainOnly), starts a fresh brain,
+# waits for /health, then opens the TUI in a new window.
 
 [CmdletBinding()]
 param(
   [string]$Url = $(if ($env:MIMIR_BRAIN_URL) { $env:MIMIR_BRAIN_URL } else { "http://127.0.0.1:8000" }),
   [switch]$BrainOnly,
   [switch]$NoTui,
-  [switch]$UseExe,
+  [switch]$SkipExeBuild,
   [int]$ReadyTimeoutSec = 60
 )
 
@@ -148,39 +155,63 @@ function Wait-BrainReady {
   throw "Brain did not become ready within ${TimeoutSec}s. See data/logs/brain_launch.log"
 }
 
+function Build-MimirExe {
+  $buildScript = Join-Path $PSScriptRoot "build_mimir_exe.ps1"
+  if (-not (Test-Path $buildScript)) {
+    throw "Missing build script: $buildScript"
+  }
+  Write-Host "Building dist\mimir.exe (PyInstaller)..."
+  & $buildScript
+  if ($LASTEXITCODE -ne 0) {
+    throw "build_mimir_exe.ps1 failed with exit code $LASTEXITCODE"
+  }
+}
+
 # --- main ---
 $port = Get-BrainPort $Url
 Write-Host "Repo: $RepoRoot"
 Write-Host "Brain URL: $Url (port $port)"
 
-Write-Host "`n[1/4] Stopping brain on :${port}..."
+$launchExe = $false
+$fullRestart = (-not $BrainOnly) -and (-not $NoTui)
+
+Write-Host "`n[1] Stopping brain on :${port}..."
 Stop-ListenersOnPort -Port $port
 Start-Sleep -Milliseconds 400
 
-if (-not $BrainOnly -and -not $NoTui) {
-  Write-Host "[2/4] Stopping TUI..."
+if ($fullRestart) {
+  Write-Host "[2] Stopping TUI..."
   Stop-MimirTui
   Start-Sleep -Milliseconds 300
-} else {
-  Write-Host "[2/4] Skipping TUI stop (-BrainOnly/-NoTui)."
+
+  if (-not $SkipExeBuild) {
+    Write-Host "[3] Rebuilding dist\mimir.exe..."
+    Build-MimirExe
+    $launchExe = $true
+  } else {
+    Write-Host "[3] Skipping exe build (-SkipExeBuild)."
+    $exePath = Join-Path $RepoRoot "dist\mimir.exe"
+    $launchExe = Test-Path $exePath
+  }
 }
 
-Write-Host "[3/4] Starting brain..."
+Write-Host "$(if ($fullRestart) { '[4]' } else { '[2]' }) Starting brain..."
 Start-Brain -BrainUrl $Url
 Wait-BrainReady -BrainUrl $Url -TimeoutSec $ReadyTimeoutSec
 
-if ($BrainOnly -or $NoTui) {
-  Write-Host "[4/4] Skipping TUI start."
+if (-not $fullRestart) {
   Write-Host "Done (brain only)."
   exit 0
 }
 
-Write-Host "[4/4] Starting TUI in a new window..."
+Write-Host "[5] Starting TUI in a new window..."
 $exePath = Join-Path $RepoRoot "dist\mimir.exe"
-if ($UseExe -and (Test-Path $exePath)) {
+if ($launchExe -and (Test-Path $exePath)) {
   Start-Process -FilePath $exePath -WorkingDirectory $RepoRoot
 } else {
-  # Dev default: uv run (picks up source). Use -UseExe for dist\mimir.exe.
+  if (-not $SkipExeBuild) {
+    Write-Host "dist\mimir.exe missing after build; falling back to uv run mimir."
+  }
   Start-Process -FilePath "cmd.exe" `
     -ArgumentList @("/k", "uv run mimir --url $Url") `
     -WorkingDirectory $RepoRoot

@@ -9,13 +9,21 @@ Source of truth for product intent: `[Concept.md](./Concept.md)`.
 ## Hardware (locked for this phase of work)
 
 
-| Role                    | Hardware                                            | Model choice                                                                              |
-| ----------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **Dev machine (now)**   | AMD Radeon RX **9070 XT 16 GB**                     | **Qwen3 8B** Q4_K_M — fits easily (~6–7 GB); leave headroom for long context / tool loops |
-| **Compute box (later)** | Separate hidden box (e.g. 24 GB NVIDIA or Mac mini) | Optional upgrade to **Qwen3 30B-A3B**; brain/API unchanged                                |
+| Role                              | Hardware                                            | Model choice                                                                               |
+| --------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Dev machine (now)**             | AMD Radeon RX **9070 XT 16 GB**                     | **Qwen3 8B** Q4_K_M (default); optional **Qwen3 14B** on the same GPU — see middle tier   |
+| **Compute box — 16 GB tier**      | x86 Linux + **12–16 GB** discrete GPU               | **Qwen3 14B** Q4_K_M — always-on target without paying for 24 GB VRAM                    |
+| **Compute box — 24 GB tier**      | x86 + **24 GB** NVIDIA, or Mac mini **64 GB+**      | Optional **Qwen3 30B-A3B**; brain/API unchanged                                           |
 
 
-**Why not 30B-A3B on the 9070 XT:** Q4_K_M needs ~18–21 GB — it won’t fit fully in 16 GB without a lower quant or CPU offload (slower, worse for iteration). Use 8B until the dedicated box exists.
+**Model ladder (same stack, swap tag in config):** **8B** → **14B** → **30B-A3B**. Try
+**14B on the 9070 XT** before buying 24 GB hardware — most day-to-day quality gain on
+16 GB lives there.
+
+**Why not 30B-A3B on 16 GB:** Q4_K_M needs ~18–21 GB — it won’t fit fully without a
+lower quant or CPU offload (slower, worse for tool loops and voice). **14B dense**
+(~9–11 GB) is the practical middle step on 16 GB; reserve **30B-A3B** for the 24 GB
+tier.
 
 **AMD note:** Ollama on Windows + AMD may use ROCm/HIP or **Vulkan** depending on
 Ollama build and RDNA4 support. Verify GPU offload with `ollama ps` after the
@@ -62,7 +70,7 @@ Lock choices before code so schema and APIs don’t thrash later.
 
 | Decision         | Status                                                                                                                                 |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Inference        | **Locked:** Ollama + **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on 9070 XT (30B-A3B deferred to compute box)                                    |
+| Inference        | **Locked:** Ollama + **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on 9070 XT; **14B** optional same GPU; **30B-A3B** deferred to 24 GB compute box |
 | Orchestration    | **Locked:** custom FastAPI loop (no LangChain)                                                                                         |
 | Storage          | **Locked:** SQLite: history, prefs, Jellyfin cache                                                                                     |
 | Clients          | **Locked:** thin chat UI first; brain stays OpenAI-compatible / HTTP-agnostic                                                          |
@@ -581,6 +589,7 @@ Figures for Ollama’s default **Q4_K_M** quant (weights + KV cache + runtime at
 | Model             | Params                      | Disk (Q4_K_M) | VRAM to run                                          | Minimum practical GPU                                                 |
 | ----------------- | --------------------------- | ------------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | **Qwen3 8B**      | 8B dense                    | ~5 GB         | **~6–7 GB** (more with long context / thinking mode) | 8 GB works; **12 GB** comfortable                                     |
+| **Qwen3 14B**     | 14B dense                   | ~8–9 GB       | **~9–11 GB** (more with long context / tool loops)   | **16 GB** comfortable — middle tier on current dev box                 |
 | **Qwen3 30B-A3B** | 30.5B MoE / **3.3B active** | ~18–19 GB     | **~18–21 GB**                                        | **24 GB** for full GPU (RTX 3090/4090); 16 GB needs Q3 or CPU offload |
 
 
@@ -589,5 +598,6 @@ Notes:
 - MoE “A3B” means only ~3B params run per token (fast), but **all ~30B weights still load into VRAM** — you cannot treat it like a 3B model.
 - Longer context (`num_ctx`) and multi-turn tool loops grow the KV cache; thinking mode uses more tokens too.
 - CPU/RAM offload works but is much slower; keep the model fully on GPU/unified memory for voice latency.
-- Start on **8B**; upgrade to **30B-A3B** later without changing the rest of the stack.
+- Ladder: **8B** (default) → **14B** (try on 16 GB before new hardware) → **30B-A3B**
+  (24 GB tier). Swap is config + `ollama pull` only — brain/API unchanged.
 

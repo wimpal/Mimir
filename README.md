@@ -77,7 +77,8 @@ ollama ps                       # PROCESSOR column must show GPU (ROCm/HIP or Vu
 ```
 
 If layers stay on CPU: update AMD drivers, retry, and only then judge model quality.
-`qwen3:30b-a3b` is deferred to the future compute box (won't fit fully in 16 GB).
+`qwen3:14b` is the optional middle tier on this 16 GB GPU — try before buying 24 GB
+hardware. `qwen3:30b-a3b` is deferred to a 24 GB compute box.
 
 ## Config precedence
 
@@ -85,3 +86,76 @@ If layers stay on CPU: update AMD drivers, retry, and only then judge model qual
 `MIMIR_CLIENT_TOKEN`) come from `.env`/environment only. See `.env.example`.
 TUI-only: `MIMIR_BRAIN_URL`, `MIMIR_TURN_TIMEOUT_S`, `MIMIR_STATE_DIR`.
 Non-loopback bind requires Auth token — [`docs/adr/0005-non-loopback-requires-auth-token.md`](./docs/adr/0005-non-loopback-requires-auth-token.md).
+
+## Auto-start at login (Windows, T-016)
+
+M4 goal: after PC reboot and login, the brain listens on `:8000` within ~2 minutes
+without opening a terminal. **M6** moves production to a Linux compute box; this
+Task Scheduler setup is a bridge until then.
+
+### Prerequisites
+
+- [uv](https://docs.astral.sh/uv/) on the user PATH (or in `%USERPROFILE%\.local\bin`)
+- `.env` in the repo root with `MIMIR_CLIENT_TOKEN` and `MIMIR_AUTH_MODE=token`
+- [Ollama](https://ollama.com) installed
+
+### Install (one time)
+
+```powershell
+# From repo root — registers \Heim\ tasks for the current user
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_login_tasks.ps1
+
+# If Ollama is already a Windows service:
+powershell -File scripts/install_login_tasks.ps1 -SkipOllama
+```
+
+This creates:
+
+| Task | Trigger | Action |
+|------|---------|--------|
+| `Heim Ollama` | At log on | `scripts/start_ollama_at_login.ps1` (hidden) |
+| `Heim Mimir brain` | At log on, delay 30s | `scripts/start_brain_at_login.ps1` (hidden) |
+
+Login tasks run with **no visible console**. Check these logs if something fails:
+
+| Log | Contents |
+|-----|----------|
+| `data/logs/ollama_login.log` | Ollama login task steps |
+| `data/logs/ollama_serve.log` | `ollama serve` stdout/stderr |
+| `data/logs/brain_login.log` | Brain login task steps |
+| `data/logs/brain_login_cli.log` | `ensure_brain_cli` stdout |
+| `data/logs/brain_launch.log` | uvicorn brain process output |
+
+Manual test without rebooting:
+
+```powershell
+Start-ScheduledTask -TaskPath '\Heim\' -TaskName 'Heim Mimir brain'
+```
+
+Uninstall: `powershell -File scripts/install_login_tasks.ps1 -Uninstall`
+
+### After reboot + login (before opening TUI)
+
+```powershell
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:11434/api/tags
+```
+
+Then `uv run mimir` or `dist\mimir.exe` — chat should work with no manual brain start.
+
+### Manual restart vs login start
+
+| Script | Use when |
+|--------|----------|
+| `scripts/start_brain_at_login.ps1` | Task Scheduler / idempotent ensure-running |
+| `scripts/restart_mimir.ps1` | Pick up config/prompt changes — **kills** the old brain first |
+| TUI `ensure_brain_running` | Backup if Task Scheduler did not run |
+
+### Failure symptoms
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `/health` 200 but chat fails on model | Ollama not ready | Increase login delay; verify Ollama task |
+| `/health` unreachable | `uv` not on Task Scheduler PATH | Re-run installer after PATH fix; check `data/logs/brain_launch.log` |
+| 401 on chat | `.env` missing token or wrong cwd | Task action Working directory = repo root |
+| Two brains / port conflict | TUI + scheduler race | Scheduler runs first; TUI skips if `/health` OK |

@@ -96,7 +96,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 
 | Layer | Choice |
 |---|---|
-| Inference | **Ollama** + **stock Qwen3 8B** Q4_K_M (dev). 30B-A3B only on a later compute box. Not an abliterated “uncensored” finetune |
+| Inference | **Ollama** + **stock Qwen3 8B** Q4_K_M (dev default). **14B** optional on 16 GB GPU (middle tier). **30B-A3B** only on 24 GB compute box. Not an abliterated “uncensored” finetune |
 | Options | `ollama.num_ctx: 8192`, `ollama.think: false` (tool loops + voice) |
 | Orchestration | **Custom FastAPI** tool loop — not LangChain / LlamaIndex / CrewAI |
 | Memory | **SQLite** (history, prefs, Jellyfin cache); hand-rolled migrations (`schema_version`, Phase 4+) |

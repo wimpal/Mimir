@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from brain.config import find_mimir_repo_root as find_repo_root
+
 from clients.tui.brain_client import CONNECT_TIMEOUT_S, normalize_brain_url
 
 DEFAULT_READY_TIMEOUT_S = 60.0
@@ -39,36 +41,6 @@ def host_port_from_url(url: str) -> tuple[str, int]:
     if parsed.scheme == "https":
         return host, 443
     return host, 80
-
-
-def find_repo_root() -> Path | None:
-    """Locate the Mimir repo (needs ``pyproject.toml`` + ``brain/``)."""
-    env = os.environ.get("MIMIR_REPO_ROOT", "").strip()
-    if env:
-        candidate = Path(env).expanduser().resolve()
-        if _looks_like_repo(candidate):
-            return candidate
-
-    starts: list[Path] = []
-    if getattr(sys, "frozen", False):
-        starts.append(Path(sys.executable).resolve().parent)
-    else:
-        starts.append(Path(__file__).resolve().parent)
-    starts.append(Path.cwd().resolve())
-
-    seen: set[Path] = set()
-    for start in starts:
-        for candidate in [start, *start.parents]:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            if _looks_like_repo(candidate):
-                return candidate
-    return None
-
-
-def _looks_like_repo(path: Path) -> bool:
-    return (path / "pyproject.toml").is_file() and (path / "brain").is_dir()
 
 
 def brain_reachable(base_url: str, *, timeout_s: float = CONNECT_TIMEOUT_S) -> bool:
