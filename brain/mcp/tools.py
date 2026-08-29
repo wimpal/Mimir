@@ -8,6 +8,15 @@ from mcp_types import Tool as McpTool
 
 from brain.config import Settings
 from brain.mcp.bridge import McpBridge
+from brain.mcp.errors import tool_result_is_error
+from brain.mcp.log import append_mcp_tool_log
+from brain.mcp.tasks import (
+    chore_not_found_error,
+    chore_resolve_error,
+    parse_tasks_list,
+    present_task_complete_json,
+    resolve_complete_ids,
+)
 from brain.tools import Tool
 
 
@@ -41,6 +50,48 @@ def mcp_tool_to_local(
 
     def execute(**kwargs: Any) -> str:
         args = dict(kwargs)
+        if name == "homebase.tasks.complete":
+            raw_id = str(args.get("id", "")).strip()
+            if not raw_id:
+                return chore_not_found_error("?")
+            list_raw = bridge.call_tool_sync(
+                "homebase.tasks.list",
+                {},
+                timeout_s=timeout_s,
+            )
+            tasks = parse_tasks_list(list_raw)
+            if tasks is None:
+                detail = list_raw[:200] if list_raw else "empty list response"
+                return chore_resolve_error(
+                    "list_failed",
+                    f"Could not parse active chores before complete ({detail}).",
+                )
+            chore_ids = resolve_complete_ids(tasks, raw_id)
+            if not chore_ids:
+                titles = [
+                    str(t.get("title") or "")
+                    for t in tasks
+                    if (t.get("title") or "").strip()
+                ]
+                append_mcp_tool_log(
+                    bridge.data_dir,
+                    service=service_id,
+                    tool=name,
+                    args=args,
+                    latency_ms=0.0,
+                    outcome="error",
+                    error_code="not_found",
+                    detail=f"no active chore for {raw_id!r}; active={titles}",
+                )
+                return chore_not_found_error(raw_id, active_titles=titles)
+            last_result = ""
+            for chore_id in chore_ids:
+                last_result = bridge.call_tool_sync(
+                    name, {"id": chore_id}, timeout_s=timeout_s
+                )
+                if tool_result_is_error(last_result):
+                    return last_result
+            return present_task_complete_json(last_result)
         return bridge.call_tool_sync(name, args, timeout_s=timeout_s)
 
     return Tool(

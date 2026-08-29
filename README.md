@@ -148,7 +148,7 @@ Then `uv run mimir` or `dist\mimir.exe` — chat should work with no manual brai
 | Script | Use when |
 |--------|----------|
 | `scripts/start_brain_at_login.ps1` | Task Scheduler / idempotent ensure-running |
-| `scripts/restart_mimir.ps1` | Pick up config/prompt changes — **kills** the old brain first |
+| `scripts/restart_mimir.ps1` | Pick up config/prompt changes — **kills** the old brain first; bind host comes from `config/config.yaml` (`-Url` is health-check only) |
 | TUI `ensure_brain_running` | Backup if Task Scheduler did not run |
 
 ### Failure symptoms
@@ -159,3 +159,73 @@ Then `uv run mimir` or `dist\mimir.exe` — chat should work with no manual brai
 | `/health` unreachable | `uv` not on Task Scheduler PATH | Re-run installer after PATH fix; check `data/logs/brain_launch.log` |
 | 401 on chat | `.env` missing token or wrong cwd | Task action Working directory = repo root |
 | Two brains / port conflict | TUI + scheduler race | Scheduler runs first; TUI skips if `/health` OK |
+
+## LAN access (M5 mobile)
+
+The brain defaults to loopback (`127.0.0.1`). For a phone or laptop on home Wi‑Fi,
+bind all interfaces and enforce bearer auth (T-014 / ADR 0005).
+
+### Prerequisites
+
+- `.env`: `MIMIR_AUTH_MODE=token` and non-empty `MIMIR_CLIENT_TOKEN`
+- `config/config.yaml`:
+
+```yaml
+auth:
+  mode: token
+runtime:
+  host: 0.0.0.0
+  port: 8000
+```
+
+- Home Wi‑Fi network profile set to **Private** in Windows (Settings → Network)
+- One-time firewall (Private profile, local subnet only) — **Administrator PowerShell**:
+
+```powershell
+# Start menu -> Windows PowerShell -> Run as administrator, then:
+cd D:\Dev\Projects\Mimir
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_brain_firewall.ps1
+```
+
+Discover the PC LAN address: `ipconfig` → IPv4 on the home adapter (e.g.
+`192.168.0.x`). Mobile clients use `http://<PC-LAN-IP>:8000` with the same bearer
+token as the TUI. **Do not port-forward 8000** to the internet (ADR-004 / M7).
+
+Verify resolved config after edits:
+
+```powershell
+uv run python -m brain.config
+powershell -File scripts/restart_mimir.ps1 -BrainOnly
+```
+
+`-Url` on restart/login scripts is the **client health-check URL** (usually
+`http://127.0.0.1:8000`); uvicorn `--host` comes from `runtime.host` in config.
+
+### Acceptance (from another device on home Wi‑Fi)
+
+```powershell
+# On the phone/laptop (replace <PC-LAN-IP>):
+curl http://<PC-LAN-IP>:8000/health
+curl -X POST http://<PC-LAN-IP>:8000/v1/chat -H "Content-Type: application/json" -d "{\"message\":\"hi\"}"
+# → 401 without Authorization
+
+# On the PC (use curl.exe in PowerShell):
+curl.exe -X POST http://127.0.0.1:8000/v1/chat `
+  -H "Content-Type: application/json" `
+  -H "Authorization: Bearer $env:MIMIR_CLIENT_TOKEN" `
+  -d "{\"message\":\"hi\"}"
+```
+
+The TUI (`uv run mimir` / `dist\mimir.exe`) keeps using loopback (`http://127.0.0.1:8000`)
+or `MIMIR_BRAIN_URL` — both work when the brain binds `0.0.0.0`. **Verified 2026-08-29:**
+desktop TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
+
+### Verified (operator household, 2026-08-29)
+
+| Check | Result |
+|-------|--------|
+| Firewall rule | Installed (`Heim Mimir brain`, Private + LocalSubnet) |
+| Phone `GET /health` on LAN | 200, full JSON |
+| TUI on PC (`dist\mimir.exe` / `uv run mimir`) | Chat works on loopback |
+| Phone `POST /v1/chat` → 401 / bearer chat | Verified 2026-08-29 (Termux) |
+| Reboot → LAN without manual steps | Verified 2026-08-29 |

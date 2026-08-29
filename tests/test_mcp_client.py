@@ -15,6 +15,7 @@ from brain.agent import StoppedReason, run_turn
 from brain.config import Settings
 from brain.mcp.bridge import McpBridge
 from brain.mcp.errors import is_write_tool, parse_conventions_error
+from brain.mcp.tasks import parse_tasks_list
 from brain.mcp.log import append_mcp_tool_log, mcp_tools_log_path
 from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
 from brain.prefs import build_system_prompt
@@ -129,7 +130,19 @@ def _make_retry_server() -> tuple[MCPServer, dict]:
     return mcp, state
 
 
-def test_discovery_registers_tools(tmp_path: Path) -> None:
+def test_homebase_list_not_money_annotated(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    mcp = MCPServer("Homebase-test")
+
+    @mcp.tool(name="homebase.tasks.list")
+    def tasks_list() -> list[dict[str, str]]:
+        return [{"id": "c1", "title": "dweilen"}]
+
+    with _BridgeRunner(settings, {"homebase": mcp}) as runner:
+        out = runner.call("homebase.tasks.list", {})
+        assert not out.startswith("Note: integer fields")
+        tasks = parse_tasks_list(out)
+        assert tasks is not None and len(tasks) == 1
     settings = _settings(tmp_path)
     server = _make_budget_server()
     with _BridgeRunner(settings, {"budgettracker": server}) as runner:

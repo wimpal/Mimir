@@ -45,9 +45,9 @@ reads another's storage, ever.
 
 ## This repo
 
-### Current task — none (T-014 done 2026-08-28)
+### Current task — T-019 (T-018 Mimir acceptance done 2026-08-29)
 
-**Next:** M4 daily driver — see `project-control-heim/status/mimir.md` and `ROADMAP.md`.
+**Next:** M4 daily driver week — see `project-control-heim/board/tasks/T-019-m4-daily-driver-week.md`.
 
 Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
 `MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.

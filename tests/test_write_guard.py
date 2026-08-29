@@ -53,6 +53,23 @@ def test_check_write_allowed_ignores_read_tools() -> None:
     ) is None
 
 
+def test_task_mutation_phrases_request_write() -> None:
+    assert user_message_requests_write("Add a task: take out bins, due tomorrow")
+    assert user_message_requests_write("Mark task abc done")
+    assert user_message_requests_write("taak afvinken")
+    assert user_message_requests_write("markeer stofzuigen als compleet")
+    assert check_write_allowed("homebase.tasks.add", "Add a task: take out bins") is None
+    assert check_write_allowed("homebase.tasks.complete", "Mark task abc done") is None
+    assert check_write_allowed(
+        "homebase.tasks.complete", "markeer stofzuigen als compleet"
+    ) is None
+
+
+def test_task_read_only_does_not_request_write() -> None:
+    assert not user_message_requests_write("What tasks are due this week?")
+    assert not user_message_requests_write("Welke taken zijn deze week?")
+
+
 class _ScriptedClient:
     def __init__(self, responses: list[ChatMessage]) -> None:
         self._responses = list(responses)
@@ -72,6 +89,61 @@ def _write_tool(name: str, result: str) -> Tool:
         execute=execute,
         service="homebase" if name.startswith("homebase.") else "budgettracker",
     )
+
+
+def test_agent_nudges_when_write_skipped_then_completes() -> None:
+    """Follow-up complete: model must not confirm without calling the write tool."""
+    complete_result = (
+        "Note: ok\n"
+        '{"id": "c1", "title": "stofzuigen", "completion_recorded": true}'
+    )
+    registry = {
+        "homebase.tasks.complete": _write_tool(
+            "homebase.tasks.complete",
+            complete_result,
+        ),
+    }
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="Stofzuigen is gemarkeerd als compleet, sir.",
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.tasks.complete",
+                            arguments={"id": "stofzuigen"},
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="Stofzuigen is now marked complete, sir.",
+            ),
+        ]
+    )
+    result = run_turn(
+        client,
+        [
+            ChatMessage(
+                role="user",
+                content="Dweilen is gemarkeerd als compleet, sir.",
+            ),
+            ChatMessage(role="assistant", content="Certainly, sir."),
+            ChatMessage(role="user", content="markeer stofzuigen als compleet"),
+        ],
+        tools=registry,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "homebase.tasks.complete" in result.tools_used()
+    assert len(client._responses) == 0
+    assert result.steps[0].anomaly == "write_skipped"
+    assert result.steps[1].tool_names == ["homebase.tasks.complete"]
 
 
 def test_agent_blocks_write_on_read_only_turn(tmp_path: Path) -> None:

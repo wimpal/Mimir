@@ -13,6 +13,20 @@ from typing import Any
 from brain.mcp.errors import is_write_tool
 from brain.mcp.log import append_mcp_tool_log
 
+MAX_WRITE_TOOL_NUDGES = 1
+
+_TASK_COMPLETE_NUDGE = (
+    "System correction (do not repeat to the user): the user asked to complete a chore "
+    "THIS turn. Call homebase.tasks.complete now — pass the chore title as id. Do not "
+    "confirm completion without a tool result containing completion_recorded."
+)
+
+_WRITE_NUDGE_GENERIC = (
+    "System correction (do not repeat to the user): the user asked to change data "
+    "THIS turn. Call the appropriate write tool before confirming. Do not claim the "
+    "change happened without a tool result from this turn."
+)
+
 # Read-only questions — checked before mutation patterns.
 _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -26,6 +40,9 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bwhat\s+can\s+i\s+cook\b",
         r"\bwhat\s+do\s+we\s+need\s+to\s+buy\b",
         r"\bwhat('s| is)\s+in\s+the\s+pantry\b",
+        r"\bwhat\s+needs\s+doing\b",
+        r"\bwhat('s| is)\s+(over)?due\b",
+        r"\bwelke\s+taken\b",
         r"\bhoeveel\b.*\b(voorraad|op\s+voorraad)\b",
     )
 )
@@ -66,6 +83,11 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         # Generic mutation verbs when clearly imperative
         r"\b(add|remove|delete|update|record|mark)\b\s+\w",
         r"\b(voeg|verwijder|pas\s+aan|noteer|registreer)\b",
+        # Tasks / chores
+        r"\b(voeg|maak)\b.*\b(taak|karwee|taken)\b",
+        r"\b(taak|karwee)\b.*\b(afvinken|klaar|gedaan)\b",
+        r"\bafvinken\b.*\b(taak|karwee)\b",
+        r"\bmarkeer\b.*\b(compleet|klaar|af|gedaan|voltooid)\b",
     )
 )
 
@@ -78,6 +100,24 @@ def user_message_requests_write(text: str) -> bool:
     if any(p.search(normalized) for p in _READ_ONLY_PATTERNS):
         return False
     return any(p.search(normalized) for p in _MUTATION_PATTERNS)
+
+
+def write_retry_nudge(user_message: str) -> str:
+    """Prompt the model to call a write tool when it replied without one."""
+    normalized = (user_message or "").strip()
+    if re.search(
+        r"\b(markeer|mark|complete|afvinken)\b.*\b(compleet|klaar|af|gedaan|voltooid|done)\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return _TASK_COMPLETE_NUDGE
+    if re.search(
+        r"\b(task|taak|karwee|chore)\b.*\b(done|complete|afvinken|klaar|gedaan)\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return _TASK_COMPLETE_NUDGE
+    return _WRITE_NUDGE_GENERIC
 
 
 def check_write_allowed(tool_name: str, user_message: str) -> str | None:

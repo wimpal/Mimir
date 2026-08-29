@@ -11,7 +11,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-from brain.mcp.write_guard import check_write_allowed, log_blocked_write
+from brain.mcp.errors import is_write_tool, tool_result_is_error
+from brain.mcp.tasks import complete_tool_succeeded
+from brain.mcp.write_guard import (
+    MAX_WRITE_TOOL_NUDGES,
+    check_write_allowed,
+    log_blocked_write,
+    user_message_requests_write,
+    write_retry_nudge,
+)
 from brain.ollama import ChatMessage, OllamaClient, OllamaError, ToolCall
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 
@@ -159,6 +167,8 @@ def run_turn(
     steps: list[StepTrace] = []
     last_content = ""
     user_message = _latest_user_message(working)
+    write_tool_called_this_turn = False
+    write_nudge_count = 0
 
     for _ in range(max_iterations):
         if _deadline_exceeded(deadline_monotonic):
@@ -221,6 +231,44 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.EMPTY_RESPONSE,
                 )
+            if (
+                user_message_requests_write(user_message)
+                and not write_tool_called_this_turn
+                and write_nudge_count < MAX_WRITE_TOOL_NUDGES
+            ):
+                write_nudge_count += 1
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=ollama_latency,
+                        tool_names=[],
+                        success=False,
+                        anomaly="write_skipped",
+                        content_preview=(msg.content or "")[:120],
+                    )
+                )
+                working.append(
+                    ChatMessage(role="user", content=write_retry_nudge(user_message))
+                )
+                continue
+            if user_message_requests_write(user_message) and not write_tool_called_this_turn:
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=ollama_latency,
+                        tool_names=[],
+                        success=False,
+                        anomaly="write_skipped",
+                        content_preview=(msg.content or "")[:120],
+                    )
+                )
+                return TurnResult(
+                    content=(
+                        "I couldn't record that change — no write tool ran this turn. "
+                        "Please try again."
+                    ),
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             steps.append(
                 StepTrace(
                     ollama_latency_ms=ollama_latency,
@@ -239,6 +287,8 @@ def run_turn(
 
         # Tool-call step
         anomaly = None
+        if any(is_write_tool(name) for name in tool_names):
+            write_tool_called_this_turn = True
         for tc in msg.tool_calls:
             if not isinstance(tc.function.arguments, dict):
                 anomaly = "malformed_args"
@@ -286,12 +336,21 @@ def run_turn(
                     tools=registry,
                     timeout_s=per_tool,
                 )
-            ok = not result.startswith("error:")
+            if (
+                tc.function.name == "homebase.tasks.complete"
+                and not tool_result_is_error(result)
+                and not complete_tool_succeeded(result)
+            ):
+                result = (
+                    "error: homebase.tasks.complete did not record a completion "
+                    "(missing completion_recorded). Pass the chore title as id."
+                )
+            ok = not tool_result_is_error(result)
             if on_tool_end is not None:
                 preview = result if len(result) <= 200 else result[:197] + "..."
                 on_tool_end(tc.function.name, ok, preview)
 
-            if result.startswith("error:"):
+            if tool_result_is_error(result):
                 dispatch_failed = True
                 if anomaly is None:
                     anomaly = "turn_timeout" if "timed out" in result else "tool_error"

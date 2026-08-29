@@ -224,7 +224,13 @@ class McpBridge:
                     latency_ms=latency_ms,
                     outcome="success",
                 )
-                return present_money_json(text) if text else "{}"
+                if text:
+                    if service_id == "budgettracker" or tool_name.startswith(
+                        "budgettracker."
+                    ):
+                        return present_money_json(text)
+                    return text
+                return "{}"
 
             error_code, retryable = parse_conventions_error(text)
             append_mcp_tool_log(

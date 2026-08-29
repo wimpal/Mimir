@@ -15,6 +15,24 @@ def is_write_tool(name: str) -> bool:
     return any(seg in lower for seg in _WRITE_SEGMENTS)
 
 
+def tool_result_is_error(text: str) -> bool:
+    """True when MCP/tool output indicates failure (not only error: prefix)."""
+    if not text:
+        return False
+    if text.startswith("error:"):
+        return True
+    body = text.strip()
+    if "\n" in body and body.split("\n", 1)[0].startswith("Note:"):
+        body = body.split("\n", 1)[1].strip()
+    if not body.startswith("{"):
+        return False
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and "error" in parsed
+
+
 def _find_json_object(text: str) -> dict[str, Any] | None:
     """Best-effort extract a JSON object from tool error text."""
     text = text.strip()

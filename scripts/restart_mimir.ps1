@@ -15,6 +15,9 @@
 # Stops listeners on the brain port, stops running TUI (uv run mimir / mimir.exe),
 # rebuilds mimir.exe (unless -SkipExeBuild / -BrainOnly), starts a fresh brain,
 # waits for /health, then opens the TUI in a new window.
+#
+# -Url is the client health-check URL (default loopback). Uvicorn bind host/port
+# come from config/config.yaml runtime.* via ensure_brain_cli (T-022).
 
 [CmdletBinding()]
 param(
@@ -116,30 +119,30 @@ function Test-BrainHealth {
 }
 
 function Start-Brain {
-  param([string]$BrainUrl)
-  $port = Get-BrainPort $BrainUrl
-  $hostName = "127.0.0.1"
-  try {
-    $uri = [Uri]$BrainUrl
-    if ($uri.Host) { $hostName = $uri.Host }
-  } catch { }
+  param([string]$BrainUrl, [int]$TimeoutSec = 60)
+  if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+    throw "Could not find uv on PATH. Install uv or start the brain manually."
+  }
 
   $logDir = Join-Path $RepoRoot "data\logs"
   New-Item -ItemType Directory -Force -Path $logDir | Out-Null
   $logPath = Join-Path $logDir "brain_launch.log"
-  Add-Content -Path $logPath -Value "`n--- restart_mimir launching brain ${hostName}:${port} ---"
+  Add-Content -Path $logPath -Value "`n--- restart_mimir ensure_brain_running url=$BrainUrl ---"
 
-  Write-Host "Starting brain on ${hostName}:${port}..."
-  if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    throw "Could not find uv on PATH. Install uv or start the brain manually."
+  Write-Host "Starting brain via ensure_brain_cli (bind from config/config.yaml runtime.host)..."
+  $cliLog = Join-Path $logDir "brain_restart_cli.log"
+  $cliErrLog = Join-Path $logDir "brain_restart_cli.err.log"
+
+  & uv run python scripts/ensure_brain_cli.py --url $BrainUrl --ready-timeout $TimeoutSec `
+    1> $cliLog 2> $cliErrLog
+  if ($LASTEXITCODE -ne 0) {
+    throw "ensure_brain_cli exited $LASTEXITCODE. See data/logs/brain_launch.log"
   }
-  # Append stdout/stderr to the same launch log the TUI launcher uses.
-  $inner = "uv run uvicorn brain.main:app --host $hostName --port $port >> `"$logPath`" 2>&1"
-  Start-Process -FilePath "cmd.exe" `
-    -ArgumentList @("/c", $inner) `
-    -WorkingDirectory $RepoRoot `
-    -WindowStyle Hidden |
-    Out-Null
+
+  if (-not (Test-BrainHealth $BrainUrl)) {
+    throw "Brain not healthy at $BrainUrl after start. See data/logs/brain_launch.log"
+  }
+  Write-Host "Brain ready ($BrainUrl)."
 }
 
 function Wait-BrainReady {
@@ -196,8 +199,7 @@ if ($fullRestart) {
 }
 
 Write-Host "$(if ($fullRestart) { '[4]' } else { '[2]' }) Starting brain..."
-Start-Brain -BrainUrl $Url
-Wait-BrainReady -BrainUrl $Url -TimeoutSec $ReadyTimeoutSec
+Start-Brain -BrainUrl $Url -TimeoutSec $ReadyTimeoutSec
 
 if (-not $fullRestart) {
   Write-Host "Done (brain only)."

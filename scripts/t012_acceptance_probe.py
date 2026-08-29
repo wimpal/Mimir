@@ -63,6 +63,18 @@ CASES = [
         },
         forbid_writes=set(),
     ),
+    Case(
+        "tasks_read_only",
+        "What household tasks are due before Friday?",
+        expect_writes=set(),
+        forbid_writes={"homebase.tasks.add", "homebase.tasks.complete"},
+    ),
+    Case(
+        "tasks_add",
+        "Add a task: take out bins, due tomorrow",
+        expect_writes={"homebase.tasks.add"},
+        forbid_writes=set(),
+    ),
 ]
 
 

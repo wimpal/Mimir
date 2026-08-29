@@ -27,11 +27,16 @@
 
 ## Manual bind note
 
-`runtime.host` / `runtime.port` are the bind source of truth (TUI auto-start reads
-config). Manual uvicorn must match:
+`runtime.host` / `runtime.port` are the bind source of truth (`brain_launcher`,
+`restart_mimir.ps1`, and Task Scheduler login path read config). Manual uvicorn
+must match:
 
 ```powershell
+# Dev (loopback only)
 uv run uvicorn brain.main:app --host 127.0.0.1 --port 8000
+
+# M5 household LAN (requires auth.mode token + MIMIR_CLIENT_TOKEN)
+uv run uvicorn brain.main:app --host 0.0.0.0 --port 8000
 ```
 
 Chat clients connect via `MIMIR_BRAIN_URL` (may be a LAN IP while the process binds `0.0.0.0`).

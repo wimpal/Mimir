@@ -44,6 +44,10 @@ is down it starts `uv run uvicorn …` from the repo (keep the exe under
 starts after login (`scripts/install_login_tasks.ps1`). The TUI launcher is a
 **backup** when `/health` fails — it does not replace scheduled startup.
 
+**M5 LAN bind (T-022):** when `runtime.host` is `0.0.0.0`, the TUI still connects
+via loopback (`127.0.0.1:8000` default) and sends `MIMIR_CLIENT_TOKEN` as before.
+Verified on operator PC 2026-08-29. See repo [`README.md`](../../README.md) — LAN access.
+
 ## UI
 
 - Compact status line (host / conversation) under the window caption
