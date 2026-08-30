@@ -126,6 +126,7 @@ def register_chat_routes(application: FastAPI) -> None:
                 "stt": vh.stt,
                 "tts": vh.tts,
                 "ffmpeg": vh.ffmpeg,
+                "warmed": vh.warmed,
             }
 
         # CONVENTIONS.md required keys; extras (ollama, db detail, jellyfin) stay.

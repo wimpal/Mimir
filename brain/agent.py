@@ -20,7 +20,7 @@ from brain.mcp.write_guard import (
     user_message_requests_write,
     write_retry_nudge,
 )
-from brain.ollama import ChatMessage, OllamaClient, OllamaError, ToolCall
+from brain.ollama import ChatMessage, ChatResponse, OllamaClient, OllamaError, ToolCall
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 
 AfterToolCallback = Callable[[str, str, list[ChatMessage]], None]
@@ -57,6 +57,11 @@ class StepTrace:
     anomaly: str | None = None
     content_preview: str = ""
     tool_latency_ms: float | None = None
+    ollama_load_ms: float | None = None
+    ollama_prompt_eval_ms: float | None = None
+    ollama_eval_ms: float | None = None
+    ollama_prompt_tokens: int | None = None
+    ollama_eval_tokens: int | None = None
 
 
 @dataclass
@@ -138,6 +143,24 @@ def _dispatch_with_timeout(
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _step_from_ollama_response(
+    response: ChatResponse,
+    *,
+    ollama_latency_ms: float,
+    **kwargs: Any,
+) -> StepTrace:
+    t = response.timings
+    return StepTrace(
+        ollama_latency_ms=ollama_latency_ms,
+        ollama_load_ms=t.load_duration_ms,
+        ollama_prompt_eval_ms=t.prompt_eval_duration_ms,
+        ollama_eval_ms=t.eval_duration_ms,
+        ollama_prompt_tokens=t.prompt_eval_count,
+        ollama_eval_tokens=t.eval_count,
+        **kwargs,
+    )
+
+
 def run_turn(
     client: ChatClient | OllamaClient,
     messages: list[ChatMessage],
@@ -212,13 +235,17 @@ def run_turn(
         last_content = msg.content or last_content
         tool_names = [tc.function.name for tc in msg.tool_calls]
 
+        def _step(**kwargs: Any) -> StepTrace:
+            return _step_from_ollama_response(
+                response, ollama_latency_ms=ollama_latency, **kwargs
+            )
+
         if not msg.tool_calls:
             anomaly = None
             if not (msg.content or "").strip():
                 anomaly = "empty_response"
                 steps.append(
-                    StepTrace(
-                        ollama_latency_ms=ollama_latency,
+                    _step(
                         tool_names=[],
                         success=False,
                         anomaly=anomaly,
@@ -238,8 +265,7 @@ def run_turn(
             ):
                 write_nudge_count += 1
                 steps.append(
-                    StepTrace(
-                        ollama_latency_ms=ollama_latency,
+                    _step(
                         tool_names=[],
                         success=False,
                         anomaly="write_skipped",
@@ -252,8 +278,7 @@ def run_turn(
                 continue
             if user_message_requests_write(user_message) and not write_tool_called_this_turn:
                 steps.append(
-                    StepTrace(
-                        ollama_latency_ms=ollama_latency,
+                    _step(
                         tool_names=[],
                         success=False,
                         anomaly="write_skipped",
@@ -270,8 +295,7 @@ def run_turn(
                     stopped_reason=StoppedReason.FINAL,
                 )
             steps.append(
-                StepTrace(
-                    ollama_latency_ms=ollama_latency,
+                _step(
                     tool_names=[],
                     success=True,
                     content_preview=msg.content[:120],
@@ -360,8 +384,7 @@ def run_turn(
 
         tool_latency = (time.perf_counter() - tool_t0) * 1000
         steps.append(
-            StepTrace(
-                ollama_latency_ms=ollama_latency,
+            _step(
                 tool_names=tool_names,
                 success=anomaly is None and not dispatch_failed,
                 anomaly=anomaly,

@@ -38,6 +38,7 @@ class OllamaSettings(_Strict):
     model: str = "qwen3:8b"
     num_ctx: int = 8192
     think: bool = False
+    keep_alive: str = "45m"
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,8 @@ class VoiceSttSettings(_Strict):
     model: str = "small"
     device: Literal["cpu", "cuda"] = "cpu"
     compute_type: str = "int8"
-    language_hint: Literal["nl", "en"] | None = None
+    language_hint: Literal["nl", "en"] | None = "nl"
+    cpu_threads: int | None = None
 
 
 class VoiceTtsSettings(_Strict):
@@ -123,6 +125,13 @@ class VoiceTtsSettings(_Strict):
             "en": Path("voices/en_US-lessac-medium.onnx"),
         }
     )
+    length_scale: float = 1.05
+    noise_scale: float = 0.667
+    noise_w_scale: float = 0.75
+    volume: float = 1.0
+    sentence_silence_s: float = 0.14
+    normalize: Literal["peak", "rms", "none"] = "peak"
+    fade_ms: float = 5.0
 
 
 class VoiceLimitsSettings(_Strict):
@@ -133,6 +142,7 @@ class VoiceLimitsSettings(_Strict):
 
 class VoiceSettings(_Strict):
     enabled: bool = True
+    warm_on_start: bool = True
     stt: VoiceSttSettings = Field(default_factory=VoiceSttSettings)
     tts: VoiceTtsSettings = Field(default_factory=VoiceTtsSettings)
     limits: VoiceLimitsSettings = Field(default_factory=VoiceLimitsSettings)
@@ -399,6 +409,7 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("ollama", "model"): "MIMIR_OLLAMA_MODEL",
     ("ollama", "num_ctx"): "MIMIR_OLLAMA_NUM_CTX",
     ("ollama", "think"): "MIMIR_OLLAMA_THINK",
+    ("ollama", "keep_alive"): "MIMIR_OLLAMA_KEEP_ALIVE",
     ("location", "latitude"): "MIMIR_LATITUDE",
     ("location", "longitude"): "MIMIR_LONGITUDE",
     ("location", "timezone"): "MIMIR_TIMEZONE",
@@ -426,13 +437,23 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("calendar", "cache_ttl_s"): "MIMIR_CALENDAR_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
     ("voice", "enabled"): "MIMIR_VOICE_ENABLED",
+    ("voice", "warm_on_start"): "MIMIR_VOICE_WARM_ON_START",
 }
 
 _VOICE_NESTED_ENV: dict[tuple[str, ...], str] = {
     ("stt", "model"): "MIMIR_VOICE_STT_MODEL",
     ("stt", "device"): "MIMIR_VOICE_STT_DEVICE",
     ("stt", "compute_type"): "MIMIR_VOICE_STT_COMPUTE_TYPE",
+    ("stt", "language_hint"): "MIMIR_VOICE_STT_LANGUAGE_HINT",
+    ("stt", "cpu_threads"): "MIMIR_VOICE_STT_CPU_THREADS",
     ("tts", "default_locale"): "MIMIR_VOICE_TTS_DEFAULT_LOCALE",
+    ("tts", "length_scale"): "MIMIR_VOICE_TTS_LENGTH_SCALE",
+    ("tts", "noise_scale"): "MIMIR_VOICE_TTS_NOISE_SCALE",
+    ("tts", "noise_w_scale"): "MIMIR_VOICE_TTS_NOISE_W_SCALE",
+    ("tts", "volume"): "MIMIR_VOICE_TTS_VOLUME",
+    ("tts", "sentence_silence_s"): "MIMIR_VOICE_TTS_SENTENCE_SILENCE_S",
+    ("tts", "normalize"): "MIMIR_VOICE_TTS_NORMALIZE",
+    ("tts", "fade_ms"): "MIMIR_VOICE_TTS_FADE_MS",
 }
 
 _SECRET_ENV: dict[str, dict[str, str]] = {

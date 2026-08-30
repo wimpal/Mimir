@@ -21,6 +21,22 @@ $Voices = @(
         Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/nl/nl_NL/pim/medium"
     },
     @{
+        Name = "nl_NL-alex-medium"
+        Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/nl/nl_NL/alex/medium"
+    },
+    @{
+        Name = "nl_NL-ronnie-medium"
+        Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/nl/nl_NL/ronnie/medium"
+    },
+    @{
+        Name = "nl_BE-nathalie-medium"
+        Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/nl/nl_BE/nathalie/medium"
+    },
+    @{
+        Name = "nl_BE-rdh-medium"
+        Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/nl/nl_BE/rdh/medium"
+    },
+    @{
         Name = "en_US-lessac-medium"
         Base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
     }

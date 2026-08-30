@@ -86,13 +86,33 @@ def test_chat_sends_think_false_and_tools() -> None:
 
     tools = [{"type": "function", "function": {"name": "echo", "parameters": {}}}]
     with OllamaClient(
-        "http://t", "m", num_ctx=8192, transport=httpx.MockTransport(handler)
+        "http://t", "m", num_ctx=8192, keep_alive="45m", transport=httpx.MockTransport(handler)
     ) as client:
         client.chat([{"role": "user", "content": "hi"}], tools=tools, think=False)
     assert captured["body"]["think"] is False
     assert captured["body"]["stream"] is False
     assert captured["body"]["tools"] == tools
     assert captured["body"]["options"]["num_ctx"] == 8192
+    assert captured["body"]["keep_alive"] == "45m"
+
+
+def test_chat_parses_ollama_timings() -> None:
+    body = {
+        "message": {"role": "assistant", "content": "Hello"},
+        "load_duration": 5_000_000_000,
+        "prompt_eval_count": 100,
+        "prompt_eval_duration": 200_000_000,
+        "eval_count": 10,
+        "eval_duration": 50_000_000,
+    }
+    transport = httpx.MockTransport(_handler(body))
+    with OllamaClient("http://test", "qwen3:8b", transport=transport) as client:
+        resp = client.chat([ChatMessage(role="user", content="hi")])
+    assert resp.timings.load_duration_ms == 5000.0
+    assert resp.timings.prompt_eval_duration_ms == 200.0
+    assert resp.timings.eval_duration_ms == 50.0
+    assert resp.timings.prompt_eval_count == 100
+    assert resp.timings.eval_count == 10
 
 
 def test_chat_http_error() -> None:

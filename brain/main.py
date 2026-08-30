@@ -33,7 +33,7 @@ from brain.config import Settings, jellyfin_sync_configured, load_config, valida
 from brain.db import Database
 from brain.jellyfin_sync import SyncManager
 from brain.mcp.bridge import McpBridge
-from brain.ollama import OllamaClient
+from brain.ollama import ChatMessage, OllamaClient
 from brain.openai_compat import models_list, run_openai_chat
 from brain.prompt import PromptError, load_system_prompt
 from brain.service import BrainService
@@ -77,6 +77,7 @@ def _wire_state(
         settings.ollama.url,
         settings.ollama.model,
         num_ctx=settings.ollama.num_ctx,
+        keep_alive=settings.ollama.keep_alive,
         timeout_s=settings.timeouts.ollama_s,
     )
     from brain.tools import build_registry
@@ -105,6 +106,26 @@ def _wire_state(
     app.state.prompt_id = prompt_id
     app.state.mcp_bridge = mcp_bridge
     app.state._owns_ollama = client is None
+
+
+async def _warm_brain(app: FastAPI) -> None:
+    """Background warm: Ollama model + voice engines. Non-fatal."""
+    settings: Settings = app.state.settings
+    ollama: OllamaClient = app.state.ollama
+    voice: VoiceService = app.state.voice_service
+    try:
+        await asyncio.to_thread(
+            ollama.chat,
+            [ChatMessage(role="user", content="ok")],
+            think=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Ollama warm chat failed (non-fatal)", exc_info=True)
+    if settings.voice.enabled and settings.voice.warm_on_start:
+        try:
+            await asyncio.to_thread(voice.warm)
+        except Exception:  # noqa: BLE001
+            logger.warning("Voice warm failed (non-fatal)", exc_info=True)
 
 
 async def _jellyfin_sync_loop(app: FastAPI) -> None:
@@ -150,6 +171,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         sync_task: asyncio.Task[None] | None = None
+        warm_task: asyncio.Task[None] | None = None
         mcp_bridge: McpBridge | None = None
         if getattr(app.state, "service", None) is None:
             cfg = settings or load_config()
@@ -187,9 +209,23 @@ def create_app(
                 name="jellyfin-sync-loop",
             )
             app.state._sync_task = sync_task
+        cfg: Settings = app.state.settings
+        if (
+            cfg.voice.enabled
+            and cfg.voice.warm_on_start
+            and getattr(app.state, "_owns_ollama", False)
+        ):
+            warm_task = asyncio.create_task(_warm_brain(app), name="brain-warm")
+            app.state._warm_task = warm_task
         try:
             yield
         finally:
+            if warm_task is not None:
+                warm_task.cancel()
+                try:
+                    await warm_task
+                except asyncio.CancelledError:
+                    pass
             if sync_task is not None:
                 sync_task.cancel()
                 try:

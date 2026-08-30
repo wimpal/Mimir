@@ -117,6 +117,19 @@ def append_turn_trace(
                 "tool_names": s.tool_names,
                 "success": s.success,
                 "anomaly": s.anomaly,
+                "ollama_load_ms": (
+                    None if s.ollama_load_ms is None else round(s.ollama_load_ms, 2)
+                ),
+                "ollama_prompt_eval_ms": (
+                    None
+                    if s.ollama_prompt_eval_ms is None
+                    else round(s.ollama_prompt_eval_ms, 2)
+                ),
+                "ollama_eval_ms": (
+                    None if s.ollama_eval_ms is None else round(s.ollama_eval_ms, 2)
+                ),
+                "ollama_prompt_tokens": s.ollama_prompt_tokens,
+                "ollama_eval_tokens": s.ollama_eval_tokens,
             }
             for s in result.steps
         ],

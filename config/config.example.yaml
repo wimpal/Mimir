@@ -12,6 +12,8 @@ ollama:
   num_ctx: 8192
   # Qwen3 hybrid thinking: off for tool loops and voice (latency + formatting).
   think: false
+  # Keep model in VRAM between turns (45m default). Env: MIMIR_OLLAMA_KEEP_ALIVE.
+  keep_alive: 45m
 
 location:
   # Home coords for get_weather (Open-Meteo → KNMI HARMONIE for NL).
@@ -80,20 +82,29 @@ memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).
   history_pairs: 20
 
-# Brain-side STT/TTS (M5 — ADR-008). Voice files live under runtime.data_dir/voices/.
+# Brain-side STT/TTS (M5 — ADR-008/009). Voice files live under runtime.data_dir/voices/.
 # Requires ffmpeg on PATH. Run scripts/download_voice_models.ps1 once.
 voice:
   enabled: true
+  warm_on_start: true
   stt:
     model: small
     device: cpu
     compute_type: int8
-    language_hint: null
+    language_hint: nl
+    cpu_threads: null
   tts:
     default_locale: nl
     voices:
       nl: voices/nl_NL-pim-medium.onnx
       en: voices/en_US-lessac-medium.onnx
+    length_scale: 1.05
+    noise_scale: 0.667
+    noise_w_scale: 0.75
+    volume: 1.0
+    sentence_silence_s: 0.14
+    normalize: peak
+    fade_ms: 5.0
   limits:
     max_audio_bytes: 5242880
     max_audio_duration_s: 30

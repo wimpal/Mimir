@@ -162,6 +162,86 @@ def make_sine_wav(path: Path, seconds: float = 1.0) -> None:
         wf.writeframes(frames)
 
 
+def _run_once(
+    client: httpx.Client,
+    *,
+    base: str,
+    headers: dict[str, str],
+    tmp_dir: Path,
+    args: argparse.Namespace,
+    audio_bytes: bytes | None,
+    transcript: str | None,
+    run_index: int,
+) -> dict[str, int] | None:
+    stt_ms = 0
+    if transcript is None:
+        if audio_bytes is None:
+            if args.audio:
+                audio_bytes = args.audio.read_bytes()
+            else:
+                ffmpeg = _require_tool("ffmpeg")
+                wav_path = tmp_dir / f"ptt_{run_index}.wav"
+                print(f"Recording {args.seconds}s… speak now.")
+                record_wav(ffmpeg, args.seconds, wav_path, device=args.device)
+                audio_bytes = wav_path.read_bytes()
+
+        t0 = time.perf_counter()
+        stt_resp = client.post(
+            f"{base}/v1/stt",
+            content=audio_bytes,
+            headers={**headers, "Content-Type": "audio/wav"},
+        )
+        stt_ms = int((time.perf_counter() - t0) * 1000)
+        if stt_resp.status_code != 200:
+            print("STT failed:", stt_resp.status_code, stt_resp.text, file=sys.stderr)
+            return None
+        stt_body = stt_resp.json()
+        transcript = stt_body.get("text", "")
+        print(f"STT ({stt_ms} ms): {transcript!r} lang={stt_body.get('language')}")
+
+    t1 = time.perf_counter()
+    chat_resp = client.post(
+        f"{base}/v1/chat",
+        json={"message": transcript},
+        headers=headers,
+    )
+    chat_ms = int((time.perf_counter() - t1) * 1000)
+    if chat_resp.status_code != 200:
+        print("Chat failed:", chat_resp.status_code, chat_resp.text, file=sys.stderr)
+        return None
+    reply = chat_resp.json().get("reply", "")
+    print(f"Chat ({chat_ms} ms): {reply[:200]}{'…' if len(reply) > 200 else ''}")
+
+    t2 = time.perf_counter()
+    tts_resp = client.post(
+        f"{base}/v1/tts",
+        json={"text": reply, "locale": args.locale},
+        headers=headers,
+    )
+    tts_ms = int((time.perf_counter() - t2) * 1000)
+    if tts_resp.status_code != 200:
+        print("TTS failed:", tts_resp.status_code, tts_resp.text, file=sys.stderr)
+        return None
+
+    out_wav = tmp_dir / ("reply.wav" if run_index == 0 else f"reply_{run_index}.wav")
+    out_wav.write_bytes(tts_resp.content)
+    total_ms = stt_ms + chat_ms + tts_ms
+    print(f"TTS ({tts_ms} ms): wrote {out_wav} ({len(tts_resp.content)} bytes)")
+    print(f"Timings ms: stt={stt_ms} chat={chat_ms} tts={tts_ms} total={total_ms}")
+
+    if run_index == 0 and not args.no_play:
+        ffplay = shutil.which("ffplay")
+        if ffplay:
+            subprocess.run([ffplay, "-nodisp", "-autoexit", str(out_wav)], check=False)
+        else:
+            try:
+                os.startfile(str(out_wav))  # type: ignore[attr-defined]
+            except OSError:
+                print(f"Play manually: {out_wav}")
+
+    return {"stt": stt_ms, "chat": chat_ms, "tts": tts_ms, "total": total_ms}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="STT → chat → TTS round-trip probe")
     parser.add_argument("--url", default=os.environ.get("MIMIR_BRAIN_URL", "http://127.0.0.1:8000"))
@@ -177,6 +257,13 @@ def main() -> int:
     )
     parser.add_argument("--message", help="Skip STT; send this chat message instead")
     parser.add_argument("--no-play", action="store_true")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run N round-trips; reuse recorded audio after the first run",
+    )
     args = parser.parse_args()
 
     token = _token()
@@ -191,72 +278,48 @@ def main() -> int:
         tmp_dir = REPO_ROOT / "data" / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        transcript = args.message
-        stt_ms = 0
+        audio_bytes: bytes | None = None
+        if args.message is None and args.audio:
+            audio_bytes = args.audio.read_bytes()
 
-        if transcript is None:
-            if args.audio:
-                wav_path = args.audio
-            else:
-                ffmpeg = _require_tool("ffmpeg")
-                wav_path = tmp_dir / "ptt.wav"
-                print(f"Recording {args.seconds}s… speak now.")
-                record_wav(ffmpeg, args.seconds, wav_path, device=args.device)
-
-            audio_bytes = wav_path.read_bytes()
-            t0 = time.perf_counter()
-            stt_resp = client.post(
-                f"{base}/v1/stt",
-                content=audio_bytes,
-                headers={**headers, "Content-Type": "audio/wav"},
+        repeats = max(1, args.repeat)
+        runs: list[dict[str, int]] = []
+        for i in range(repeats):
+            if repeats > 1:
+                print(f"\n--- run {i + 1}/{repeats} ---")
+            timings = _run_once(
+                client,
+                base=base,
+                headers=headers,
+                tmp_dir=tmp_dir,
+                args=args,
+                audio_bytes=audio_bytes if i > 0 or args.audio else None,
+                transcript=args.message if i == 0 else None,
+                run_index=i,
             )
-            stt_ms = int((time.perf_counter() - t0) * 1000)
-            if stt_resp.status_code != 200:
-                print("STT failed:", stt_resp.status_code, stt_resp.text, file=sys.stderr)
+            if timings is None:
                 return 1
-            stt_body = stt_resp.json()
-            transcript = stt_body.get("text", "")
-            print(f"STT ({stt_ms} ms): {transcript!r} lang={stt_body.get('language')}")
+            runs.append(timings)
+            if i == 0 and audio_bytes is None and args.message is None and not args.audio:
+                wav_path = tmp_dir / "ptt_0.wav"
+                if wav_path.is_file():
+                    audio_bytes = wav_path.read_bytes()
 
-        t1 = time.perf_counter()
-        chat_resp = client.post(
-            f"{base}/v1/chat",
-            json={"message": transcript},
-            headers=headers,
-        )
-        chat_ms = int((time.perf_counter() - t1) * 1000)
-        if chat_resp.status_code != 200:
-            print("Chat failed:", chat_resp.status_code, chat_resp.text, file=sys.stderr)
-            return 1
-        reply = chat_resp.json().get("reply", "")
-        print(f"Chat ({chat_ms} ms): {reply[:200]}{'…' if len(reply) > 200 else ''}")
-
-        t2 = time.perf_counter()
-        tts_resp = client.post(
-            f"{base}/v1/tts",
-            json={"text": reply, "locale": args.locale},
-            headers=headers,
-        )
-        tts_ms = int((time.perf_counter() - t2) * 1000)
-        if tts_resp.status_code != 200:
-            print("TTS failed:", tts_resp.status_code, tts_resp.text, file=sys.stderr)
-            return 1
-
-        out_wav = tmp_dir / "reply.wav"
-        out_wav.write_bytes(tts_resp.content)
-        total_ms = stt_ms + chat_ms + tts_ms
-        print(f"TTS ({tts_ms} ms): wrote {out_wav} ({len(tts_resp.content)} bytes)")
-        print(f"Timings ms: stt={stt_ms} chat={chat_ms} tts={tts_ms} total={total_ms}")
-
-        if not args.no_play:
-            ffplay = shutil.which("ffplay")
-            if ffplay:
-                subprocess.run([ffplay, "-nodisp", "-autoexit", str(out_wav)], check=False)
-            else:
-                try:
-                    os.startfile(str(out_wav))  # type: ignore[attr-defined]
-                except OSError:
-                    print(f"Play manually: {out_wav}")
+        if repeats > 1:
+            first, rest = runs[0], runs[1:]
+            avg = {
+                key: int(sum(r[key] for r in rest) / len(rest))
+                for key in ("stt", "chat", "tts", "total")
+            }
+            print("\n--- summary ---")
+            print(
+                f"run 1 (cold-ish): stt={first['stt']} chat={first['chat']} "
+                f"tts={first['tts']} total={first['total']}"
+            )
+            print(
+                f"runs 2-{repeats} avg (warm): stt={avg['stt']} chat={avg['chat']} "
+                f"tts={avg['tts']} total={avg['total']}"
+            )
 
     return 0
 

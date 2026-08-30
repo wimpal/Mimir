@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,8 @@ from brain.voice.log import append_voice_log
 from brain.voice.stt import FasterWhisperEngine, SttEngine, SttResult, ffmpeg_available
 from brain.voice.tts import Locale, PiperEngine, TtsEngine
 
+logger = logging.getLogger("mimir.voice")
+
 LocaleHint = Literal["nl", "en"]
 
 
@@ -22,6 +25,7 @@ class VoiceHealth:
     stt: str
     tts: str
     ffmpeg: str
+    warmed: bool = False
 
 
 class VoiceService:
@@ -47,11 +51,22 @@ class VoiceService:
                 loc: resolve_voice_path(path, data_dir=data_dir)
                 for loc, path in settings.voice.tts.voices.items()
             }
-            self._tts = PiperEngine(paths)
+            self._tts = PiperEngine.from_settings(paths, settings.voice.tts)
+        self._warmed = False
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    def is_warmed(self) -> bool:
+        if not self._enabled:
+            return False
+        stt_ok = getattr(self._stt, "is_warmed", False)
+        tts_ok = all(
+            getattr(self._tts, "is_warmed", lambda _loc: False)(loc)
+            for loc in ("nl", "en")
+        )
+        return bool(self._warmed and stt_ok and tts_ok)
 
     def health_status(self) -> VoiceHealth:
         if not self._enabled:
@@ -65,7 +80,33 @@ class VoiceService:
                 if all(self._tts.voice_file_exists(loc) for loc in ("nl", "en"))
                 else "fail"
             )
-        return VoiceHealth(enabled=True, stt=stt, tts=tts, ffmpeg=ffmpeg)
+        return VoiceHealth(
+            enabled=True,
+            stt=stt,
+            tts=tts,
+            ffmpeg=ffmpeg,
+            warmed=self.is_warmed(),
+        )
+
+    def warm(self) -> None:
+        """Load STT/TTS models. Non-fatal on partial failure."""
+        if not self._enabled:
+            return
+        if not ffmpeg_available():
+            logger.warning("voice warm skipped: ffmpeg missing")
+            return
+        try:
+            if hasattr(self._stt, "warm"):
+                self._stt.warm()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            logger.warning("STT warm failed", exc_info=True)
+        for loc in ("nl", "en"):
+            try:
+                if hasattr(self._tts, "warm"):
+                    self._tts.warm(loc)  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001
+                logger.warning("TTS warm failed locale=%s", loc, exc_info=True)
+        self._warmed = True
 
     def transcribe(
         self,

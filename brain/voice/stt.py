@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -98,6 +99,11 @@ class FasterWhisperEngine:
         self._settings = settings
         self._model = None
         self._lock = threading.Lock()
+        self._warmed = False
+
+    @property
+    def is_warmed(self) -> bool:
+        return self._warmed
 
     def _ensure_model(self) -> None:
         if self._model is not None:
@@ -115,12 +121,14 @@ class FasterWhisperEngine:
                     http_status=503,
                 ) from exc
             device: Literal["cpu", "cuda"] = self._settings.device
+            kwargs: dict[str, object] = {
+                "device": device,
+                "compute_type": self._settings.compute_type,
+            }
+            if self._settings.cpu_threads is not None:
+                kwargs["cpu_threads"] = self._settings.cpu_threads
             try:
-                self._model = WhisperModel(
-                    self._settings.model,
-                    device=device,
-                    compute_type=self._settings.compute_type,
-                )
+                self._model = WhisperModel(self._settings.model, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("failed to load faster-whisper model")
                 raise VoiceError(
@@ -176,6 +184,8 @@ class FasterWhisperEngine:
                 beam_size=1,
                 vad_filter=True,
                 language=lang,
+                condition_on_previous_text=False,
+                without_timestamps=True,
             )
             parts = [seg.text.strip() for seg in segments if seg.text.strip()]
             text = " ".join(parts).strip()
@@ -188,5 +198,37 @@ class FasterWhisperEngine:
                     http_status=400,
                 )
             return SttResult(text=text, language=str(detected))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def warm(self) -> None:
+        """Load model and run a tiny silent clip."""
+        if self._warmed:
+            return
+        self._ensure_model()
+        # 0.2 s of silence at 16 kHz mono PCM16
+        silence = b"\x00\x00" * int(16000 * 0.2)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            with wave.open(tmp, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(silence)
+            tmp_path = Path(tmp.name)
+        try:
+            lang = _LANGUAGE_MAP.get(self._settings.language_hint or "", self._settings.language_hint)
+            segments, _info = self._model.transcribe(  # type: ignore[union-attr]
+                str(tmp_path),
+                beam_size=1,
+                vad_filter=True,
+                language=lang,
+                condition_on_previous_text=False,
+                without_timestamps=True,
+            )
+            list(segments)
+            self._warmed = True
+        except Exception:  # noqa: BLE001
+            logger.debug("STT warm transcribe failed (non-fatal)", exc_info=True)
+            self._warmed = True
         finally:
             tmp_path.unlink(missing_ok=True)

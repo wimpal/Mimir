@@ -59,9 +59,53 @@ class ChatMessage:
 
 
 @dataclass(frozen=True)
+class OllamaTimings:
+    """Ollama /api/chat timing fields (nanoseconds unless noted)."""
+
+    load_duration_ns: int | None = None
+    prompt_eval_count: int | None = None
+    prompt_eval_duration_ns: int | None = None
+    eval_count: int | None = None
+    eval_duration_ns: int | None = None
+
+    @property
+    def load_duration_ms(self) -> float | None:
+        if self.load_duration_ns is None:
+            return None
+        return self.load_duration_ns / 1_000_000
+
+    @property
+    def prompt_eval_duration_ms(self) -> float | None:
+        if self.prompt_eval_duration_ns is None:
+            return None
+        return self.prompt_eval_duration_ns / 1_000_000
+
+    @property
+    def eval_duration_ms(self) -> float | None:
+        if self.eval_duration_ns is None:
+            return None
+        return self.eval_duration_ns / 1_000_000
+
+
+def parse_ollama_timings(raw: dict[str, Any]) -> OllamaTimings:
+    def _int(key: str) -> int | None:
+        val = raw.get(key)
+        return int(val) if isinstance(val, (int, float)) else None
+
+    return OllamaTimings(
+        load_duration_ns=_int("load_duration"),
+        prompt_eval_count=_int("prompt_eval_count"),
+        prompt_eval_duration_ns=_int("prompt_eval_duration"),
+        eval_count=_int("eval_count"),
+        eval_duration_ns=_int("eval_duration"),
+    )
+
+
+@dataclass(frozen=True)
 class ChatResponse:
     message: ChatMessage
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    timings: OllamaTimings = field(default_factory=OllamaTimings)
 
 
 def _parse_tool_calls(raw_calls: Any) -> list[ToolCall]:
@@ -131,12 +175,14 @@ class OllamaClient:
         model: str,
         *,
         num_ctx: int = 8192,
+        keep_alive: str | None = None,
         timeout_s: float = 120.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx
+        self.keep_alive = keep_alive
         self.timeout_s = timeout_s
         self._client = httpx.Client(
             base_url=self.base_url,
@@ -180,6 +226,8 @@ class OllamaClient:
             "think": think,
             "options": {"num_ctx": self.num_ctx},
         }
+        if self.keep_alive is not None:
+            body["keep_alive"] = self.keep_alive
         if tools is not None:
             body["tools"] = tools
 
@@ -208,7 +256,11 @@ class OllamaClient:
         if not isinstance(raw_msg, dict):
             raise OllamaError("Ollama response missing message object")
 
-        return ChatResponse(message=parse_message(raw_msg), raw=data)
+        return ChatResponse(
+            message=parse_message(raw_msg),
+            raw=data,
+            timings=parse_ollama_timings(data),
+        )
 
     def ping(self, *, timeout_s: float = 5.0) -> bool:
         """Cheap reachability check via GET /api/tags."""
