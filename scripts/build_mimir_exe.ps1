@@ -16,7 +16,7 @@ if (-not (Test-Path $icon)) {
 
 Write-Host "Ensuring PyInstaller is available…"
 uv sync --group exe --inexact
-uv pip install pyinstaller pillow
+uv pip install pyinstaller
 
 Write-Host "Building dist/mimir.exe…"
 uv run python -m PyInstaller `
@@ -28,6 +28,7 @@ uv run python -m PyInstaller `
   --icon $icon `
   --collect-all textual `
   --collect-all rich `
+  --add-data "clients/tui/assets;clients/tui/assets" `
   --paths . `
   scripts/mimir_exe_entry.py
 

@@ -54,15 +54,59 @@ Verified on operator PC 2026-08-29. See repo [`README.md`](../../README.md) — 
 - World-tree splash when the Conversation is empty; `/new` restores it
 - Each launch starts a **new** Conversation; `/history` resumes a past one; `/settings` edits Preferences
 - Highlighted user strips, one dim tool summary line under the reply, Amp-style input border
-- Esc interrupts the current turn while working
+- **Voice input (T-026):** Nerd Font mic icon beside input (one cell; `md-microphone` /
+  `md-record` while recording). Requires a **Nerd Font Mono** in Windows Terminal —
+  see [Terminal icons](#terminal-icons). Fallback: `MIMIR_TUI_ICON_MODE=text` → `mic`/`rec`.
+- Esc interrupts the current turn while working (or cancels recording)
 - Copy: drag to select then Ctrl+C, or `/copy` / Ctrl+Shift+C for the last reply
   (Ctrl+C no longer quits — use Ctrl+Q, Ctrl+D, or `/quit`)
+
+Requires **ffmpeg** on PATH and brain voice endpoints (T-023). Default mic:
+`Analogue 1 + 2 (Focusrite USB Audio)` — override with `MIMIR_VOICE_INPUT_DEVICE`.
+
+### Terminal icons
+
+The mic button uses [Nerd Fonts](https://www.nerdfonts.com/) Material Design glyphs
+(one cell wide). Your terminal profile must use a **Nerd Font Mono** (not the default
+Cascadia Mono).
+
+**One-time setup (Windows):**
+
+```powershell
+powershell -File scripts/setup_tui_nerd_font.ps1
+```
+
+This installs **JetBrainsMono Nerd Font** via winget if missing, then prints the
+Windows Terminal font setting. In Settings → your PowerShell profile → Appearance,
+set **Font face** to `JetBrainsMono NFM` (or add to `settings.json`:
+
+```json
+"font": { "face": "JetBrainsMono NFM" }
+```
+
+Restart the terminal, then verify:
+
+```powershell
+uv run python scripts/probe_tui_icons.py
+```
+
+The probe should show a microphone and record circle, not `□` or `?`.
+
+**Portable fallback** (SSH, legacy console, no Nerd Font):
+
+```powershell
+$env:MIMIR_TUI_ICON_MODE = "text"
+uv run mimir
+```
+
+Or add `MIMIR_TUI_ICON_MODE=text` to `.env`.
 
 ## Commands
 
 | Input | Action |
 |---|---|
 | text + Enter | Send chat turn (SSE) |
+| mic icon | Start / stop voice recording → STT → send |
 | `/new` | New Conversation |
 | `/history` | Browse and resume a past Conversation |
 | `/settings` | View and edit allowlisted Preferences |

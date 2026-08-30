@@ -15,6 +15,8 @@ dependencies = [
     "textual>=1.0",
     "icalendar>=6.0",
     "recurring-ical-events>=3.0",
+    "faster-whisper>=1.0",
+    "piper-tts>=1.4",
 ]
 
 [project.scripts]

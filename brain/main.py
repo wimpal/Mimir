@@ -4,6 +4,8 @@ Endpoints:
   GET  /health
   POST /v1/chat
   POST /v1/chat/completions   (OpenAI-compatible; tools run server-side)
+  POST /v1/stt                (speech-to-text)
+  POST /v1/tts                (text-to-speech)
   GET  /v1/models
   GET  /v1/conversations
   GET  /v1/conversations/{id}/messages
@@ -35,6 +37,8 @@ from brain.ollama import OllamaClient
 from brain.openai_compat import models_list, run_openai_chat
 from brain.prompt import PromptError, load_system_prompt
 from brain.service import BrainService
+from brain.voice.api import register_voice_routes
+from brain.voice.service import VoiceService
 
 logger = logging.getLogger("mimir")
 
@@ -89,6 +93,7 @@ def _wire_state(
         unavailable_services=mcp_bridge.unavailable if mcp_bridge else [],
     )
     sync_manager = SyncManager(settings, db)
+    voice_service = VoiceService(settings, data_dir=resolved_data)
 
     app.state.settings = settings
     app.state.data_dir = resolved_data
@@ -96,6 +101,7 @@ def _wire_state(
     app.state.ollama = ollama
     app.state.service = service
     app.state.sync_manager = sync_manager
+    app.state.voice_service = voice_service
     app.state.prompt_id = prompt_id
     app.state.mcp_bridge = mcp_bridge
     app.state._owns_ollama = client is None
@@ -223,6 +229,7 @@ def create_app(
         )
 
     register_chat_routes(application)
+    register_voice_routes(application)
 
     @application.post("/v1/chat/completions")
     def openai_chat_completions(request: Request, body: dict[str, Any]) -> JSONResponse:

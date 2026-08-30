@@ -50,6 +50,9 @@ timeouts:
   # MCP tool calls (contracts/mimir.client.md).
   mcp_default_s: 10
   mcp_search_s: 30
+  # Voice endpoints (T-023).
+  stt_s: 60
+  tts_s: 30
 
 weather:
   # Forecast cache TTL (seconds). Serve last success marked stale when API fails.
@@ -76,6 +79,25 @@ calendar:
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).
   history_pairs: 20
+
+# Brain-side STT/TTS (M5 — ADR-008). Voice files live under runtime.data_dir/voices/.
+# Requires ffmpeg on PATH. Run scripts/download_voice_models.ps1 once.
+voice:
+  enabled: true
+  stt:
+    model: small
+    device: cpu
+    compute_type: int8
+    language_hint: null
+  tts:
+    default_locale: nl
+    voices:
+      nl: voices/nl_NL-pim-medium.onnx
+      en: voices/en_US-lessac-medium.onnx
+  limits:
+    max_audio_bytes: 5242880
+    max_audio_duration_s: 30
+    max_tts_chars: 2000
 
 # MCP services Mimir consumes (mirrors project-control-heim/registry.yaml).
 # Bearer token per service in .env: BUDGETTRACKER_TOKEN, HOMEBASE_TOKEN, …

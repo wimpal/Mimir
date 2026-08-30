@@ -104,6 +104,38 @@ class TimeoutSettings(_Strict):
     jellyfin_sync_s: float = 300.0  # overall Sync wall clock
     mcp_default_s: float = 10.0  # MCP tool call default (contracts/mimir.client.md)
     mcp_search_s: float = 30.0  # MCP tools whose name ends with .search
+    stt_s: float = 60.0  # wall clock for one /v1/stt utterance
+    tts_s: float = 30.0  # wall clock for one /v1/tts synthesis
+
+
+class VoiceSttSettings(_Strict):
+    model: str = "small"
+    device: Literal["cpu", "cuda"] = "cpu"
+    compute_type: str = "int8"
+    language_hint: Literal["nl", "en"] | None = None
+
+
+class VoiceTtsSettings(_Strict):
+    default_locale: Literal["nl", "en"] = "nl"
+    voices: dict[str, Path] = Field(
+        default_factory=lambda: {
+            "nl": Path("voices/nl_NL-pim-medium.onnx"),
+            "en": Path("voices/en_US-lessac-medium.onnx"),
+        }
+    )
+
+
+class VoiceLimitsSettings(_Strict):
+    max_audio_bytes: int = 5_242_880  # 5 MiB
+    max_audio_duration_s: float = 30.0
+    max_tts_chars: int = 2000
+
+
+class VoiceSettings(_Strict):
+    enabled: bool = True
+    stt: VoiceSttSettings = Field(default_factory=VoiceSttSettings)
+    tts: VoiceTtsSettings = Field(default_factory=VoiceTtsSettings)
+    limits: VoiceLimitsSettings = Field(default_factory=VoiceLimitsSettings)
 
 
 class WeatherSettings(_Strict):
@@ -287,6 +319,7 @@ class Settings(_Strict):
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
     calendar: CalendarSettings = Field(default_factory=CalendarSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
     services: dict[str, McpServiceSettings] = Field(default_factory=dict)
 
 
@@ -387,9 +420,19 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "jellyfin_sync_s"): "MIMIR_JELLYFIN_SYNC_TIMEOUT_S",
     ("timeouts", "mcp_default_s"): "MIMIR_TIMEOUT_MCP_DEFAULT_S",
     ("timeouts", "mcp_search_s"): "MIMIR_TIMEOUT_MCP_SEARCH_S",
+    ("timeouts", "stt_s"): "MIMIR_TIMEOUT_STT_S",
+    ("timeouts", "tts_s"): "MIMIR_TIMEOUT_TTS_S",
     ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",
     ("calendar", "cache_ttl_s"): "MIMIR_CALENDAR_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
+    ("voice", "enabled"): "MIMIR_VOICE_ENABLED",
+}
+
+_VOICE_NESTED_ENV: dict[tuple[str, ...], str] = {
+    ("stt", "model"): "MIMIR_VOICE_STT_MODEL",
+    ("stt", "device"): "MIMIR_VOICE_STT_DEVICE",
+    ("stt", "compute_type"): "MIMIR_VOICE_STT_COMPUTE_TYPE",
+    ("tts", "default_locale"): "MIMIR_VOICE_TTS_DEFAULT_LOCALE",
 }
 
 _SECRET_ENV: dict[str, dict[str, str]] = {
@@ -451,6 +494,7 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
                 target[key] = value
 
     _apply_calendar_feed_secrets(data, cfg_path)
+    _apply_voice_env_overrides(data)
     _apply_mcp_service_tokens(data)
 
     client_token = client_token_from_env()
@@ -467,6 +511,24 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
 
     validate_bind_auth(settings)
     return settings
+
+
+def _apply_voice_env_overrides(data: dict) -> None:
+    """Overlay MIMIR_VOICE_* env vars onto voice.stt / voice.tts nested keys."""
+    voice = data.setdefault("voice", {})
+    if not isinstance(voice, dict):
+        return
+    for path, env_name in _VOICE_NESTED_ENV.items():
+        value = os.environ.get(env_name)
+        if value is None:
+            continue
+        target = voice
+        for part in path[:-1]:
+            nested = target.setdefault(part, {})
+            if not isinstance(nested, dict):
+                return
+            target = nested
+        target[path[-1]] = value
 
 
 def _apply_mcp_service_tokens(data: dict) -> None:
@@ -506,6 +568,17 @@ def _apply_calendar_feed_secrets(data: dict, cfg_path: Path) -> None:
             value = os.environ.get(f"{prefix}{suffix}")
             if value is not None:
                 feed[key] = value
+
+
+def resolve_voice_path(path: Path, *, data_dir: Path) -> Path:
+    """Resolve a voice model path relative to data_dir, then cwd."""
+    p = path.expanduser()
+    if p.is_absolute():
+        return p
+    under_data = (data_dir / p).resolve()
+    if under_data.is_file():
+        return under_data
+    return (Path.cwd() / p).resolve()
 
 
 def jellyfin_sync_configured(settings: Settings) -> bool:

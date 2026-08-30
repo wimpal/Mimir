@@ -337,6 +337,56 @@ def test_preferences_client_and_display() -> None:
     asyncio.run(_run())
 
 
+def test_stt_returns_transcript() -> None:
+    wav = b"RIFF" + b"\x00" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/stt"
+        assert request.headers.get("content-type") == "audio/wav"
+        assert request.content == wav
+        return httpx.Response(
+            200, json={"text": "Goedemorgen.", "language": "nl"}
+        )
+
+    async def _run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as raw:
+            client = BrainClient("http://test", client=raw)
+            result = await client.stt(wav)
+            assert result.text == "Goedemorgen."
+            assert result.language == "nl"
+
+    asyncio.run(_run())
+
+
+def test_stt_surfaces_brain_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "invalid_input",
+                    "message": "No speech detected.",
+                    "retryable": False,
+                }
+            },
+        )
+
+    async def _run() -> None:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as raw:
+            client = BrainClient("http://test", client=raw)
+            with pytest.raises(BrainClientError, match="No speech detected"):
+                await client.stt(b"wav")
+
+    asyncio.run(_run())
+
+
 def test_host_port_from_url() -> None:
     assert host_port_from_url("http://127.0.0.1:8000") == ("127.0.0.1", 8000)
     assert host_port_from_url("http://localhost:9000/v1") == ("localhost", 9000)

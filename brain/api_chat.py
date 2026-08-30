@@ -117,8 +117,19 @@ def register_chat_routes(application: FastAPI) -> None:
         else:
             jellyfin_sync = catalogue_status_dict(db, s, configured=False)
 
+        voice_block: dict[str, object] | None = None
+        voice_svc = getattr(request.app.state, "voice_service", None)
+        if voice_svc is not None:
+            vh = voice_svc.health_status()
+            voice_block = {
+                "enabled": vh.enabled,
+                "stt": vh.stt,
+                "tts": vh.tts,
+                "ffmpeg": vh.ffmpeg,
+            }
+
         # CONVENTIONS.md required keys; extras (ollama, db detail, jellyfin) stay.
-        return {
+        payload: dict[str, Any] = {
             "service": "mimir",
             "status": status,
             "version": __version__,
@@ -139,6 +150,9 @@ def register_chat_routes(application: FastAPI) -> None:
             "jellyfin_sync": jellyfin_sync,
             "prompt_id": request.app.state.prompt_id,
         }
+        if voice_block is not None:
+            payload["voice"] = voice_block
+        return payload
 
     @application.get("/debug/recent-traces")
     def recent_traces(request: Request, limit: int = 50) -> dict[str, Any]:

@@ -16,6 +16,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, Static
 
+from clients.tui.audio_capture import (
+    AudioCapture,
+    AudioCaptureError,
+    ffmpeg_available,
+)
 from clients.tui.brain_client import (
     DEFAULT_BRAIN_URL,
     DEFAULT_TURN_TIMEOUT_S,
@@ -23,11 +28,12 @@ from clients.tui.brain_client import (
     BrainClientError,
     normalize_brain_url,
 )
+from clients.tui.mic_button import MicButton
 from clients.tui.brain_launcher import ensure_brain_running
 from clients.tui.history import HistoryScreen
 from clients.tui.settings import SettingsScreen
 from clients.tui.splash import Splash
-from clients.tui.state import ChatState, save_state
+from clients.tui.state import ChatState, default_state_path, save_state
 from clients.tui.window_title import set_console_title
 
 HELP_TEXT = """Commands:
@@ -42,6 +48,7 @@ HELP_TEXT = """Commands:
   Drag to select, then Ctrl+C — copy selection (does not quit)
 
 Chat normally by typing a message and pressing Enter.
+Click the mic icon beside the input to record; click again (or Esc) when done.
 If the brain is down, Mimir tries to start it (needs `uv` + repo)."""
 
 
@@ -241,7 +248,13 @@ class MimirApp(App[None]):
     #input-wrap:focus-within {
         border: round #7cb342;
     }
+    #input-row {
+        height: auto;
+        width: 100%;
+        align: left middle;
+    }
     #input {
+        width: 1fr;
         background: transparent;
         border: none;
         padding: 0;
@@ -295,6 +308,8 @@ class MimirApp(App[None]):
         self._assistant_text = ""
         self._last_assistant_text = ""
         self._showing_splash = True
+        self._capture: AudioCapture | None = None
+        self._voice_gen = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -304,10 +319,12 @@ class MimirApp(App[None]):
             yield Transcript(id="transcript")
         yield Static("", id="work-status", classes="hidden")
         with Vertical(id="input-wrap"):
-            yield Input(placeholder="Message Mimir…", id="input")
+            with Horizontal(id="input-row"):
+                yield Input(placeholder="Message Mimir…", id="input")
+                yield MicButton(id="mic-btn")
         yield Static(
             "/new  /history  /settings  /copy  /help  /quit  ·  "
-            "Ctrl+Shift+C copy  ·  Esc interrupt",
+            "mic voice  ·  Ctrl+Shift+C copy  ·  Esc interrupt",
             id="hints",
         )
 
@@ -338,7 +355,72 @@ class MimirApp(App[None]):
         self._focus_input()
         self._startup()
 
+    def on_mic_button_pressed(self, event: MicButton.Pressed) -> None:
+        self._toggle_voice_input()
+
+    @work(exclusive=True)
+    async def _toggle_voice_input(self) -> None:
+        assert self._client is not None
+        if self._capture is not None and self._capture.is_recording:
+            self._voice_gen += 1
+            op = self._voice_gen
+            capture = self._capture
+            self._capture = None
+            self._set_busy(True, note="Transcribing…", kind="voice")
+            try:
+                audio = await asyncio.to_thread(capture.stop)
+            except AudioCaptureError as exc:
+                if op != self._voice_gen:
+                    return
+                self._hide_splash_for_chat()
+                self._transcript().append_error(str(exc))
+                self._set_busy(False)
+                self._focus_input()
+                return
+            if op != self._voice_gen:
+                return
+            try:
+                result = await self._client.stt(audio)
+            except BrainClientError as exc:
+                if op != self._voice_gen:
+                    return
+                self._hide_splash_for_chat()
+                self._transcript().append_error(str(exc))
+                self._set_busy(False)
+                self._focus_input()
+                return
+            if op != self._voice_gen:
+                return
+            self._set_busy(False)
+            await self._send_message(result.text)
+            return
+
+        if self._busy:
+            return
+        if not ffmpeg_available():
+            self.notify("Voice input needs ffmpeg on PATH.", severity="error")
+            return
+        self._voice_gen += 1
+        op = self._voice_gen
+        capture = AudioCapture()
+        path = self._record_path()
+        try:
+            await asyncio.to_thread(capture.start, path)
+        except AudioCaptureError as exc:
+            if op != self._voice_gen:
+                return
+            self.notify(str(exc), severity="error")
+            return
+        if op != self._voice_gen:
+            capture.cancel()
+            return
+        self._capture = capture
+        self._set_busy(True, kind="record")
+
     async def on_unmount(self) -> None:
+        if self._capture is not None:
+            self._capture.cancel()
+            self._capture = None
         await self._cancel_stream()
         if self._client is not None:
             await self._client.aclose()
@@ -383,7 +465,30 @@ class MimirApp(App[None]):
         )
 
     def _focus_input(self) -> None:
+        if self._capture is not None and self._capture.is_recording:
+            return
         self.query_one("#input", Input).focus()
+
+    def _mic_button(self) -> MicButton:
+        return self.query_one("#mic-btn", MicButton)
+
+    def _record_path(self) -> Path:
+        base = (
+            self.state_path.parent
+            if self.state_path
+            else default_state_path().parent
+        )
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "ptt.wav"
+
+    def _set_mic_recording(self, recording: bool) -> None:
+        self._mic_button().recording = recording
+
+    def _sync_mic_enabled(self) -> None:
+        self._mic_button().disabled = not (
+            (self._capture is not None and self._capture.is_recording)
+            or (not self._busy and ffmpeg_available())
+        )
 
     def _set_busy(
         self,
@@ -396,8 +501,12 @@ class MimirApp(App[None]):
         self._busy_kind = kind if busy else None
         inp = self.query_one("#input", Input)
         # Keep the field usable during connect so typing works on open.
-        inp.disabled = busy and kind != "startup"
-        if busy:
+        inp.disabled = busy and kind not in ("startup", "record")
+        if kind == "record":
+            self._set_mic_recording(True)
+            self._set_work_status("Recording… (click mic or Esc when done)")
+            self._refresh_meta("recording")
+        elif busy:
             if kind == "startup":
                 self._set_work_status(note or "Connecting…")
                 self._refresh_meta("connecting…")
@@ -407,14 +516,19 @@ class MimirApp(App[None]):
             elif kind == "settings":
                 self._set_work_status(note or "Loading settings…")
                 self._refresh_meta("working")
+            elif kind == "voice":
+                self._set_work_status(note or "Transcribing…")
+                self._refresh_meta("working")
             else:
                 self._set_work_status(
                     note or "Working… (esc to interrupt)"
                 )
                 self._refresh_meta("working")
         else:
+            self._set_mic_recording(False)
             self._set_work_status(None)
             self._refresh_meta("ready")
+        self._sync_mic_enabled()
 
     async def _cancel_stream(self) -> None:
         task = self._stream_task
@@ -427,6 +541,15 @@ class MimirApp(App[None]):
                 pass
 
     async def action_interrupt(self) -> None:
+        if self._capture is not None and self._capture.is_recording:
+            self._voice_gen += 1
+            self._capture.cancel()
+            self._capture = None
+            self._set_busy(False)
+            self._hide_splash_for_chat()
+            self._transcript().append_system("Recording cancelled.")
+            self._focus_input()
+            return
         if not self._busy:
             return
         kind = self._busy_kind

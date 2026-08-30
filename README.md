@@ -229,3 +229,57 @@ desktop TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
 | TUI on PC (`dist\mimir.exe` / `uv run mimir`) | Chat works on loopback |
 | Phone `POST /v1/chat` → 401 / bearer chat | Verified 2026-08-29 (Termux) |
 | Reboot → LAN without manual steps | Verified 2026-08-29 |
+
+## Voice endpoints (T-023)
+
+Brain-side STT/TTS for mobile push-to-talk (T-025). Clients orchestrate
+**STT → `/v1/chat` → TTS** — no combined voice shortcut. Backends: faster-whisper
+(STT) + Piper (TTS); see ADR-008 in `project-control-heim`.
+
+### Prerequisites
+
+```powershell
+uv sync
+# ffmpeg + ffprobe on PATH (winget install ffmpeg)
+powershell -File scripts/download_voice_models.ps1
+```
+
+First `/v1/stt` request downloads the faster-whisper `small` weights (~500 MB).
+Piper voices land in `data/voices/` (paths in `config/config.yaml` → `voice.tts.voices`).
+
+Optional: `MIMIR_VOICE_ENABLED=false` in `.env` to disable voice on dev machines.
+
+### curl examples
+
+```powershell
+# STT (raw wav body)
+curl.exe -X POST http://127.0.0.1:8000/v1/stt `
+  -H "Authorization: Bearer $env:MIMIR_CLIENT_TOKEN" `
+  -H "Content-Type: audio/wav" `
+  --data-binary "@data/tmp/ptt.wav"
+
+# TTS → reply.wav
+curl.exe -X POST http://127.0.0.1:8000/v1/tts `
+  -H "Authorization: Bearer $env:MIMIR_CLIENT_TOKEN" `
+  -H "Content-Type: application/json" `
+  -d "{\"text\":\"Morgen wordt het 18 graden.\",\"locale\":\"nl\"}" `
+  -o data/tmp/reply.wav
+```
+
+### Mic round-trip (acceptance)
+
+Default input is **Analogue 1 + 2 (Focusrite USB Audio)** — match Windows
+Settings → Sound → Input. Override with `MIMIR_VOICE_INPUT_DEVICE` in `.env` or
+`--device "…"` on the script.
+
+```powershell
+powershell -File scripts/restart_mimir.ps1 -BrainOnly
+powershell -File scripts/voice_roundtrip.ps1
+# or: uv run python scripts/voice_roundtrip.py --locale nl
+```
+
+Prints `stt_ms`, `chat_ms`, `tts_ms` timings. `/health` includes a `voice` block
+(`stt`, `tts`, `ffmpeg`). Voice ops log to `data/logs/voice.jsonl`.
+
+**Latency (CPU dev box, rough):** 5 s utterance STT often 3–8 s; one-sentence TTS
+usually under 1 s. T-025 evaluates whether that is good enough for phone UX.

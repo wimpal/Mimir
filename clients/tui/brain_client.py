@@ -16,6 +16,7 @@ DEFAULT_BRAIN_URL = "http://127.0.0.1:8000"
 DEFAULT_TURN_TIMEOUT_S = 180.0
 CONNECT_TIMEOUT_S = 5.0
 CONTROL_TIMEOUT_S = 10.0
+VOICE_STT_TIMEOUT_S = 90.0
 
 
 class BrainClientError(RuntimeError):
@@ -27,6 +28,12 @@ class HealthInfo:
     status: str
     reachable: bool
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class SttResult:
+    text: str
+    language: str | None = None
 
 
 def normalize_brain_url(url: str) -> str:
@@ -276,6 +283,61 @@ class BrainClient:
         if not str(body.get("key") or "").strip():
             raise BrainClientError("put preference returned unexpected JSON")
         return body
+
+    async def stt(
+        self,
+        audio: bytes,
+        *,
+        language: str | None = None,
+    ) -> SttResult:
+        params: dict[str, str] = {}
+        if language:
+            params["language"] = language
+        timeout = httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S,
+            read=VOICE_STT_TIMEOUT_S,
+            write=CONNECT_TIMEOUT_S,
+            pool=CONNECT_TIMEOUT_S,
+        )
+        try:
+            resp = await self._client.post(
+                "/v1/stt",
+                content=audio,
+                params=params or None,
+                headers={"Content-Type": "audio/wav"},
+                timeout=timeout,
+            )
+        except httpx.TimeoutException as exc:
+            raise BrainClientError("speech recognition timed out") from exc
+        except httpx.HTTPError as exc:
+            raise BrainClientError(f"speech recognition failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            detail = resp.text[:200]
+            try:
+                err = resp.json()
+                if isinstance(err, dict):
+                    nested = err.get("error")
+                    if isinstance(nested, dict) and nested.get("message"):
+                        detail = str(nested["message"])
+                    elif err.get("detail"):
+                        detail = str(err["detail"])
+            except ValueError:
+                pass
+            raise BrainClientError(
+                f"speech recognition HTTP {resp.status_code}: {detail}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise BrainClientError("speech recognition returned non-JSON") from exc
+        if not isinstance(body, dict):
+            raise BrainClientError("speech recognition returned unexpected JSON")
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise BrainClientError("No speech detected.")
+        lang = body.get("language")
+        return SttResult(text=text, language=str(lang) if lang else None)
 
     async def stream_chat(
         self,
