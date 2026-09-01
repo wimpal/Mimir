@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import logging
+import time
+from collections import defaultdict
 from collections.abc import Callable
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -12,8 +15,52 @@ from starlette.types import ASGIApp
 
 from brain.config import Settings
 
+logger = logging.getLogger("mimir.auth")
+
 # Starlette TestClient reports this as the client host.
 _TESTCLIENT_HOSTS = frozenset({"testclient", "localhost", "127.0.0.1", "::1"})
+
+_AUTH_FAIL_LIMIT = 10
+_AUTH_FAIL_WINDOW_S = 60.0
+
+
+class AuthFailureTracker:
+    """Per-IP sliding-window counter for failed bearer checks (T-015 / M7)."""
+
+    def __init__(self, *, limit: int = _AUTH_FAIL_LIMIT, window_s: float = _AUTH_FAIL_WINDOW_S) -> None:
+        self._limit = limit
+        self._window_s = window_s
+        self._failures: dict[str, list[float]] = defaultdict(list)
+
+    def _prune(self, ip: str, now: float) -> None:
+        cutoff = now - self._window_s
+        self._failures[ip] = [t for t in self._failures[ip] if t > cutoff]
+        if not self._failures[ip]:
+            del self._failures[ip]
+
+    def is_blocked(self, ip: str, *, now: float | None = None) -> bool:
+        ts = time.monotonic() if now is None else now
+        self._prune(ip, ts)
+        return len(self._failures.get(ip, [])) >= self._limit
+
+    def record_failure(self, ip: str, *, now: float | None = None) -> None:
+        ts = time.monotonic() if now is None else now
+        self._prune(ip, ts)
+        self._failures[ip].append(ts)
+
+    def reset(self) -> None:
+        self._failures.clear()
+
+    def clear_ip(self, ip: str) -> None:
+        self._failures.pop(ip, None)
+
+
+_auth_failures = AuthFailureTracker()
+
+
+def reset_auth_failure_tracker_for_tests() -> None:
+    """Clear in-memory auth failure state between tests."""
+    _auth_failures.reset()
 
 
 def is_loopback_client(request: Request) -> bool:
@@ -22,6 +69,14 @@ def is_loopback_client(request: Request) -> bool:
     if client is None or not client.host:
         return True
     return client.host.strip().lower() in _TESTCLIENT_HOSTS
+
+
+def client_ip(request: Request) -> str:
+    """Best-effort client IP for auth logging and rate limiting."""
+    client = request.client
+    if client is None or not client.host:
+        return "unknown"
+    return client.host.strip()
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -73,7 +128,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse(status_code=403, content={"detail": "host-only"})
 
         if settings.auth.mode == "token" and _needs_bearer(path):
-            if not bearer_matches(request, settings.auth.token):
+            ip = client_ip(request)
+            if bearer_matches(request, settings.auth.token):
+                _auth_failures.clear_ip(ip)
+            elif _auth_failures.is_blocked(ip):
+                return JSONResponse(status_code=429, content={"detail": "too many requests"})
+            else:
+                _auth_failures.record_failure(ip)
+                logger.warning(
+                    "auth failure client=%s path=%s user_agent=%s",
+                    ip,
+                    path,
+                    request.headers.get("user-agent", ""),
+                )
                 return JSONResponse(status_code=401, content={"detail": "unauthorized"})
 
         return await call_next(request)
@@ -81,7 +148,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 # Re-export for callers that validate bind hosts.
 __all__ = [
+    "AuthFailureTracker",
     "AuthMiddleware",
     "bearer_matches",
+    "client_ip",
     "is_loopback_client",
+    "reset_auth_failure_tracker_for_tests",
 ]

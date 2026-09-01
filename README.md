@@ -165,6 +165,8 @@ Then `uv run mimir` or `dist\mimir.exe` — chat should work with no manual brai
 The brain defaults to loopback (`127.0.0.1`). For a phone or laptop on home Wi‑Fi,
 bind all interfaces and enforce bearer auth (T-014 / ADR 0005).
 
+**Android app:** build and install from [`clients/mobile/README.md`](clients/mobile/README.md).
+
 ### Prerequisites
 
 - `.env`: `MIMIR_AUTH_MODE=token` and non-empty `MIMIR_CLIENT_TOKEN`
@@ -230,9 +232,54 @@ desktop TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
 | Phone `POST /v1/chat` → 401 / bearer chat | Verified 2026-08-29 (Termux) |
 | Reboot → LAN without manual steps | Verified 2026-08-29 |
 
+## Remote access (M7 — Tailscale) ✅
+
+**Done 2026-09-01** (T-015). Reach the brain from outside the home LAN via **Tailscale
+only** — no port-forward, no public tunnel. See ADR-004 and
+[`project-control-heim/docs/runbook-tailnet.md`](../project-control-heim/docs/runbook-tailnet.md).
+
+**Interim:** brain on operator PC until M6 compute box. **Tailnet host:**
+`desktop-8nhdeb5.taildc5ad7.ts.net`.
+
+### One-time setup (operator PC)
+
+1. Join PC and phone to Tailscale; tag PC `tag:brain`, phone `tag:client`.
+   ACL: `tag:client → tag:brain:8000` only (default deny, `"ssh": []`).
+2. **Administrator PowerShell** — Tailscale firewall rule:
+
+```powershell
+cd D:\Dev\Projects\Mimir
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_brain_firewall.ps1 -Tailscale
+```
+
+### Client URLs
+
+| Where | How |
+|---|---|
+| Archer Wi‑Fi (home) | Mobile **Home URL** `http://<PC-LAN-IP>:8000` |
+| Away / T-56 Wi‑Fi / mobile data | Mobile **Away URL** `http://100.x.y.z:8000` + Tailscale on |
+| Laptop away (TUI) | `MIMIR_BRAIN_URL` = tailnet URL or MagicDNS |
+
+**Mobile:** dual URL with LAN-first auto-fallback — see
+[`clients/mobile/README.md`](clients/mobile/README.md).
+
+**Household network:** brain/NAS on Archer LAN (`192.168.0.x`). T-56 Wi‑Fi cannot
+reach LAN IP; use Tailscale there.
+
+Bearer auth mandatory on tailnet; auth failures logged; 10 failures / 60 s / IP → 429.
+
+### Verified (operator, 2026-09-01)
+
+| Check | Result |
+|-------|--------|
+| Public IP `:8000` unreachable (mobile data) | pass |
+| Tailscale on → chat + PTT from mobile data | pass |
+| Dual URL home/away fallback | pass |
+| Archer Wi‑Fi home regression | pass |
+
 ## Voice endpoints (T-023)
 
-Brain-side STT/TTS for mobile push-to-talk (T-025). Clients orchestrate
+Brain-side STT/TTS for mobile push-to-talk (**T-025 done**). Clients orchestrate
 **STT → `/v1/chat` → TTS** — no combined voice shortcut. Backends: faster-whisper
 (STT) + Piper (TTS); see ADR-008 in `project-control-heim`.
 

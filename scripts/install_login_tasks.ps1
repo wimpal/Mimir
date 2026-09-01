@@ -94,5 +94,6 @@ Register-ScheduledTask `
 Write-Host ""
 Write-Host "Done. Tasks installed under Task Scheduler -> Task Scheduler Library -> Heim"
 Write-Host "One-time LAN prep (M5): powershell -File scripts/install_brain_firewall.ps1"
+Write-Host "M7 tailnet prep:     powershell -File scripts/install_brain_firewall.ps1 -Tailscale"
 Write-Host "Test brain task: Start-ScheduledTask -TaskPath '\Heim\' -TaskName '$BrainTaskName'"
 Write-Host "Uninstall: powershell -File scripts/install_login_tasks.ps1 -Uninstall"

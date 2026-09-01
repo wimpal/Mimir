@@ -204,3 +204,56 @@ def test_debug_host_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     with _client(s) as tc:
         resp = tc.get("/debug/recent-traces")
     assert resp.status_code == 403
+
+
+def test_auth_failure_tracker_blocks_after_limit() -> None:
+    from brain.auth import AuthFailureTracker
+
+    tracker = AuthFailureTracker(limit=3, window_s=60.0)
+    ip = "100.64.0.5"
+    for i in range(3):
+        tracker.record_failure(ip, now=float(i))
+    assert tracker.is_blocked(ip, now=3.0)
+
+
+def test_auth_failure_tracker_prunes_old_failures() -> None:
+    from brain.auth import AuthFailureTracker
+
+    tracker = AuthFailureTracker(limit=3, window_s=10.0)
+    ip = "100.64.0.5"
+    tracker.record_failure(ip, now=0.0)
+    tracker.record_failure(ip, now=1.0)
+    tracker.record_failure(ip, now=2.0)
+    assert tracker.is_blocked(ip, now=2.0)
+    assert not tracker.is_blocked(ip, now=12.0)
+
+
+def test_chat_rate_limited_after_repeated_bad_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import brain.auth as auth_mod
+
+    auth_mod.reset_auth_failure_tracker_for_tests()
+    monkeypatch.setattr(auth_mod, "client_ip", lambda _req: "100.64.0.99")
+
+    s = _settings(tmp_path, auth={"mode": "token", "token": "sekrit"})
+    with _client(s) as tc:
+        for _ in range(10):
+            resp = tc.post(
+                "/v1/chat",
+                json={"message": "hi"},
+                headers={"Authorization": "Bearer wrong"},
+            )
+            assert resp.status_code == 401
+        blocked = tc.post(
+            "/v1/chat",
+            json={"message": "hi"},
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert blocked.status_code == 429
+        ok = tc.post(
+            "/v1/chat",
+            json={"message": "hi"},
+            headers={"Authorization": "Bearer sekrit"},
+        )
+        assert ok.status_code == 200

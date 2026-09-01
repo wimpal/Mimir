@@ -1,4 +1,4 @@
-# Inbound Windows Firewall rule for Mimir brain LAN access (T-022).
+# Inbound Windows Firewall rules for Mimir brain LAN + Tailscale access (T-022, T-015).
 #
 # Requires **Administrator** PowerShell (creating firewall rules needs elevation).
 #
@@ -7,17 +7,20 @@
 #   3. powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_brain_firewall.ps1
 #
 # Optional:
-#   -Uninstall   remove the rule
-#   -Port 8000   override port (must match config runtime.port)
+#   -Tailscale   also allow inbound from Tailscale CGNAT (100.64.0.0/10) for M7 remote access
+#   -Uninstall    remove installed rule(s)
+#   -Port 8000    override port (must match config runtime.port)
 
 [CmdletBinding()]
 param(
   [switch]$Uninstall,
+  [switch]$Tailscale,
   [int]$Port = 8000
 )
 
 $ErrorActionPreference = "Stop"
-$RuleName = "Heim Mimir brain (TCP $Port, Private)"
+$LanRuleName = "Heim Mimir brain (TCP $Port, Private)"
+$TailscaleRuleName = "Heim Mimir brain (TCP $Port, Tailscale)"
 
 function Test-IsAdmin {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -30,42 +33,71 @@ if (-not (Test-IsAdmin)) {
   Write-Host ""
   Write-Host "  1. Start menu -> Windows PowerShell -> Run as administrator"
   Write-Host "  2. cd $PSScriptRoot\.."
-  Write-Host "  3. powershell -File scripts/install_brain_firewall.ps1"
+  Write-Host "  3. powershell -File scripts/install_brain_firewall.ps1 [-Tailscale]"
   exit 1
 }
 
-function Remove-BrainFirewallRule {
-  $existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+function Remove-FirewallRuleByName {
+  param([string]$Name)
+  $existing = Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue
   if ($existing) {
-    Remove-NetFirewallRule -DisplayName $RuleName
-    Write-Host "Removed firewall rule: $RuleName"
+    Remove-NetFirewallRule -DisplayName $Name
+    Write-Host "Removed firewall rule: $Name"
   } else {
-    Write-Host "No firewall rule named '$RuleName' to remove."
+    Write-Host "No firewall rule named '$Name' to remove."
   }
 }
 
+function Install-LanRule {
+  $existing = Get-NetFirewallRule -DisplayName $LanRuleName -ErrorAction SilentlyContinue
+  if ($existing) {
+    Write-Host "Firewall rule already exists: $LanRuleName"
+    return
+  }
+  Write-Host "Creating firewall rule: $LanRuleName"
+  Write-Host "  Profile: Private | RemoteAddress: LocalSubnet | LocalPort: $Port"
+  New-NetFirewallRule `
+    -DisplayName $LanRuleName `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalPort $Port `
+    -Profile Private `
+    -RemoteAddress LocalSubnet | Out-Null
+}
+
+function Install-TailscaleRule {
+  $existing = Get-NetFirewallRule -DisplayName $TailscaleRuleName -ErrorAction SilentlyContinue
+  if ($existing) {
+    Write-Host "Firewall rule already exists: $TailscaleRuleName"
+    return
+  }
+  Write-Host "Creating firewall rule: $TailscaleRuleName"
+  Write-Host "  RemoteAddress: 100.64.0.0/10 (Tailscale CGNAT) | LocalPort: $Port"
+  New-NetFirewallRule `
+    -DisplayName $TailscaleRuleName `
+    -Direction Inbound `
+    -Action Allow `
+    -Protocol TCP `
+    -LocalPort $Port `
+    -RemoteAddress 100.64.0.0/10 | Out-Null
+}
+
 if ($Uninstall) {
-  Remove-BrainFirewallRule
+  Remove-FirewallRuleByName -Name $LanRuleName
+  Remove-FirewallRuleByName -Name $TailscaleRuleName
   exit 0
 }
 
-$existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
-if ($existing) {
-  Write-Host "Firewall rule already exists: $RuleName"
-  exit 0
+Install-LanRule
+if ($Tailscale) {
+  Install-TailscaleRule
 }
-
-Write-Host "Creating firewall rule: $RuleName"
-Write-Host "  Profile: Private | RemoteAddress: LocalSubnet | LocalPort: $Port"
-
-New-NetFirewallRule `
-  -DisplayName $RuleName `
-  -Direction Inbound `
-  -Action Allow `
-  -Protocol TCP `
-  -LocalPort $Port `
-  -Profile Private `
-  -RemoteAddress LocalSubnet | Out-Null
 
 Write-Host "Done. Verify home Wi-Fi is set to Private (Settings -> Network)."
+if ($Tailscale) {
+  Write-Host "Tailscale: smoke-test GET /health from phone on tailnet (mobile data)."
+} else {
+  Write-Host "M7 remote access: re-run with -Tailscale after joining PC to tailnet."
+}
 Write-Host "Uninstall: powershell -File scripts/install_brain_firewall.ps1 -Uninstall"
