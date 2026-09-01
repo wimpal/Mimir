@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from brain.agent import StoppedReason, TurnResult, run_turn
 from brain.config import ConfigError, Settings, load_config
@@ -740,7 +741,45 @@ def _echo_not_calendar(expected: str) -> Callable[[TurnResult], CheckResult]:
     return check
 
 
-def _require_morning_brief() -> Callable[[TurnResult], CheckResult]:
+def _event_in_content(ev: dict[str, Any], content: str) -> bool:
+    summary = str(ev.get("summary") or "").strip()
+    start = str(ev.get("start") or "").strip()
+    if summary and summary.lower() in content:
+        return True
+    if len(start) >= 10 and start[:10] in content:
+        return True
+    if "T" in start:
+        hhmm = start[11:16] if len(start) >= 16 else ""
+        if hhmm and hhmm in content:
+            return True
+    return False
+
+
+_FALSE_EMPTY_EN_SUITE: tuple[str, ...] = (
+    "nothing on the calendar",
+    "no events on the calendar",
+    "calendar is clear",
+    "schedule is clear",
+    "nothing scheduled",
+    "clear schedule",
+    "no appointments",
+)
+
+_FALSE_EMPTY_NL_SUITE: tuple[str, ...] = (
+    "niets op de agenda",
+    "geen afspraken",
+    "agenda is leeg",
+    "niets gepland",
+)
+
+
+def _reply_falsely_empty(content: str, *, locale: str) -> bool:
+    lowered = content.lower()
+    patterns = _FALSE_EMPTY_NL_SUITE if locale == "nl" else _FALSE_EMPTY_EN_SUITE
+    return any(p in lowered for p in patterns)
+
+
+def _require_morning_brief(*, locale: str = "en") -> Callable[[TurnResult], CheckResult]:
     """Both get_weather and get_calendar; reply grounded in each payload."""
 
     def check(result: TurnResult) -> CheckResult:
@@ -776,23 +815,43 @@ def _require_morning_brief() -> Callable[[TurnResult], CheckResult]:
         events = calendar.get("events") or []
         if not isinstance(events, list) or not events:
             return _fail_args("malformed_args")
-        calendar_ok = False
+        if _reply_falsely_empty(content, locale=locale):
+            return _fail_used("false_empty_calendar")
         for ev in events:
-            summary = str(ev.get("summary") or "").strip()
-            start = str(ev.get("start") or "").strip()
-            if summary and summary.lower() in content:
-                calendar_ok = True
-                break
-            if len(start) >= 10 and start[:10] in content:
-                calendar_ok = True
-                break
-            if "T" in start:
-                hhmm = start[11:16] if len(start) >= 16 else ""
-                if hhmm and hhmm in content:
-                    calendar_ok = True
-                    break
-        if not calendar_ok:
-            return _fail_used("tool_not_used_in_answer")
+            if not _event_in_content(ev, content):
+                return _fail_used("calendar_event_missing")
+        return _ok()
+
+    return check
+
+
+def _require_morning_brief_empty_day() -> Callable[[TurnResult], CheckResult]:
+    """Morning brief when calendar has no events — must say schedule is clear."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        seq = result.tools_used()
+        if "get_weather" not in seq or "get_calendar" not in seq:
+            return _fail_right("no_tool_when_required")
+        calendar_raw = _calendar_payload(result)
+        if not calendar_raw or calendar_raw.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            calendar = json.loads(calendar_raw)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        events = calendar.get("events") or []
+        if events:
+            return _fail_args("expected_empty_calendar")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        if not _reply_falsely_empty(content, locale="en"):
+            return _fail_used("missing_clear_schedule_line")
+        for title in ("standup", "away day", "verjaardag"):
+            if title in content:
+                return _fail_used("invented_calendar_event")
         return _ok()
 
     return check
@@ -814,7 +873,7 @@ _ENGLISH_LEAK_IN_DUTCH: tuple[str, ...] = (
 def _require_morning_brief_dutch() -> Callable[[TurnResult], CheckResult]:
     """Morning brief in Dutch — same grounding as EN, no English mid-reply."""
 
-    base = _require_morning_brief()
+    base = _require_morning_brief(locale="nl")
 
     def check(result: TurnResult) -> CheckResult:
         grounded = base(result)
@@ -1213,6 +1272,18 @@ CASES: list[Case] = [
         _require_morning_brief_dutch(),
     ),
     Case(
+        "morning_5",
+        "must_call_weather_and_calendar",
+        "Mornin",
+        _require_morning_brief(),
+    ),
+    Case(
+        "morning_6",
+        "must_call_weather_and_calendar",
+        "Good morning",
+        _require_morning_brief_empty_day(),
+    ),
+    Case(
         "followup_weather_1",
         "followup_turn",
         "tomorrow?",
@@ -1341,6 +1412,25 @@ def metric_rates(results: list[CaseResult]) -> dict[str, float]:
 
 def _suite_calendar_ok() -> str:
     """Deterministic calendar payload so the suite does not need a live ICS URL."""
+    events = [
+        {
+            "summary": "Standup",
+            "start": "2026-08-27T12:00:00+02:00",
+            "end": "2026-08-27T13:00:00+02:00",
+            "all_day": False,
+            "location": "Office",
+        },
+        {
+            "summary": "Away day",
+            "start": "2026-08-27",
+            "end": "2026-08-28",
+            "all_day": True,
+        },
+    ]
+    schedule_lines = [
+        "Standup, at 12:00",
+        "Away day, all day",
+    ]
     return json.dumps(
         {
             "timezone": "Europe/Amsterdam",
@@ -1348,22 +1438,30 @@ def _suite_calendar_ok() -> str:
                 "start": "2026-08-27T08:00:00+02:00",
                 "end": "2026-08-28T00:00:00+02:00",
             },
-            "events": [
-                {
-                    "summary": "Standup",
-                    "start": "2026-08-27T12:00:00+02:00",
-                    "end": "2026-08-27T13:00:00+02:00",
-                    "all_day": False,
-                    "location": "Office",
-                },
-                {
-                    "summary": "Away day",
-                    "start": "2026-08-27",
-                    "end": "2026-08-28",
-                    "all_day": True,
-                },
-            ],
+            "events": events,
+            "event_count": len(events),
+            "schedule_lines": schedule_lines,
             "fetched_at": "2026-08-27T06:00:00+00:00",
+            "stale": False,
+            "lag_note": "feed may lag publisher (e.g. Proton share up to ~8h)",
+        },
+        separators=(",", ":"),
+    )
+
+
+def _suite_calendar_empty() -> str:
+    """Empty calendar day for morning brief clear-schedule checks."""
+    return json.dumps(
+        {
+            "timezone": "Europe/Amsterdam",
+            "window": {
+                "start": "2026-09-01T00:00:00+02:00",
+                "end": "2026-09-02T00:00:00+02:00",
+            },
+            "events": [],
+            "event_count": 0,
+            "schedule_lines": [],
+            "fetched_at": "2026-09-01T06:00:00+00:00",
             "stale": False,
             "lag_note": "feed may lag publisher (e.g. Proton share up to ~8h)",
         },
@@ -1406,6 +1504,12 @@ def main() -> int:
         db=empty_db,
         calendar_fetch_override=_suite_calendar_ok,
     )
+    morning_empty_reg = build_registry(
+        settings,
+        db=db,
+        calendar_fetch_override=_suite_calendar_empty,
+        weather_fetch_override=_suite_weather_payload,
+    )
 
     print(
         f"model={settings.ollama.model} url={settings.ollama.url} "
@@ -1429,6 +1533,8 @@ def main() -> int:
                 tools = calendar_offline_reg
             elif case.id == "jellyfin_4":
                 tools = empty_reg
+            elif case.id == "morning_6":
+                tools = morning_empty_reg
             elif case.id.startswith("followup_budget_"):
                 tools = budget_reg
             elif case.id.startswith("followup_weather_"):

@@ -20,6 +20,7 @@ from brain.config import (
     calendar_feeds_declared,
     resolved_calendar_feeds,
 )
+from brain.morning_brief import format_event_line
 
 LAG_NOTE = "feed may lag publisher (e.g. Proton share up to ~8h)"
 
@@ -325,6 +326,7 @@ def _execute_get_calendar(
         feed_meta.append(meta)
 
     events.sort(key=lambda e: (e["start"], e.get("calendar_name") or "", e["summary"]))
+    schedule_lines = [format_event_line(ev, locale="en") for ev in events]
 
     if errors and not any(f.get("ok") for f in feed_meta):
         detail = "; ".join(f"{e['id']}: {e['error']}" for e in errors)
@@ -334,6 +336,8 @@ def _execute_get_calendar(
         "timezone": timezone_name,
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "events": events,
+        "event_count": len(events),
+        "schedule_lines": schedule_lines,
         "feeds": feed_meta,
         "fetched_at": newest_fetched or datetime.now(UTC).isoformat(),
         "stale": any_stale,
@@ -392,8 +396,13 @@ def make_get_calendar_tool(
             "configured — use calendar_context to interpret titles (e.g. on a "
             "photographer/videographer work calendar, 'filmen X' is a shoot with "
             "client X, not watching a movie). Mention the calendar name when it "
-            "helps. No arguments. Do not invent events. Payload may include "
-            "stale=true and per-feed errors."
+            "helps. Payload includes event_count and schedule_lines (reference only — "
+            "paraphrase each event in spoken prose with times; do not paste "
+            "schedule_lines verbatim or copy JSON escape sequences). When "
+            "event_count > 0, include every event in a natural sentence with a "
+            "short lead-in (e.g. 'Today's schedule looks like this:' or 'On your "
+            "calendar today:'). No arguments. Do not invent events. Payload may "
+            "include stale=true and per-feed errors."
         ),
         parameters={
             "type": "object",

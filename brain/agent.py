@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,13 @@ from brain.mcp.write_guard import (
     log_blocked_write,
     user_message_requests_write,
     write_retry_nudge,
+)
+from brain.morning_brief import (
+    calendar_events_from_payload,
+    fix_morning_brief,
+    is_morning_greeting,
+    morning_brief_locale,
+    needs_morning_brief_fixup,
 )
 from brain.ollama import ChatMessage, ChatResponse, OllamaClient, OllamaError, ToolCall
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
@@ -192,6 +200,9 @@ def run_turn(
     user_message = _latest_user_message(working)
     write_tool_called_this_turn = False
     write_nudge_count = 0
+    calendar_fallback_used = False
+    calendar_events_this_turn: list[dict[str, Any]] = []
+    weather_payload_this_turn: dict[str, Any] | None = None
 
     for _ in range(max_iterations):
         if _deadline_exceeded(deadline_monotonic):
@@ -294,6 +305,41 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
                 )
+            if is_morning_greeting(user_message):
+                events = calendar_events_this_turn
+                locale = morning_brief_locale(user_message)
+                reply_text = msg.content or ""
+                if (
+                    needs_morning_brief_fixup(
+                        reply_text,
+                        events,
+                        locale,
+                        weather=weather_payload_this_turn,
+                    )
+                    and not calendar_fallback_used
+                ):
+                    calendar_fallback_used = True
+                    fixed = fix_morning_brief(
+                        reply_text,
+                        weather=weather_payload_this_turn,
+                        events=events,
+                        locale=locale,
+                    )
+                    steps.append(
+                        _step(
+                            tool_names=[],
+                            success=True,
+                            anomaly="morning_brief_fixup",
+                            content_preview=fixed[:120],
+                        )
+                    )
+                    working.append(ChatMessage(role="assistant", content=fixed))
+                    return TurnResult(
+                        content=fixed,
+                        messages=working,
+                        steps=steps,
+                        stopped_reason=StoppedReason.FINAL,
+                    )
             steps.append(
                 _step(
                     tool_names=[],
@@ -381,6 +427,20 @@ def run_turn(
             working.append(_tool_result_message(tc, result))
             if after_tool is not None:
                 after_tool(tc.function.name, result, working)
+            if tc.function.name == "get_calendar" and not tool_result_is_error(result):
+                try:
+                    cal_data = json.loads(result)
+                    if isinstance(cal_data, dict):
+                        calendar_events_this_turn = calendar_events_from_payload(cal_data)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if tc.function.name == "get_weather" and not tool_result_is_error(result):
+                try:
+                    wx_data = json.loads(result)
+                    if isinstance(wx_data, dict):
+                        weather_payload_this_turn = wx_data
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         tool_latency = (time.perf_counter() - tool_t0) * 1000
         steps.append(

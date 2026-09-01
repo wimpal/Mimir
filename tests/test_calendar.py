@@ -167,6 +167,9 @@ def test_get_calendar_with_mock_transport(tmp_path: Path) -> None:
     assert data["stale"] is False
     summaries = [e["summary"] for e in data["events"]]
     assert "Standup" in summaries
+    assert data["event_count"] == len(data["events"])
+    assert len(data["schedule_lines"]) == len(data["events"])
+    assert any("Standup" in line for line in data["schedule_lines"])
     assert data["events"][0]["calendar"] == "default"
     assert data["events"][0]["calendar_name"] == "Calendar"
     from brain.calendar_cache import calendar_cache_path
