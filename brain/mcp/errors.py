@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any
 
-_WRITE_SEGMENTS = (".add", ".update", ".remove", ".complete", ".create", ".append")
+_WRITE_SEGMENTS = (".add", ".update", ".remove", ".complete", ".create", ".append", ".set_state")
 
 
 def is_write_tool(name: str) -> bool:

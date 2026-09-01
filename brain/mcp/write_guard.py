@@ -21,6 +21,14 @@ _TASK_COMPLETE_NUDGE = (
     "confirm completion without a tool result containing completion_recorded."
 )
 
+_LIGHTS_SET_STATE_NUDGE = (
+    "System correction (do not repeat to the user): the user asked to change a light "
+    "THIS turn. Call homebase.lights.set_state now — pass lamp **name** or room:room "
+    "(e.g. room:woonkamer for all lamps in Woonkamer) as device_id, and set `on` from "
+    "aan/uit (true/false). Do not list again without set_state. Do not confirm without "
+    "a tool result showing success: true."
+)
+
 _WRITE_NUDGE_GENERIC = (
     "System correction (do not repeat to the user): the user asked to change data "
     "THIS turn. Call the appropriate write tool before confirming. Do not claim the "
@@ -49,6 +57,12 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bwat\s+hebben\s+we\s+(nodig|te\s+kopen)\b",
         r"\bwat\s+moeten\s+we\s+kopen\b",
         r"\b(toon|laat)\s+(de\s+)?(boodschappen)?lijst\b",
+        # Lights reads — before mutation "turn on/off" / "licht uit"
+        r"\b(which|what)\s+(ikea\s+)?lights\b",
+        r"\blights?\s+in\s+(the\s+)?\w+",
+        r"\blist\s+(the\s+)?lamps?\b",
+        r"\bwelke\s+(lampen|lichten)\b",
+        r"\blichten?\s+in\s+\w+",
     )
 )
 
@@ -93,6 +107,17 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(taak|karwee)\b.*\b(afvinken|klaar|gedaan)\b",
         r"\bafvinken\b.*\b(taak|karwee)\b",
         r"\bmarkeer\b.*\b(compleet|klaar|af|gedaan|voltooid)\b",
+        # Lights / smart home (IKEA Dirigera via Homebase)
+        r"\bturn\s+(on|off)\b",
+        r"\bswitch\b.*\b(on|off)\b",
+        r"\bdim\b.*\b\d+\s*%",
+        r"\bzet\b.*\b(het\s+)?licht\b.*\b(aan|uit)\b",
+        r"\bzet\b.*\b(\w+)\s+lamp\b.*\b(aan|uit)\b",
+        r"\bdoe\b.*\b(het\s+)?licht\b.*\buit\b",
+        r"\blamp(en)?\b.*\b(aan|uit)\b",
+        r"\b(licht|lamp)\b.*\b(in\s+)?kantoor\b.*\b(aan|uit|uitzetten)\b",
+        r"\b(?:zet|doe|turn|switch)\b.*\blampen\b",
+        r"\blichten\s+in\s+\w+\b",
     )
 )
 
@@ -122,6 +147,15 @@ def write_retry_nudge(user_message: str) -> str:
         re.IGNORECASE,
     ):
         return _TASK_COMPLETE_NUDGE
+    if re.search(
+        r"\b(turn\s+(on|off)|switch\b.*\b(on|off)\b|"
+        r"zet\b.*\blicht\b|doe\b.*\blicht\b.*\buit\b|"
+        r"lamp(en)?\b.*\b(aan|uit)\b|dim\b.*\d+\s*%|"
+        r"(?:zet|doe|turn|switch)\b.*\blampen\b)\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return _LIGHTS_SET_STATE_NUDGE
     return _WRITE_NUDGE_GENERIC
 
 

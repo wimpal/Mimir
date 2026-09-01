@@ -17,6 +17,17 @@ from brain.mcp.tasks import (
     present_task_complete_json,
     resolve_complete_ids,
 )
+from brain.mcp.lights import (
+    light_ambiguous_error,
+    light_not_found_error,
+    light_resolve_error,
+    parse_lights_list,
+    present_lights_set_state_batch,
+    present_lights_set_state_json,
+    resolve_set_state_device_ids,
+    room_phrase_from_target,
+    is_room_all_phrase,
+)
 from brain.tools import Tool
 
 
@@ -92,6 +103,81 @@ def mcp_tool_to_local(
                 if tool_result_is_error(last_result):
                     return last_result
             return present_task_complete_json(last_result)
+        if name == "homebase.lights.set_state":
+            raw_device_id = str(args.get("device_id", "")).strip()
+            if not raw_device_id:
+                return light_not_found_error("?")
+            list_raw = bridge.call_tool_sync(
+                "homebase.lights.list",
+                {},
+                timeout_s=timeout_s,
+            )
+            lights = parse_lights_list(list_raw)
+            if lights is None:
+                detail = list_raw[:200] if list_raw else "empty list response"
+                return light_resolve_error(
+                    "list_failed",
+                    f"Could not parse lights before set_state ({detail}).",
+                )
+            device_ids, resolve_err = resolve_set_state_device_ids(lights, raw_device_id)
+            if resolve_err:
+                if resolve_err.startswith("ambiguous:"):
+                    append_mcp_tool_log(
+                        bridge.data_dir,
+                        service=service_id,
+                        tool=name,
+                        args=args,
+                        latency_ms=0.0,
+                        outcome="error",
+                        error_code="ambiguous",
+                        detail=resolve_err,
+                    )
+                    return light_resolve_error("ambiguous", resolve_err.removeprefix("ambiguous: "))
+                labels = [
+                    f"{light.get('name') or '?'} ({light.get('room') or '?'})"
+                    for light in lights
+                ]
+                append_mcp_tool_log(
+                    bridge.data_dir,
+                    service=service_id,
+                    tool=name,
+                    args=args,
+                    latency_ms=0.0,
+                    outcome="error",
+                    error_code="not_found",
+                    detail=f"{resolve_err}; known={labels}",
+                )
+                return light_not_found_error(raw_device_id, known=labels)
+            on_value = args.get("on")
+            call_base: dict[str, Any] = {"on": on_value}
+            if "brightness" in args:
+                call_base["brightness"] = args["brightness"]
+            by_id = {str(light["id"]): light for light in lights if light.get("id")}
+            batch_results: list[dict[str, Any]] = []
+            last_result = ""
+            for device_id in device_ids:
+                call_args = {"device_id": device_id, **call_base}
+                last_result = bridge.call_tool_sync(name, call_args, timeout_s=timeout_s)
+                if tool_result_is_error(last_result):
+                    return last_result
+                light = by_id.get(device_id, {})
+                batch_results.append(
+                    {
+                        "device_id": device_id,
+                        "name": light.get("name"),
+                        "room": light.get("room"),
+                    }
+                )
+            if len(batch_results) > 1:
+                room_label = (
+                    room_phrase_from_target(raw_device_id)
+                    if is_room_all_phrase(raw_device_id)
+                    else None
+                )
+                return present_lights_set_state_batch(
+                    batch_results, on=bool(on_value), room=room_label
+                )
+            return present_lights_set_state_json(last_result)
         return bridge.call_tool_sync(name, args, timeout_s=timeout_s)
 
     return Tool(

@@ -83,6 +83,37 @@ def test_task_read_only_does_not_request_write() -> None:
     assert not user_message_requests_write("Welke taken zijn deze week?")
 
 
+def test_lights_read_only_does_not_request_write() -> None:
+    assert not user_message_requests_write("Which IKEA lights are on right now?")
+    assert not user_message_requests_write("Welke lampen staan aan?")
+    assert not user_message_requests_write("What lights are in the office?")
+
+
+def test_lights_mutation_phrases_request_write() -> None:
+    assert user_message_requests_write("Turn off Ballon")
+    assert user_message_requests_write("Doe het licht uit in kantoor")
+    assert user_message_requests_write("Show lights and turn off Ballon")
+    assert check_write_allowed("homebase.lights.set_state", "Turn off Ballon") is None
+    assert check_write_allowed(
+        "homebase.lights.set_state", "Doe het licht uit in kantoor"
+    ) is None
+
+
+def test_check_write_allowed_blocks_lights_set_state_for_read() -> None:
+    err = check_write_allowed(
+        "homebase.lights.set_state",
+        "Which IKEA lights are on right now?",
+    )
+    assert err is not None
+    assert "write blocked" in err
+    err_nl = check_write_allowed(
+        "homebase.lights.set_state",
+        "Welke lampen staan aan?",
+    )
+    assert err_nl is not None
+    assert "write blocked" in err_nl
+
+
 class _ScriptedClient:
     def __init__(self, responses: list[ChatMessage]) -> None:
         self._responses = list(responses)

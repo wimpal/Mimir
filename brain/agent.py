@@ -14,6 +14,12 @@ from typing import Any, Protocol
 
 from brain.mcp.errors import is_write_tool, tool_result_is_error
 from brain.mcp.tasks import complete_tool_succeeded
+from brain.mcp.lights import (
+    build_set_state_args_from_user_message,
+    light_set_state_args_from_user_message,
+    set_state_tool_succeeded,
+    user_message_requests_light_write,
+)
 from brain.mcp.write_guard import (
     MAX_WRITE_TOOL_NUDGES,
     check_write_allowed,
@@ -28,7 +34,14 @@ from brain.morning_brief import (
     morning_brief_locale,
     needs_morning_brief_fixup,
 )
-from brain.ollama import ChatMessage, ChatResponse, OllamaClient, OllamaError, ToolCall
+from brain.ollama import (
+    ChatMessage,
+    ChatResponse,
+    OllamaClient,
+    OllamaError,
+    ToolCall,
+    ToolCallFunction,
+)
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 
 AfterToolCallback = Callable[[str, str, list[ChatMessage]], None]
@@ -400,9 +413,14 @@ def run_turn(
                     )
                 result = write_block
             else:
+                tool_args = dict(tc.function.arguments)
+                if tc.function.name == "homebase.lights.set_state":
+                    tool_args = build_set_state_args_from_user_message(
+                        user_message, tool_args
+                    )
                 result = _dispatch_with_timeout(
                     tc.function.name,
-                    tc.function.arguments,
+                    tool_args,
                     tools=registry,
                     timeout_s=per_tool,
                 )
@@ -414,6 +432,15 @@ def run_turn(
                 result = (
                     "error: homebase.tasks.complete did not record a completion "
                     "(missing completion_recorded). Pass the chore title as id."
+                )
+            if (
+                tc.function.name == "homebase.lights.set_state"
+                and not tool_result_is_error(result)
+                and not set_state_tool_succeeded(result)
+            ):
+                result = (
+                    "error: homebase.lights.set_state did not succeed "
+                    "(success is not true). Pass the lamp name as device_id."
                 )
             ok = not tool_result_is_error(result)
             if on_tool_end is not None:
@@ -441,6 +468,48 @@ def run_turn(
                         weather_payload_this_turn = wx_data
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+        if (
+            user_message_requests_light_write(user_message)
+            and not write_tool_called_this_turn
+        ):
+            step_tool_names = [tc.function.name for tc in msg.tool_calls]
+            if (
+                "homebase.lights.list" in step_tool_names
+                and "homebase.lights.set_state" not in step_tool_names
+            ):
+                chain_args = light_set_state_args_from_user_message(user_message)
+                if chain_args is not None:
+                    write_tool_called_this_turn = True
+                    chain_tc = ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.lights.set_state",
+                            arguments=chain_args,
+                        )
+                    )
+                    chain_result = _dispatch_with_timeout(
+                        "homebase.lights.set_state",
+                        chain_args,
+                        tools=registry,
+                        timeout_s=default_tool_timeout_s,
+                    )
+                    if (
+                        not tool_result_is_error(chain_result)
+                        and not set_state_tool_succeeded(chain_result)
+                    ):
+                        chain_result = (
+                            "error: homebase.lights.set_state did not succeed "
+                            "(success is not true). Pass the lamp name as device_id."
+                        )
+                    if on_tool_end is not None:
+                        preview = (
+                            chain_result
+                            if len(chain_result) <= 200
+                            else chain_result[:197] + "..."
+                        )
+                        on_tool_end("homebase.lights.set_state", not tool_result_is_error(chain_result), preview)
+                    working.append(_tool_result_message(chain_tc, chain_result))
+                    tool_names = [*tool_names, "homebase.lights.set_state"]
 
         tool_latency = (time.perf_counter() - tool_t0) * 1000
         steps.append(

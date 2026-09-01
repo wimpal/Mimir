@@ -114,7 +114,7 @@ voice:
 # Bearer token per service in .env: BUDGETTRACKER_TOKEN, HOMEBASE_TOKEN, …
 services:
   budgettracker:
-    host: 192.168.0.170
+    host: 192.168.1.142
     port: 8080
     path: /mcp
     enabled: true
