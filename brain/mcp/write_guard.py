@@ -44,6 +44,11 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bwhat('s| is)\s+(over)?due\b",
         r"\bwelke\s+taken\b",
         r"\bhoeveel\b.*\b(voorraad|op\s+voorraad)\b",
+        # NL shopping list reads — before mutation "op de boodschappenlijst"
+        r"\bwat\s+(staat|is|zit)\s+(er\s+)?op\s+de\s+(boodschappen)?lijst\b",
+        r"\bwat\s+hebben\s+we\s+(nodig|te\s+kopen)\b",
+        r"\bwat\s+moeten\s+we\s+kopen\b",
+        r"\b(toon|laat)\s+(de\s+)?(boodschappen)?lijst\b",
     )
 )
 

@@ -16,6 +16,9 @@ def test_read_only_questions_do_not_request_write() -> None:
     assert not user_message_requests_write("what's low on stock?")
     assert not user_message_requests_write("What's on the shopping list?")
     assert not user_message_requests_write("Hoeveel hebben we uitgegeven aan boodschappen?")
+    assert not user_message_requests_write("wat staat er op de boodschappenlijst?")
+    assert not user_message_requests_write("wat is er op de boodschappenlijst?")
+    assert not user_message_requests_write("toon de boodschappenlijst")
 
 
 def test_mutation_phrases_request_write() -> None:
@@ -25,6 +28,7 @@ def test_mutation_phrases_request_write() -> None:
     assert user_message_requests_write("We used two eggs")
     assert user_message_requests_write("Set milk to 1")
     assert user_message_requests_write("Voeg koffie toe aan de boodschappenlijst")
+    assert user_message_requests_write("zet melk op de boodschappenlijst")
     assert user_message_requests_write(
         "voeg een uitgave toe voor wim: boodschappen jumbo voor €19,23"
     )
@@ -44,6 +48,15 @@ def test_check_write_allowed_permits_with_intent() -> None:
         "homebase.shopping_list.add_item",
         "Add coffee to the shopping list",
     ) is None
+
+
+def test_check_write_allowed_blocks_add_item_for_nl_list_read() -> None:
+    err = check_write_allowed(
+        "homebase.shopping_list.add_item",
+        "wat staat er op de boodschappenlijst?",
+    )
+    assert err is not None
+    assert "write blocked" in err
 
 
 def test_check_write_allowed_ignores_read_tools() -> None:
