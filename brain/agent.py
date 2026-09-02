@@ -20,6 +20,13 @@ from brain.mcp.lights import (
     set_state_tool_succeeded,
     user_message_requests_light_write,
 )
+
+
+def _turn_requests_light_toggle(user_message: str) -> bool:
+    """True when user message specifies a lamp toggle (incl. STT compound forms)."""
+    if user_message_requests_light_write(user_message):
+        return True
+    return light_set_state_args_from_user_message(user_message) is not None
 from brain.mcp.write_guard import (
     MAX_WRITE_TOOL_NUDGES,
     check_write_allowed,
@@ -212,6 +219,7 @@ def run_turn(
     last_content = ""
     user_message = _latest_user_message(working)
     write_tool_called_this_turn = False
+    lights_list_called_this_turn = False
     write_nudge_count = 0
     calendar_fallback_used = False
     calendar_events_this_turn: list[dict[str, Any]] = []
@@ -401,6 +409,44 @@ def run_turn(
             if on_tool_start is not None:
                 on_tool_start(tc.function.name, tc.function.arguments)
 
+            if (
+                tc.function.name == "homebase.lights.set_state"
+                and _turn_requests_light_toggle(user_message)
+                and not lights_list_called_this_turn
+                and "homebase.lights.list" in registry
+            ):
+                list_tc = ToolCall(
+                    function=ToolCallFunction(
+                        name="homebase.lights.list",
+                        arguments={},
+                    )
+                )
+                if on_tool_start is not None:
+                    on_tool_start("homebase.lights.list", {})
+                list_result = _dispatch_with_timeout(
+                    "homebase.lights.list",
+                    {},
+                    tools=registry,
+                    timeout_s=per_tool,
+                )
+                list_ok = not tool_result_is_error(list_result)
+                if on_tool_end is not None:
+                    preview = (
+                        list_result
+                        if len(list_result) <= 200
+                        else list_result[:197] + "..."
+                    )
+                    on_tool_end("homebase.lights.list", list_ok, preview)
+                working.append(_tool_result_message(list_tc, list_result))
+                if after_tool is not None:
+                    after_tool("homebase.lights.list", list_result, working)
+                lights_list_called_this_turn = True
+                tool_names.append("homebase.lights.list")
+                if not list_ok:
+                    dispatch_failed = True
+                    if anomaly is None:
+                        anomaly = "tool_error"
+
             write_block = check_write_allowed(tc.function.name, user_message)
             if write_block is not None:
                 if data_dir is not None:
@@ -454,6 +500,8 @@ def run_turn(
             working.append(_tool_result_message(tc, result))
             if after_tool is not None:
                 after_tool(tc.function.name, result, working)
+            if tc.function.name == "homebase.lights.list":
+                lights_list_called_this_turn = True
             if tc.function.name == "get_calendar" and not tool_result_is_error(result):
                 try:
                     cal_data = json.loads(result)
@@ -470,7 +518,7 @@ def run_turn(
                     pass
 
         if (
-            user_message_requests_light_write(user_message)
+            _turn_requests_light_toggle(user_message)
             and not write_tool_called_this_turn
         ):
             step_tool_names = [tc.function.name for tc in msg.tool_calls]

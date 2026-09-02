@@ -92,6 +92,9 @@ def test_lights_read_only_does_not_request_write() -> None:
 def test_lights_mutation_phrases_request_write() -> None:
     assert user_message_requests_write("Turn off Ballon")
     assert user_message_requests_write("Doe het licht uit in kantoor")
+    assert user_message_requests_write("doe het licht aan in het kantoor")
+    assert user_message_requests_write("zet de kantorlamp aan")
+    assert user_message_requests_write("zet de kantoorlamp uit")
     assert user_message_requests_write("Show lights and turn off Ballon")
     assert check_write_allowed("homebase.lights.set_state", "Turn off Ballon") is None
     assert check_write_allowed(

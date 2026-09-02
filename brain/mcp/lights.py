@@ -28,10 +28,99 @@ _ROOM_ALL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
+_ROOM_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+|the\s+)?(\w+)\b",
+        r"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lamp)\s+in\s+(?:the\s+)?(\w+)\b",
+    )
+)
+
 _ROOM_ALL_PREFIX = "room:"
 _SKIP_HINT_WORDS = frozenset(
     {"de", "het", "the", "a", "an", "on", "off", "aan", "uit", "alle", "all"}
 )
+_ARTICLE_REPEAT = re.compile(r"\b(de|het|the)\s+(?:\1\s+)+", re.IGNORECASE)
+_COMPOUND_LAMPEN = re.compile(r"\b(\w+)lampen\b", re.IGNORECASE)
+_COMPOUND_LAMP = re.compile(r"\b(\w+)lamp\b", re.IGNORECASE)
+_FUZZY_ROOM_MAX_DISTANCE = 1
+
+
+def _edit_distance(a: str, b: str, *, max_distance: int = _FUZZY_ROOM_MAX_DISTANCE) -> int:
+    """Levenshtein distance; returns max_distance + 1 when clearly over the limit."""
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if abs(la - lb) > max_distance:
+        return max_distance + 1
+    if la == 0:
+        return lb
+    if lb == 0:
+        return la
+    prev = list(range(lb + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost))
+            row_min = min(row_min, curr[j])
+        if row_min > max_distance:
+            return max_distance + 1
+        prev = curr
+    return prev[-1]
+
+
+def _unique_room_names(lights: list[dict[str, Any]]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for light in lights:
+        room = _normalize_room(light.get("room"))
+        if room and room not in seen:
+            seen.add(room)
+            out.append(room)
+    return out
+
+
+def _fuzzy_room_names(lights: list[dict[str, Any]], needle: str) -> list[str]:
+    """Room names within edit distance of needle (for STT typos like kantor → kantoor)."""
+    lower = needle.strip().lower()
+    if not lower:
+        return []
+    return [
+        room
+        for room in _unique_room_names(lights)
+        if _edit_distance(lower, room) <= _FUZZY_ROOM_MAX_DISTANCE
+    ]
+
+
+def _lights_for_fuzzy_room(lights: list[dict[str, Any]], needle: str) -> list[dict[str, Any]] | None:
+    """Lights in the one fuzzy-matched room, or None when zero / multiple rooms match."""
+    matched_rooms = _fuzzy_room_names(lights, needle)
+    if len(matched_rooms) != 1:
+        return None
+    room = matched_rooms[0]
+    return [
+        light
+        for light in lights
+        if _normalize_room(light.get("room")) == room
+    ]
+
+
+def _message_for_hints(user_message: str) -> str:
+    """Normalize typos that break regex extractors (e.g. 'de de kantoor', 'kantoorlamp')."""
+    text = (user_message or "").strip()
+    if not text:
+        return text
+    text = _ARTICLE_REPEAT.sub(r"\1 ", text)
+    text = _COMPOUND_LAMPEN.sub(r"\1 lampen", text)
+    text = _COMPOUND_LAMP.sub(r"\1 lamp", text)
+    return text
+
+
+def message_for_hints(user_message: str) -> str:
+    """Public alias for write-guard and hint extractors (STT compounds, doubled articles)."""
+    return _message_for_hints(user_message)
 
 
 def looks_like_dirigera_device_id(value: str) -> bool:
@@ -46,10 +135,26 @@ def _normalize_room(value: str | None) -> str:
 
 def extract_room_all_hint(user_message: str) -> str | None:
     """Room name when user wants every lamp in that room (e.g. woonkamer lampen)."""
-    text = (user_message or "").strip()
+    text = _message_for_hints(user_message)
     if not text:
         return None
     for pattern in _ROOM_ALL_HINT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            word = match.group(1).strip()
+            if word.lower() not in _SKIP_HINT_WORDS:
+                return word
+    return None
+
+
+def extract_room_hint(user_message: str) -> str | None:
+    """Room name for a single-lamp toggle (e.g. licht aan in het kantoor)."""
+    if extract_room_all_hint(user_message):
+        return None
+    text = _message_for_hints(user_message)
+    if not text:
+        return None
+    for pattern in _ROOM_HINT_PATTERNS:
         match = pattern.search(text)
         if match:
             word = match.group(1).strip()
@@ -62,7 +167,7 @@ def extract_lamp_name_hint(user_message: str) -> str | None:
     """Best-effort single-lamp name from the user's latest message."""
     if extract_room_all_hint(user_message):
         return None
-    text = (user_message or "").strip()
+    text = _message_for_hints(user_message)
     if not text:
         return None
     skip = _SKIP_HINT_WORDS
@@ -77,12 +182,15 @@ def extract_lamp_name_hint(user_message: str) -> str | None:
 
 def prefer_device_id_for_set_state(user_message: str, model_device_id: str) -> str:
     """Prefer user intent over a model-copied Dirigera uuid."""
-    room_hint = extract_room_all_hint(user_message)
+    room_all = extract_room_all_hint(user_message)
+    if room_all:
+        return f"{_ROOM_ALL_PREFIX}{room_all}"
+    lamp_hint = extract_lamp_name_hint(user_message)
+    if lamp_hint:
+        return lamp_hint
+    room_hint = extract_room_hint(user_message)
     if room_hint:
-        return f"{_ROOM_ALL_PREFIX}{room_hint}"
-    hint = extract_lamp_name_hint(user_message)
-    if hint:
-        return hint
+        return room_hint
     return model_device_id.strip()
 
 
@@ -132,7 +240,11 @@ def user_message_requests_light_write(text: str) -> bool:
     if not user_message_requests_write(text):
         return False
     normalized = (text or "").strip()
-    if extract_room_all_hint(normalized) or extract_lamp_name_hint(normalized):
+    if (
+        extract_room_all_hint(normalized)
+        or extract_lamp_name_hint(normalized)
+        or extract_room_hint(normalized)
+    ):
         return True
     return bool(
         re.search(
@@ -161,11 +273,15 @@ def lights_in_room(lights: list[dict[str, Any]], room_phrase: str) -> list[dict[
     ]
     if exact:
         return exact
-    return [
+    partial = [
         light
         for light in lights
         if lower in _normalize_room(light.get("room"))
     ]
+    if partial:
+        return partial
+    fuzzy = _lights_for_fuzzy_room(lights, lower)
+    return fuzzy if fuzzy is not None else []
 
 
 def resolve_set_state_device_ids(
@@ -294,6 +410,12 @@ def resolve_light(lights: list[dict[str, Any]], phrase: str) -> LightResolveResu
     if len(partial_room) > 1:
         return LightResolveResult(status="ambiguous", matches=tuple(partial_room))
 
+    fuzzy_room = _lights_for_fuzzy_room(lights, lower)
+    if fuzzy_room is not None:
+        if len(fuzzy_room) == 1:
+            return LightResolveResult(status="found", device_id=str(fuzzy_room[0]["id"]))
+        return LightResolveResult(status="ambiguous", matches=tuple(fuzzy_room))
+
     return LightResolveResult(status="not_found")
 
 
@@ -335,6 +457,12 @@ _LIGHTS_SET_STATE_NOTE = (
     "When devices_toggled > 1, every listed lamp was updated — name each in the reply."
 )
 
+_LIGHTS_UNREACHABLE_NOTE = (
+    "Note: hub reports reachable: false — isOn from list may be stale. "
+    "Confirm from success: true; do not tell the user the lamp was already on/off "
+    "from list data alone."
+)
+
 
 def present_lights_set_state_batch(
     results: list[dict[str, Any]], *, on: bool, room: str | None = None
@@ -354,8 +482,12 @@ def present_lights_set_state_batch(
     return f"{_LIGHTS_SET_STATE_NOTE}\n{body}"
 
 
-def present_lights_set_state_json(text: str) -> str:
-    """Add success hint so the model trusts success: true."""
+def present_lights_set_state_json(
+    text: str,
+    *,
+    light: dict[str, Any] | None = None,
+) -> str:
+    """Add success hint and optional list snapshot so the model trusts success: true."""
     stripped = text.strip()
     if not stripped or stripped.startswith("error:") or stripped[:1] != "{":
         return text
@@ -365,15 +497,32 @@ def present_lights_set_state_json(text: str) -> str:
         return text
     if not isinstance(parsed, dict) or parsed.get("error") or not parsed.get("success"):
         return text
+    if light:
+        if light.get("name") is not None:
+            parsed.setdefault("name", light.get("name"))
+        if light.get("room") is not None:
+            parsed.setdefault("room", light.get("room"))
+        if "isOn" in light:
+            parsed["prior_isOn"] = light.get("isOn")
+        if "reachable" in light:
+            parsed["reachable"] = light.get("reachable")
+    note_parts: list[str] = []
+    if light and light.get("reachable") is False:
+        note_parts.append(_LIGHTS_UNREACHABLE_NOTE)
+    note_parts.append(_LIGHTS_SET_STATE_NOTE)
     body = json.dumps(parsed, ensure_ascii=False)
-    return f"{_LIGHTS_SET_STATE_NOTE}\n{body}"
+    return f"{note_parts[0]}\n{body}" if len(note_parts) == 1 else f"{note_parts[0]}\n{note_parts[1]}\n{body}"
 
 
 def set_state_tool_succeeded(text: str) -> bool:
     if tool_result_is_error(text):
         return False
     body = text.strip()
-    if "\n" in body and body.split("\n", 1)[0].startswith("Note:"):
+    while body.startswith("Note:") or (
+        "\n" in body and body.split("\n", 1)[0].startswith("Note:")
+    ):
+        if "\n" not in body:
+            return False
         body = body.split("\n", 1)[1].strip()
     if not body.startswith("{"):
         return False

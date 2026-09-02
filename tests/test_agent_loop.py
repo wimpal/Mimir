@@ -220,3 +220,124 @@ def test_turn_budget_skips_tool_after_deadline() -> None:
     assert result.stopped_reason == StoppedReason.TURN_TIMEOUT
     tool_msg = next(m for m in result.messages if m.role == "tool")
     assert "timed out" in tool_msg.content or "skipped" in tool_msg.content
+
+
+def test_agent_injects_lights_list_before_set_state() -> None:
+    """Light write: brain lists before set_state when model skips list."""
+    list_result = '[{"id": "k1", "name": "Ballon", "room": "Kantoor", "isOn": false}]'
+    set_result = (
+        "Note: ok\n"
+        '{"success": true, "device_id": "k1", "on": true, "prior_isOn": false}'
+    )
+    calls: list[str] = []
+
+    def _list(**_: object) -> str:
+        calls.append("homebase.lights.list")
+        return list_result
+
+    def _set(**_: object) -> str:
+        calls.append("homebase.lights.set_state")
+        return set_result
+
+    registry = {
+        "homebase.lights.list": Tool(
+            name="homebase.lights.list",
+            description="list lights",
+            parameters={"type": "object", "properties": {}},
+            execute=_list,
+            service="homebase",
+        ),
+        "homebase.lights.set_state": Tool(
+            name="homebase.lights.set_state",
+            description="set light",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                },
+            },
+            execute=_set,
+            service="homebase",
+        ),
+    }
+    client = ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    _tool_call(
+                        "homebase.lights.set_state",
+                        {"device_id": "kantoor", "on": True},
+                    ),
+                ],
+            ),
+            ChatMessage(role="assistant", content="The office lamp is now on, sir."),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="doe het licht aan in het kantoor")],
+        tools=registry,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert calls == ["homebase.lights.list", "homebase.lights.set_state"]
+    assert result.tools_used().count("homebase.lights.list") == 1
+    assert "homebase.lights.set_state" in result.tools_used()
+
+
+def test_agent_auto_chains_set_state_for_compound_kantoorlamp() -> None:
+    """STT compound kantoorlamp: list-only step still auto-chains set_state."""
+    list_result = '[{"id": "k1", "name": "Ballon", "room": "Kantoor", "isOn": true}]'
+    set_result = 'Note: ok\n{"success": true, "device_id": "k1", "on": false}'
+    calls: list[str] = []
+
+    def _list(**_: object) -> str:
+        calls.append("homebase.lights.list")
+        return list_result
+
+    def _set(**_: object) -> str:
+        calls.append("homebase.lights.set_state")
+        return set_result
+
+    registry = {
+        "homebase.lights.list": Tool(
+            name="homebase.lights.list",
+            description="list lights",
+            parameters={"type": "object", "properties": {}},
+            execute=_list,
+            service="homebase",
+        ),
+        "homebase.lights.set_state": Tool(
+            name="homebase.lights.set_state",
+            description="set light",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                },
+            },
+            execute=_set,
+            service="homebase",
+        ),
+    }
+    client = ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("homebase.lights.list", {})],
+            ),
+            ChatMessage(role="assistant", content="Ballon is on."),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="zet de kantoorlamp uit")],
+        tools=registry,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert calls == ["homebase.lights.list", "homebase.lights.set_state"]
+    assert "homebase.lights.set_state" in result.tools_used()

@@ -113,8 +113,9 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bdim\b.*\b\d+\s*%",
         r"\bzet\b.*\b(het\s+)?licht\b.*\b(aan|uit)\b",
         r"\bzet\b.*\b(\w+)\s+lamp\b.*\b(aan|uit)\b",
-        r"\bdoe\b.*\b(het\s+)?licht\b.*\buit\b",
+        r"\bdoe\b.*\b(het\s+)?licht\b.*\b(aan|uit)\b",
         r"\blamp(en)?\b.*\b(aan|uit)\b",
+        r"\b(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+)?\w+\b.*\b(aan|uit|uitzetten)\b",
         r"\b(licht|lamp)\b.*\b(in\s+)?kantoor\b.*\b(aan|uit|uitzetten)\b",
         r"\b(?:zet|doe|turn|switch)\b.*\blampen\b",
         r"\blichten\s+in\s+\w+\b",
@@ -126,7 +127,9 @@ def user_message_requests_write(text: str) -> bool:
     """True when the latest user message shows mutation intent."""
     if not (text or "").strip():
         return False
-    normalized = text.strip()
+    from brain.mcp.lights import message_for_hints
+
+    normalized = message_for_hints(text)
     if any(p.search(normalized) for p in _READ_ONLY_PATTERNS):
         return False
     return any(p.search(normalized) for p in _MUTATION_PATTERNS)
@@ -134,7 +137,9 @@ def user_message_requests_write(text: str) -> bool:
 
 def write_retry_nudge(user_message: str) -> str:
     """Prompt the model to call a write tool when it replied without one."""
-    normalized = (user_message or "").strip()
+    from brain.mcp.lights import message_for_hints
+
+    normalized = message_for_hints(user_message)
     if re.search(
         r"\b(markeer|mark|complete|afvinken)\b.*\b(compleet|klaar|af|gedaan|voltooid|done)\b",
         normalized,
@@ -149,8 +154,9 @@ def write_retry_nudge(user_message: str) -> str:
         return _TASK_COMPLETE_NUDGE
     if re.search(
         r"\b(turn\s+(on|off)|switch\b.*\b(on|off)\b|"
-        r"zet\b.*\blicht\b|doe\b.*\blicht\b.*\buit\b|"
+        r"zet\b.*\blicht\b|doe\b.*\blicht\b.*\b(aan|uit)\b|"
         r"lamp(en)?\b.*\b(aan|uit)\b|dim\b.*\d+\s*%|"
+        r"(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+)?\w+\b.*\b(aan|uit)\b|"
         r"(?:zet|doe|turn|switch)\b.*\blampen\b)\b",
         normalized,
         re.IGNORECASE,

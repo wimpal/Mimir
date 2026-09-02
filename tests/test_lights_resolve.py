@@ -22,16 +22,27 @@ def _lights() -> list[dict]:
             "isOn": True,
         },
         {
-            "id": "e1fb890c-aaaa-bbbb-cccc-dddddddddddd_1",
-            "name": "Desk",
-            "room": "Kantoor",
-            "isOn": False,
-        },
-        {
             "id": "e1fb890c-5555-6666-7777-888888888888_1",
             "name": "Sofa",
             "room": "Woonkamer",
             "isOn": True,
+        },
+    ]
+
+
+def _kantoor_two_lamps() -> list[dict]:
+    return [
+        {
+            "id": "e1fb890c-1111-2222-3333-444444444444_1",
+            "name": "Ballon",
+            "room": "Kantoor",
+            "isOn": True,
+        },
+        {
+            "id": "e1fb890c-aaaa-bbbb-cccc-dddddddddddd_1",
+            "name": "Desk",
+            "room": "Kantoor",
+            "isOn": False,
         },
     ]
 
@@ -53,12 +64,16 @@ def test_pick_light_id_exact_name() -> None:
 
 
 def test_pick_light_id_exact_room_single() -> None:
-    lights = [_lights()[2]]
+    lights = [_lights()[1]]
     assert pick_light_id(lights, "Woonkamer") == "e1fb890c-5555-6666-7777-888888888888_1"
 
 
+def test_pick_light_id_kantoor_single_lamp() -> None:
+    assert pick_light_id(_lights(), "Kantoor") == "e1fb890c-1111-2222-3333-444444444444_1"
+
+
 def test_resolve_light_room_ambiguous() -> None:
-    result = resolve_light(_lights(), "Kantoor")
+    result = resolve_light(_kantoor_two_lamps(), "Kantoor")
     assert result.status == "ambiguous"
     assert len(result.matches) == 2
 
@@ -96,6 +111,7 @@ def test_extract_lamp_name_hint() -> None:
     from brain.mcp.lights import (
         extract_lamp_name_hint,
         extract_room_all_hint,
+        extract_room_hint,
         prefer_device_id_for_set_state,
         resolve_set_state_device_ids,
     )
@@ -104,6 +120,11 @@ def test_extract_lamp_name_hint() -> None:
     assert extract_lamp_name_hint("Turn off Ballon") == "Ballon"
     assert extract_room_all_hint("zet de woonkamer lampen aan") == "woonkamer"
     assert extract_lamp_name_hint("zet de woonkamer lampen aan") is None
+    assert extract_room_hint("doe het licht aan in het kantoor") == "kantoor"
+    assert prefer_device_id_for_set_state(
+        "doe het licht aan in het kantoor",
+        "e47ca80f-4d4c-4317-9e94-48ce765131d9_1",
+    ) == "kantoor"
     assert prefer_device_id_for_set_state(
         "zet de ballon lamp aan",
         "e47ca80f-4d4c-4317-9e94-48ce765131d9_1",
@@ -121,6 +142,53 @@ def test_infer_light_on_from_user_message() -> None:
     assert infer_light_on_from_user_message("zet de ballon lamp aan") is True
     args = light_set_state_args_from_user_message("zet de woonkamer lampen uit")
     assert args == {"device_id": "room:woonkamer", "on": False}
+    kantoor_args = light_set_state_args_from_user_message("doe het licht aan in het kantoor")
+    assert kantoor_args == {"device_id": "kantoor", "on": True}
+
+
+def test_doubled_article_typos_still_resolve() -> None:
+    from brain.mcp.lights import (
+        extract_lamp_name_hint,
+        light_set_state_args_from_user_message,
+        pick_light_id,
+        resolve_light,
+    )
+
+    assert extract_lamp_name_hint("zet de de kantoor lamp aan") == "kantoor"
+    assert light_set_state_args_from_user_message("zet de de kantoor lamp aan") == {
+        "device_id": "kantoor",
+        "on": True,
+    }
+    assert light_set_state_args_from_user_message("doe de de kantoor lamp uit") == {
+        "device_id": "kantoor",
+        "on": False,
+    }
+
+
+def test_stt_compound_and_fuzzy_room_resolve() -> None:
+    from brain.mcp.lights import (
+        extract_lamp_name_hint,
+        light_set_state_args_from_user_message,
+        pick_light_id,
+        resolve_light,
+        resolve_set_state_device_ids,
+    )
+
+    lights = [
+        {"id": "k1", "name": "Ballon", "room": "Kantoor", "isOn": False},
+        {"id": "w1", "name": "eettafel lamp", "room": "Woonkamer", "isOn": False},
+    ]
+
+    assert extract_lamp_name_hint("Zet de kantoorlamp aan.") == "kantoor"
+    assert light_set_state_args_from_user_message("Zet de kantoorlamp aan.") == {
+        "device_id": "kantoor",
+        "on": True,
+    }
+
+    assert resolve_light(lights, "kantor").status == "found"
+    assert pick_light_id(lights, "kantor") == "k1"
+    ids, err = resolve_set_state_device_ids(lights, "kantor")
+    assert err is None and ids == ["k1"]
 
 
 def test_resolve_set_state_device_ids_room_all() -> None:

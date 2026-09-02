@@ -96,3 +96,40 @@ def test_set_state_room_all_calls_homebase_for_each(tmp_path: Path) -> None:
         assert {c["device_id"] for c in state["set_calls"]} == {"w1", "w2", "w3"}
         assert set_state_tool_succeeded(out)
         assert "devices_toggled" in out
+
+
+def test_set_state_includes_prior_is_on_from_list(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    device_id = "e1fb890c-1111-2222-3333-444444444444_1"
+    mcp = MCPServer("Homebase-lights-prior-test")
+    state: dict[str, Any] = {
+        "lights": [
+            {
+                "id": device_id,
+                "name": "Ballon",
+                "room": "Kantoor",
+                "isOn": True,
+                "reachable": False,
+            }
+        ],
+        "set_calls": [],
+    }
+
+    @mcp.tool(name="homebase.lights.list")
+    def lights_list() -> list[dict[str, Any]]:
+        return list(state["lights"])
+
+    @mcp.tool(name="homebase.lights.set_state")
+    def lights_set_state(device_id: str, on: bool, brightness: float | None = None) -> dict[str, Any]:
+        state["set_calls"].append({"device_id": device_id, "on": on})
+        return {"success": True, "device_id": device_id, "on": on}
+
+    with _BridgeRunner(settings, {"homebase": mcp}) as runner:
+        out = runner.call(
+            "homebase.lights.set_state",
+            {"device_id": "Ballon", "on": False},
+        )
+        assert state["set_calls"] == [{"device_id": device_id, "on": False}]
+        assert "prior_isOn" in out
+        assert "reachable" in out
+        assert set_state_tool_succeeded(out)

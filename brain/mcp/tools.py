@@ -177,7 +177,8 @@ def mcp_tool_to_local(
                 return present_lights_set_state_batch(
                     batch_results, on=bool(on_value), room=room_label
                 )
-            return present_lights_set_state_json(last_result)
+            single_light = by_id.get(device_ids[0], {}) if device_ids else {}
+            return present_lights_set_state_json(last_result, light=single_light)
         return bridge.call_tool_sync(name, args, timeout_s=timeout_s)
 
     return Tool(
