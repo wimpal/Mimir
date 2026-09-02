@@ -16,6 +16,7 @@ from brain.main import create_app
 from brain.ollama import (
     ChatMessage,
     ChatResponse,
+    ChatStreamChunk,
     OllamaError,
     ToolCall,
     ToolCallFunction,
@@ -32,6 +33,7 @@ class ScriptedOllama:
         self._responses = list(responses)
         self.ping_ok = ping_ok
         self.calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
 
     def chat(
         self,
@@ -48,6 +50,42 @@ class ScriptedOllama:
         if isinstance(nxt, Exception):
             raise nxt
         return ChatResponse(message=nxt)
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage | dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        think: bool = False,
+    ):
+        self.stream_calls.append({"messages": list(messages), "tools": tools, "think": think})
+        if not self._responses:
+            raise AssertionError("no scripted responses left")
+        nxt = self._responses.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        if nxt.tool_calls:
+            yield ChatStreamChunk(
+                delta="",
+                done=True,
+                raw={"message": nxt.to_api_dict(), "done": True},
+            )
+            return
+        text = nxt.content or ""
+        if len(text) <= 1:
+            yield ChatStreamChunk(
+                delta=text,
+                done=True,
+                raw={"message": nxt.to_api_dict(), "done": True},
+            )
+            return
+        mid = len(text) // 2
+        yield ChatStreamChunk(delta=text[:mid], done=False)
+        yield ChatStreamChunk(
+            delta=text[mid:],
+            done=True,
+            raw={"message": nxt.to_api_dict(), "done": True},
+        )
 
     def ping(self, *, timeout_s: float = 5.0) -> bool:
         return self.ping_ok
@@ -273,6 +311,60 @@ def test_chat_stream_with_tools_emits_tool_events(settings: Settings) -> None:
     assert types[-1] == "done"
     text = "".join(e.get("text", "") for e in events if e["type"] == "token")
     assert text == "pong"
+
+
+def test_chat_stream_live_tokens_not_chunked(settings: Settings) -> None:
+    ollama = ScriptedOllama(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("echo", {"text": "ping"})],
+            ),
+            ChatMessage(role="assistant", content="Hello stream"),
+        ]
+    )
+    with _client(settings, ollama) as tc:
+        resp = tc.post("/v1/chat", json={"message": "echo", "stream": True})
+        events = _parse_sse_events(resp.text)
+    tokens = [e for e in events if e["type"] == "token"]
+    assert len(tokens) >= 2
+    assert any(len(t["text"]) < 80 for t in tokens)
+
+
+def test_chat_stream_sentence_events(settings: Settings) -> None:
+    ollama = ScriptedOllama(
+        [ChatMessage(role="assistant", content="First sentence. Second one.")]
+    )
+    with _client(settings, ollama) as tc:
+        resp = tc.post("/v1/chat", json={"message": "hi", "stream": True})
+        events = _parse_sse_events(resp.text)
+    sentences = [e for e in events if e["type"] == "sentence"]
+    assert len(sentences) == 2
+    assert sentences[0]["index"] == 0
+    assert sentences[0]["text"] == "First sentence."
+    assert sentences[1]["index"] == 1
+    assert sentences[1]["text"] == "Second one."
+
+
+def test_chat_stream_tool_turn_no_tokens_until_final(settings: Settings) -> None:
+    ollama = ScriptedOllama(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("echo", {"text": "ping"})],
+            ),
+            ChatMessage(role="assistant", content="Done now."),
+        ]
+    )
+    with _client(settings, ollama) as tc:
+        resp = tc.post("/v1/chat", json={"message": "echo", "stream": True})
+        events = _parse_sse_events(resp.text)
+    types = [e["type"] for e in events]
+    tool_end_idx = types.index("tool_end")
+    first_token_idx = types.index("token")
+    assert first_token_idx > tool_end_idx
 
 
 def test_conversation_messages_empty_unknown(settings: Settings) -> None:

@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import nl.heim.mimir.data.AudioPlayer
+import nl.heim.mimir.data.AudioQueue
 import nl.heim.mimir.data.AudioRecorder
 import nl.heim.mimir.data.BrainApi
 import nl.heim.mimir.data.BrainClientError
@@ -59,6 +62,7 @@ class ChatViewModel(
     private var streamJob: Job? = null
     private var recordJob: Job? = null
     private var voiceJob: Job? = null
+    private var audioQueue: AudioQueue? = null
     private var lastUserMessage: String? = null
 
     val isInputBlocked: Boolean
@@ -124,6 +128,8 @@ class ChatViewModel(
     }
 
     fun onPttPress() {
+        audioQueue?.cancel()
+        audioQueue = null
         audioPlayer.stop()
         if (_uiState.value.isStreaming) return
         if (_uiState.value.voicePhase == VoicePhase.Transcribing ||
@@ -171,6 +177,8 @@ class ChatViewModel(
     }
 
     fun stopSpeaking() {
+        audioQueue?.cancel()
+        audioQueue = null
         audioPlayer.stop()
         _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
     }
@@ -265,6 +273,8 @@ class ChatViewModel(
         streamJob?.cancel()
         voiceJob?.cancel()
         recordJob?.cancel()
+        audioQueue?.cancel()
+        audioQueue = null
         audioPlayer.stop()
         audioRecorder.cancel()
         viewModelScope.launch {
@@ -338,20 +348,24 @@ class ChatViewModel(
             when {
                 ConfirmationDetector.isSpokenConfirm(stt.text) -> {
                     dismissConfirmOnMessage(pending.id)
-                    val result = completeChatTurn(ConfirmationDetector.confirmReply(pending.content))
-                    if (result.success && result.assistantText.isNotBlank()) {
-                        speakReply(result.assistantText, stt.language)
-                    } else {
+                    val result = completeChatTurn(
+                        ConfirmationDetector.confirmReply(pending.content),
+                        voiceMode = true,
+                        ttsLocale = ConfirmationDetector.localeForTts(stt.language),
+                    )
+                    if (!result.success) {
                         _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
                     }
                     return
                 }
                 ConfirmationDetector.isSpokenCancel(stt.text) -> {
                     dismissConfirmOnMessage(pending.id)
-                    val result = completeChatTurn(ConfirmationDetector.cancelReply(pending.content))
-                    if (result.success && result.assistantText.isNotBlank()) {
-                        speakReply(result.assistantText, stt.language)
-                    } else {
+                    val result = completeChatTurn(
+                        ConfirmationDetector.cancelReply(pending.content),
+                        voiceMode = true,
+                        ttsLocale = ConfirmationDetector.localeForTts(stt.language),
+                    )
+                    if (!result.success) {
                         _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
                     }
                     return
@@ -360,17 +374,15 @@ class ChatViewModel(
         }
 
         _uiState.update { it.copy(voicePhase = VoicePhase.Chatting) }
-        val result = completeChatTurn(stt.text)
+        val result = completeChatTurn(
+            stt.text,
+            voiceMode = true,
+            ttsLocale = ConfirmationDetector.localeForTts(stt.language),
+        )
         if (!result.success) {
             result.errorMessage?.let { appendError(it) }
             _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
-            return
         }
-        if (result.assistantText.isBlank()) {
-            _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
-            return
-        }
-        speakReply(result.assistantText, stt.language)
     }
 
     private suspend fun speakReply(text: String, languageHint: String?) {
@@ -401,7 +413,11 @@ class ChatViewModel(
         }
     }
 
-    private suspend fun completeChatTurn(text: String): ChatTurnResult {
+    private suspend fun completeChatTurn(
+        text: String,
+        voiceMode: Boolean = false,
+        ttsLocale: String = "nl",
+    ): ChatTurnResult {
         lastUserMessage = text
         val userId = UUID.randomUUID().toString()
         val assistantId = UUID.randomUUID().toString()
@@ -430,61 +446,113 @@ class ChatViewModel(
         var toolsUsed = emptyList<String>()
         var conversationId = _uiState.value.conversationId
         var errorMessage: String? = null
+        var sentencesPlayed = false
+        val ttsJobs = mutableListOf<Job>()
+        val queue = if (voiceMode) {
+            AudioQueue(audioPlayer).also {
+                audioQueue = it
+                it.setOnFirstPlayback {
+                    _uiState.update {
+                        it.copy(voicePhase = VoicePhase.Speaking, workStatus = "Speaking…")
+                    }
+                }
+            }
+        } else {
+            null
+        }
 
         try {
-            api.streamChat(text, conversationId).collect { event ->
-                when (event) {
-                    is SseEvent.Meta -> {
-                        event.conversationId?.let { cid ->
-                            conversationId = cid
-                            repository.saveConversationId(cid)
-                            _uiState.update { it.copy(conversationId = cid) }
+            coroutineScope {
+                api.streamChat(text, conversationId).collect { event ->
+                    when (event) {
+                        is SseEvent.Meta -> {
+                            event.conversationId?.let { cid ->
+                                conversationId = cid
+                                repository.saveConversationId(cid)
+                                _uiState.update { it.copy(conversationId = cid) }
+                            }
+                        }
+                        is SseEvent.ToolStart -> {
+                            _uiState.update { it.copy(workStatus = "${event.name}…") }
+                        }
+                        is SseEvent.ToolEnd -> {
+                            _uiState.update { it.copy(workStatus = "Working…") }
+                        }
+                        is SseEvent.Token -> {
+                            assistantText += event.text
+                            updateAssistant(assistantId, assistantText, isStreaming = true)
+                        }
+                        is SseEvent.Sentence -> {
+                            if (voiceMode && queue != null) {
+                                sentencesPlayed = true
+                                val job = launch(Dispatchers.IO) {
+                                    try {
+                                        val wav = api.tts(event.text, ttsLocale)
+                                        queue.enqueue(event.index, wav)
+                                    } catch (e: BrainClientError) {
+                                        appendError(e.message ?: "Speech synthesis failed.")
+                                        queue.cancel()
+                                        audioQueue = null
+                                    }
+                                }
+                                ttsJobs.add(job)
+                            }
+                        }
+                        is SseEvent.ErrorEvent -> {
+                            queue?.cancel()
+                            audioQueue = null
+                            event.conversationId?.let { cid ->
+                                conversationId = cid
+                                repository.saveConversationId(cid)
+                                _uiState.update { it.copy(conversationId = cid) }
+                            }
+                            errorMessage = event.message
+                            appendError(event.message)
+                            removeStreamingAssistant(assistantId)
+                        }
+                        is SseEvent.Done -> {
+                            event.conversationId?.let { cid ->
+                                conversationId = cid
+                                repository.saveConversationId(cid)
+                                _uiState.update { it.copy(conversationId = cid) }
+                            }
+                            toolsUsed = event.toolsUsed
+                            val showConfirm = ConfirmationDetector.shouldShowWriteConfirm(
+                                assistantText = assistantText,
+                                toolsUsed = toolsUsed,
+                                priorUserMessage = lastUserMessage,
+                            )
+                            updateAssistant(
+                                id = assistantId,
+                                content = assistantText,
+                                isStreaming = false,
+                                toolsUsed = toolsUsed,
+                                showWriteConfirm = showConfirm,
+                            )
+                        }
+                        is SseEvent.Unknown -> Unit
+                    }
+                }
+            }
+            ttsJobs.joinAll()
+            if (voiceMode && errorMessage == null) {
+                if (sentencesPlayed && queue != null) {
+                    suspendCancellableCoroutine { cont ->
+                        queue.whenIdle {
+                            audioQueue = null
+                            _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
+                            if (cont.isActive) cont.resume(Unit)
                         }
                     }
-                    is SseEvent.ToolStart -> {
-                        _uiState.update { it.copy(workStatus = "${event.name}…") }
-                    }
-                    is SseEvent.ToolEnd -> {
-                        _uiState.update { it.copy(workStatus = "Working…") }
-                    }
-                    is SseEvent.Token -> {
-                        assistantText += event.text
-                        updateAssistant(assistantId, assistantText, isStreaming = true)
-                    }
-                    is SseEvent.ErrorEvent -> {
-                        event.conversationId?.let { cid ->
-                            conversationId = cid
-                            repository.saveConversationId(cid)
-                            _uiState.update { it.copy(conversationId = cid) }
-                        }
-                        errorMessage = event.message
-                        appendError(event.message)
-                        removeStreamingAssistant(assistantId)
-                    }
-                    is SseEvent.Done -> {
-                        event.conversationId?.let { cid ->
-                            conversationId = cid
-                            repository.saveConversationId(cid)
-                            _uiState.update { it.copy(conversationId = cid) }
-                        }
-                        toolsUsed = event.toolsUsed
-                        val showConfirm = ConfirmationDetector.shouldShowWriteConfirm(
-                            assistantText = assistantText,
-                            toolsUsed = toolsUsed,
-                            priorUserMessage = lastUserMessage,
-                        )
-                        updateAssistant(
-                            id = assistantId,
-                            content = assistantText,
-                            isStreaming = false,
-                            toolsUsed = toolsUsed,
-                            showWriteConfirm = showConfirm,
-                        )
-                    }
-                    is SseEvent.Unknown -> Unit
+                } else if (assistantText.isNotBlank()) {
+                    speakReply(assistantText, ttsLocale)
+                } else {
+                    _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
                 }
             }
         } catch (e: BrainClientError) {
+            queue?.cancel()
+            audioQueue = null
             errorMessage = e.message ?: "Something went wrong."
             if (assistantText.isNotBlank()) {
                 updateAssistant(assistantId, assistantText, isStreaming = false)

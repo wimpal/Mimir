@@ -6,7 +6,14 @@ import time
 from typing import Any
 
 from brain.agent import StoppedReason, run_turn
-from brain.ollama import ChatMessage, ChatResponse, OllamaError, ToolCall, ToolCallFunction
+from brain.ollama import (
+    ChatMessage,
+    ChatResponse,
+    ChatStreamChunk,
+    OllamaError,
+    ToolCall,
+    ToolCallFunction,
+)
 from brain.tools import Tool
 
 
@@ -14,6 +21,7 @@ class ScriptedClient:
     def __init__(self, responses: list[ChatMessage | Exception]) -> None:
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self.stream_calls: list[dict[str, Any]] = []
 
     def chat(
         self,
@@ -30,6 +38,52 @@ class ScriptedClient:
         if isinstance(nxt, Exception):
             raise nxt
         return ChatResponse(message=nxt)
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage | dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        think: bool = False,
+    ):
+        self.stream_calls.append({"messages": list(messages), "tools": tools, "think": think})
+        if not self._responses:
+            raise AssertionError("no scripted responses left")
+        nxt = self._responses.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        if isinstance(nxt, list):
+            for item in nxt:
+                if isinstance(item, ChatStreamChunk):
+                    yield item
+                elif isinstance(item, str):
+                    yield ChatStreamChunk(delta=item, done=False)
+                else:
+                    raise TypeError(f"unexpected stream item: {item!r}")
+            yield ChatStreamChunk(delta="", done=True)
+            return
+        if nxt.tool_calls:
+            yield ChatStreamChunk(
+                delta="",
+                done=True,
+                raw={"message": nxt.to_api_dict(), "done": True},
+            )
+            return
+        text = nxt.content or ""
+        if len(text) <= 1:
+            yield ChatStreamChunk(
+                delta=text,
+                done=True,
+                raw={"message": nxt.to_api_dict(), "done": True},
+            )
+            return
+        mid = len(text) // 2
+        yield ChatStreamChunk(delta=text[:mid], done=False)
+        yield ChatStreamChunk(
+            delta=text[mid:],
+            done=True,
+            raw={"message": nxt.to_api_dict(), "done": True},
+        )
 
 
 def _tool_call(name: str, arguments: dict[str, Any] | None = None) -> ToolCall:
@@ -341,3 +395,48 @@ def test_agent_auto_chains_set_state_for_compound_kantoorlamp() -> None:
     assert result.stopped_reason == StoppedReason.FINAL
     assert calls == ["homebase.lights.list", "homebase.lights.set_state"]
     assert "homebase.lights.set_state" in result.tools_used()
+
+
+def test_stream_final_emits_deltas() -> None:
+    client = ScriptedClient([ChatMessage(role="assistant", content="Hello world")])
+    deltas: list[str] = []
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="hi")],
+        on_assistant_delta=deltas.append,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert result.content == "Hello world"
+    assert "".join(deltas) == "Hello world"
+    assert len(client.stream_calls) == 0
+    assert len(client.calls) == 1
+
+
+def test_first_tool_iteration_uses_blocking_chat() -> None:
+    client = ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[_tool_call("echo", {"text": "hi"})],
+            ),
+            ChatMessage(role="assistant", content="You said: hi"),
+        ]
+    )
+    deltas: list[str] = []
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="echo hi")],
+        on_assistant_delta=deltas.append,
+    )
+    assert result.content == "You said: hi"
+    assert "".join(deltas) == "You said: hi"
+    assert len(client.calls) == 1
+    assert len(client.stream_calls) == 1
+
+
+def test_stream_disabled_without_callback() -> None:
+    client = ScriptedClient([ChatMessage(role="assistant", content="Hi")])
+    run_turn(client, [ChatMessage(role="user", content="hi")])
+    assert len(client.calls) == 1
+    assert len(client.stream_calls) == 0

@@ -149,5 +149,81 @@ def test_stream_rejected() -> None:
         _handler({"message": {"role": "assistant", "content": "x"}})
     )
     with OllamaClient("http://t", "m", transport=transport) as client:
-        with pytest.raises(OllamaError, match="streaming"):
+        with pytest.raises(OllamaError, match="chat_stream"):
             client.chat([{"role": "user", "content": "hi"}], stream=True)
+
+
+def _stream_handler(ndjson_lines: list[dict], *, status: int = 200):
+    body = "\n".join(json.dumps(line) for line in ndjson_lines).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+        return httpx.Response(status, content=body)
+
+    return handler
+
+
+def test_chat_stream_multi_chunk() -> None:
+    lines = [
+        {"message": {"role": "assistant", "content": "Hel"}, "done": False},
+        {"message": {"role": "assistant", "content": "lo"}, "done": True},
+    ]
+    transport = httpx.MockTransport(_stream_handler(lines))
+    with OllamaClient("http://test", "m", transport=transport) as client:
+        chunks = list(client.chat_stream([{"role": "user", "content": "hi"}]))
+    assert [c.delta for c in chunks] == ["Hel", "lo"]
+    assert chunks[-1].done is True
+    assert "".join(c.delta for c in chunks) == "Hello"
+
+
+def test_chat_stream_single_final_chunk() -> None:
+    lines = [
+        {
+            "message": {"role": "assistant", "content": "Hi"},
+            "done": True,
+            "eval_duration": 50_000_000,
+        },
+    ]
+    transport = httpx.MockTransport(_stream_handler(lines))
+    with OllamaClient("http://test", "m", transport=transport) as client:
+        chunks = list(client.chat_stream([{"role": "user", "content": "hi"}]))
+    assert len(chunks) == 1
+    assert chunks[0].delta == "Hi"
+    assert chunks[0].done is True
+    assert chunks[0].timings.eval_duration_ms == 50.0
+
+
+def test_chat_stream_sends_stream_true_and_tools() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        line = json.dumps(
+            {"message": {"role": "assistant", "content": "ok"}, "done": True}
+        )
+        return httpx.Response(200, content=(line + "\n").encode())
+
+    tools = [{"type": "function", "function": {"name": "echo", "parameters": {}}}]
+    with OllamaClient(
+        "http://t", "m", num_ctx=8192, keep_alive="45m", transport=httpx.MockTransport(handler)
+    ) as client:
+        list(client.chat_stream([{"role": "user", "content": "hi"}], tools=tools))
+    assert captured["body"]["stream"] is True
+    assert captured["body"]["tools"] == tools
+    assert captured["body"]["options"]["num_ctx"] == 8192
+
+
+def test_chat_stream_http_error() -> None:
+    transport = httpx.MockTransport(lambda r: httpx.Response(500, text="boom"))
+    with OllamaClient("http://t", "m", transport=transport) as client:
+        with pytest.raises(OllamaError, match="HTTP 500"):
+            list(client.chat_stream([{"role": "user", "content": "hi"}]))
+
+
+def test_chat_stream_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with OllamaClient("http://t", "m", transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(OllamaError, match="timed out"):
+            list(client.chat_stream([{"role": "user", "content": "hi"}]))

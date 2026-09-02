@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -28,6 +30,7 @@ from brain.prefs import (
 )
 from brain.tools import Tool, build_registry
 from brain.turn_log import append_turn_trace
+from brain.voice.sentences import SentenceBuffer
 
 logger = logging.getLogger("mimir.service")
 
@@ -46,8 +49,6 @@ MSG_STREAMING = (
 )
 MSG_CONVERSATION_NEEDS_MESSAGE = "conversation_id requires message"
 MSG_STREAM_ERROR = "Something went wrong while handling that request."
-
-_TOKEN_CHUNK = 80
 
 _REPLY_BY_REASON: dict[StoppedReason, str] = {
     StoppedReason.OLLAMA_ERROR: MSG_OLLAMA_DOWN,
@@ -90,14 +91,6 @@ def _normalize_conversation_id(conversation_id: str | None) -> str | None:
         return None
     text = str(conversation_id).strip()
     return text or None
-
-
-def _token_chunks(text: str) -> list[str]:
-    if not text:
-        return [""]
-    if len(text) <= _TOKEN_CHUNK:
-        return [text]
-    return [text[i : i + _TOKEN_CHUNK] for i in range(0, len(text), _TOKEN_CHUNK)]
 
 
 def build_messages(
@@ -343,6 +336,161 @@ class BrainService:
             http_status=200,
         )
 
+    def _execute_turn(
+        self,
+        chat_messages: list[ChatMessage],
+        *,
+        on_tool_start: Any = None,
+        on_tool_end: Any = None,
+        on_assistant_delta: Any = None,
+    ) -> TurnResult:
+        deadline = time.monotonic() + self.settings.timeouts.turn_s
+        return run_turn(
+            self.client,
+            chat_messages,
+            tools=self.tools,
+            max_iterations=self.settings.agent.max_iterations,
+            think=self.settings.ollama.think,
+            deadline_monotonic=deadline,
+            default_tool_timeout_s=self.settings.timeouts.tool_s,
+            after_tool=self._refresh_system_after_pref_tool,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+            on_assistant_delta=on_assistant_delta,
+            data_dir=self.data_dir,
+        )
+
+    def _outcome_from_turn(
+        self,
+        result: TurnResult,
+        *,
+        conversation_id: str | None,
+        user_text: str | None = None,
+    ) -> ChatOutcome:
+        reply = _user_facing_reply(result)
+        if user_text is not None and self.db is not None and conversation_id is not None:
+            self.db.append_message(conversation_id, "user", user_text)
+            self.db.append_message(conversation_id, "assistant", reply)
+        tools_used = result.tools_used()
+        turn_id = append_turn_trace(
+            self.data_dir,
+            prompt_id=self.prompt_id,
+            result=result,
+            conversation_id=conversation_id,
+        )
+        return ChatOutcome(
+            reply=reply,
+            conversation_id=conversation_id,
+            stopped_reason=str(result.stopped_reason),
+            tools_used=tools_used,
+            turn_id=turn_id,
+            http_status=200,
+        )
+
+    def _iter_streaming_turn_events(
+        self,
+        chat_messages: list[ChatMessage],
+        *,
+        user_text: str | None,
+        conversation_id: str | None,
+    ) -> Iterator[dict[str, Any] | ChatOutcome]:
+        """Run turn in a worker thread; yield SSE dicts as they are produced."""
+        event_q: queue.Queue[Any] = queue.Queue()
+        _DONE = object()
+
+        sentence_buf = SentenceBuffer()
+        sentence_idx = 0
+        turn_started = time.monotonic()
+        first_sentence_logged = False
+        streamed_parts: list[str] = []
+
+        def on_tool_start(name: str, arguments: dict[str, Any] | None) -> None:
+            event: dict[str, Any] = {"type": "tool_start", "name": name}
+            if arguments is not None:
+                event["arguments"] = arguments
+            event_q.put(event)
+
+        def on_tool_end(name: str, ok: bool, preview: str) -> None:
+            event_q.put(
+                {
+                    "type": "tool_end",
+                    "name": name,
+                    "ok": ok,
+                    "result_preview": preview,
+                }
+            )
+
+        def emit_assistant_text(text: str) -> None:
+            nonlocal sentence_idx, first_sentence_logged
+            if not text:
+                return
+            event_q.put({"type": "token", "text": text})
+            for sent in sentence_buf.feed(text):
+                event_q.put(
+                    {"type": "sentence", "index": sentence_idx, "text": sent}
+                )
+                if not first_sentence_logged:
+                    first_sentence_logged = True
+                    ms = int((time.monotonic() - turn_started) * 1000)
+                    logger.info("time_to_first_sentence_ms=%s", ms)
+                sentence_idx += 1
+
+        def on_assistant_delta(delta: str) -> None:
+            streamed_parts.append(delta)
+            emit_assistant_text(delta)
+
+        def worker() -> None:
+            try:
+                result = self._execute_turn(
+                    chat_messages,
+                    on_tool_start=on_tool_start,
+                    on_tool_end=on_tool_end,
+                    on_assistant_delta=on_assistant_delta,
+                )
+                outcome = self._outcome_from_turn(
+                    result,
+                    conversation_id=conversation_id,
+                    user_text=user_text,
+                )
+                streamed = "".join(streamed_parts)
+                reply = outcome.reply
+                if reply:
+                    if not streamed:
+                        emit_assistant_text(reply)
+                    elif reply.startswith(streamed):
+                        unsent = reply[len(streamed) :]
+                        if unsent:
+                            emit_assistant_text(unsent)
+                    elif streamed != reply:
+                        emit_assistant_text(reply)
+                tail = sentence_buf.flush()
+                if tail:
+                    event_q.put(
+                        {
+                            "type": "sentence",
+                            "index": sentence_idx,
+                            "text": tail,
+                        }
+                    )
+                event_q.put(outcome)
+            except Exception as exc:  # noqa: BLE001
+                event_q.put(exc)
+            finally:
+                event_q.put(_DONE)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while True:
+            item = event_q.get()
+            if item is _DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+        thread.join(timeout=1.0)
+
     def run_chat(
         self,
         *,
@@ -393,7 +541,7 @@ class BrainService:
     ) -> Iterator[dict[str, Any]]:
         """Yield SSE event dicts for native ``/v1/chat`` streaming.
 
-        Order: meta → tool_start/tool_end* → token+ → done | error.
+        Order: meta → tool_start/tool_end* → token* → sentence* → done | error.
         Validation failures yield a single error-shaped dict with ``http_status``.
         """
         cid = _normalize_conversation_id(conversation_id)
@@ -409,6 +557,8 @@ class BrainService:
 
         resolved_id: str | None
         persist = has_message and self.db is not None
+        user_text = str(message).strip() if has_message else None
+
         if persist:
             resolved_id = cid or str(uuid.uuid4())
         else:
@@ -417,47 +567,66 @@ class BrainService:
         if resolved_id is not None:
             yield {"type": "meta", "conversation_id": resolved_id}
 
-        tool_events: list[dict[str, Any]] = []
-
-        def on_tool_start(name: str, arguments: dict[str, Any] | None) -> None:
-            event: dict[str, Any] = {"type": "tool_start", "name": name}
-            if arguments is not None:
-                event["arguments"] = arguments
-            tool_events.append(event)
-
-        def on_tool_end(name: str, ok: bool, preview: str) -> None:
-            tool_events.append(
-                {
-                    "type": "tool_end",
-                    "name": name,
-                    "ok": ok,
-                    "result_preview": preview,
-                }
-            )
-
-        try:
-            if persist:
-                assert resolved_id is not None
-                outcome = self._run_persist_turn(
-                    user_text=str(message).strip(),
-                    conversation_id=resolved_id,
-                    on_tool_start=on_tool_start,
-                    on_tool_end=on_tool_end,
-                )
-            else:
-                outcome = self._run_stateless_turn(
+        chat_messages: list[ChatMessage] | None = None
+        if persist:
+            assert self.db is not None
+            assert resolved_id is not None
+            assert user_text is not None
+            self.db.ensure_conversation(resolved_id)
+            limit = max(0, self.settings.memory.history_pairs) * 2
+            history = self.db.list_recent_messages(resolved_id, limit=limit)
+            prefs = self.db.get_preferences()
+            system = self._system_prompt_for_turn(prefs)
+            chat_messages = [
+                ChatMessage(role="system", content=system),
+                *[ChatMessage(role=m.role, content=m.content) for m in history],
+                ChatMessage(role="user", content=user_text),
+            ]
+        else:
+            try:
+                chat_messages = build_messages(
+                    self._system_prompt_for_turn(),
                     message=message,
                     messages=messages,
-                    conversation_id=resolved_id,
-                    on_tool_start=on_tool_start,
-                    on_tool_end=on_tool_end,
                 )
+            except ValueError as exc:
+                yield {
+                    "type": "error",
+                    "message": str(exc),
+                    "http_status": 400,
+                    "conversation_id": resolved_id,
+                }
+                return
+            if len(chat_messages) < 2:
+                yield {
+                    "type": "error",
+                    "message": "either message or messages is required",
+                    "http_status": 400,
+                    "conversation_id": resolved_id,
+                }
+                return
+
+        outcome: ChatOutcome | None = None
+        try:
+            for item in self._iter_streaming_turn_events(
+                chat_messages,
+                user_text=user_text if persist else None,
+                conversation_id=resolved_id,
+            ):
+                if isinstance(item, ChatOutcome):
+                    outcome = item
+                else:
+                    yield item
         except Exception:  # noqa: BLE001
             logger.exception("iter_chat_events failed")
             err: dict[str, Any] = {"type": "error", "message": MSG_STREAM_ERROR}
             if resolved_id is not None:
                 err["conversation_id"] = resolved_id
             yield err
+            return
+
+        if outcome is None:
+            yield {"type": "error", "message": MSG_STREAM_ERROR}
             return
 
         if outcome.http_status == 400:
@@ -468,11 +637,6 @@ class BrainService:
                 "conversation_id": outcome.conversation_id,
             }
             return
-
-        yield from tool_events
-
-        for chunk in _token_chunks(outcome.reply):
-            yield {"type": "token", "text": chunk}
 
         done: dict[str, Any] = {
             "type": "done",

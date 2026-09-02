@@ -105,6 +105,7 @@ class TimeoutSettings(_Strict):
     jellyfin_sync_s: float = 300.0  # overall Sync wall clock
     mcp_default_s: float = 10.0  # MCP tool call default (contracts/mimir.client.md)
     mcp_search_s: float = 30.0  # MCP tools whose name ends with .search
+    mcp_party_s: float = 70.0  # homebase.lights.party_mode blocks up to 60s
     stt_s: float = 60.0  # wall clock for one /v1/stt utterance
     tts_s: float = 30.0  # wall clock for one /v1/tts synthesis
 
@@ -431,6 +432,7 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "jellyfin_sync_s"): "MIMIR_JELLYFIN_SYNC_TIMEOUT_S",
     ("timeouts", "mcp_default_s"): "MIMIR_TIMEOUT_MCP_DEFAULT_S",
     ("timeouts", "mcp_search_s"): "MIMIR_TIMEOUT_MCP_SEARCH_S",
+    ("timeouts", "mcp_party_s"): "MIMIR_TIMEOUT_MCP_PARTY_S",
     ("timeouts", "stt_s"): "MIMIR_TIMEOUT_STT_S",
     ("timeouts", "tts_s"): "MIMIR_TIMEOUT_TTS_S",
     ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",

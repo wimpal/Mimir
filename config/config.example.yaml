@@ -52,6 +52,7 @@ timeouts:
   # MCP tool calls (contracts/mimir.client.md).
   mcp_default_s: 10
   mcp_search_s: 30
+  mcp_party_s: 70  # homebase.lights.party_mode (blocks up to 60s)
   # Voice endpoints (T-023).
   stt_s: 60
   tts_s: 30

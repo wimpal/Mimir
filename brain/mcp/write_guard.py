@@ -35,6 +35,12 @@ _WRITE_NUDGE_GENERIC = (
     "change happened without a tool result from this turn."
 )
 
+_PARTY_MODE_NUDGE = (
+    "System correction (do not repeat to the user): the user asked for party mode "
+    "THIS turn. Call homebase.lights.party_mode now — one call only; do not call "
+    "lights.list or set_state. Confirm from tool result success: true."
+)
+
 # Read-only questions — checked before mutation patterns.
 _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -54,6 +60,8 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bhoeveel\b.*\b(voorraad|op\s+voorraad)\b",
         # NL shopping list reads — before mutation "op de boodschappenlijst"
         r"\bwat\s+(staat|is|zit)\s+(er\s+)?op\s+de\s+(boodschappen)?lijst\b",
+        # Inverted NL word order: "wat er op de (boodschappen)lijst staat"
+        r"\bwat\s+er\b.*\b(op\s+de\s+)?(boodschappen)?lijst\b",
         r"\bwat\s+hebben\s+we\s+(nodig|te\s+kopen)\b",
         r"\bwat\s+moeten\s+we\s+kopen\b",
         r"\b(toon|laat)\s+(de\s+)?(boodschappen)?lijst\b",
@@ -76,7 +84,6 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bput\b.*\bon\s+the\s+(shopping\s+)?list\b",
         r"\bvoeg\b.*\b(toe|toe aan)\b",
         r"\bzet\b.*\b(op\s+de\s+)?(boodschappen)?lijst\b",
-        r"\bop\s+de\s+boodschappenlijst\b",
         r"\bshopping\s+list\b.*\badd\b",
         # Spending / expenses
         r"\bwe\s+spent\b",
@@ -119,6 +126,15 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(licht|lamp)\b.*\b(in\s+)?kantoor\b.*\b(aan|uit|uitzetten)\b",
         r"\b(?:zet|doe|turn|switch)\b.*\blampen\b",
         r"\blichten\s+in\s+\w+\b",
+        # Party mode (T-039) — all IKEA lights flicker show
+        r"\bparty\s+mode\b",
+        r"\blet'?s\s+party\b",
+        r"\bstart\s+the\s+party\b",
+        r"\bdisco\s+mode\b",
+        r"\bparty\s+tijd\b",
+        r"\bfeestmodus\b",
+        r"\bfeest\b",
+        r"\bdisco\b",
     )
 )
 
@@ -128,16 +144,20 @@ def user_message_requests_write(text: str) -> bool:
     if not (text or "").strip():
         return False
     from brain.mcp.lights import message_for_hints
+    from brain.mcp.party_mode import user_message_requests_party_mode
 
     normalized = message_for_hints(text)
     if any(p.search(normalized) for p in _READ_ONLY_PATTERNS):
         return False
+    if user_message_requests_party_mode(normalized):
+        return True
     return any(p.search(normalized) for p in _MUTATION_PATTERNS)
 
 
 def write_retry_nudge(user_message: str) -> str:
     """Prompt the model to call a write tool when it replied without one."""
     from brain.mcp.lights import message_for_hints
+    from brain.mcp.party_mode import user_message_requests_party_mode
 
     normalized = message_for_hints(user_message)
     if re.search(
@@ -152,6 +172,8 @@ def write_retry_nudge(user_message: str) -> str:
         re.IGNORECASE,
     ):
         return _TASK_COMPLETE_NUDGE
+    if user_message_requests_party_mode(normalized):
+        return _PARTY_MODE_NUDGE
     if re.search(
         r"\b(turn\s+(on|off)|switch\b.*\b(on|off)\b|"
         r"zet\b.*\blicht\b|doe\b.*\blicht\b.*\b(aan|uit)\b|"

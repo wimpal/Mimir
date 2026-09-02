@@ -198,39 +198,40 @@ class PiperEngine:
     def _synthesize_audio(self, text: str, *, locale: Locale) -> tuple[bytes, float]:
         voice = self._load_voice(locale)
         sample_rate = voice.config.sample_rate  # type: ignore[attr-defined]
-        audio_parts: list[np.ndarray] = []
-        silence = _silence_samples(sample_rate, self._synthesis.sentence_silence_s)
+        with self._lock:
+            audio_parts: list[np.ndarray] = []
+            silence = _silence_samples(sample_rate, self._synthesis.sentence_silence_s)
 
-        for idx, chunk in enumerate(voice.synthesize(text, syn_config=self._syn_config)):  # type: ignore[attr-defined]
-            part = chunk.audio_float_array.astype(np.float32)
-            part = _apply_fade(
-                part,
-                sample_rate=sample_rate,
-                fade_ms=self._synthesis.fade_ms,
+            for idx, chunk in enumerate(voice.synthesize(text, syn_config=self._syn_config)):  # type: ignore[attr-defined]
+                part = chunk.audio_float_array.astype(np.float32)
+                part = _apply_fade(
+                    part,
+                    sample_rate=sample_rate,
+                    fade_ms=self._synthesis.fade_ms,
+                )
+                if idx > 0 and silence.size:
+                    audio_parts.append(silence.copy())
+                audio_parts.append(part)
+
+            merged = (
+                np.concatenate(audio_parts)
+                if audio_parts
+                else np.zeros(0, dtype=np.float32)
             )
-            if idx > 0 and silence.size:
-                audio_parts.append(silence.copy())
-            audio_parts.append(part)
+            merged = _normalize_audio(merged, mode=self._synthesis.normalize)
+            if self._synthesis.volume != 1.0:
+                merged = merged * self._synthesis.volume
+            merged = np.clip(merged, -1.0, 1.0)
 
-        merged = (
-            np.concatenate(audio_parts)
-            if audio_parts
-            else np.zeros(0, dtype=np.float32)
-        )
-        merged = _normalize_audio(merged, mode=self._synthesis.normalize)
-        if self._synthesis.volume != 1.0:
-            merged = merged * self._synthesis.volume
-        merged = np.clip(merged, -1.0, 1.0)
-
-        duration_s = merged.size / sample_rate if sample_rate else 0.0
-        pcm = (merged * _MAX_WAV_VALUE).astype(np.int16)
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(pcm.tobytes())
-        return buf.getvalue(), duration_s
+            duration_s = merged.size / sample_rate if sample_rate else 0.0
+            pcm = (merged * _MAX_WAV_VALUE).astype(np.int16)
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(pcm.tobytes())
+            return buf.getvalue(), duration_s
 
     def synthesize(self, text: str, *, locale: Locale) -> bytes:
         cleaned = prepare_text_for_speech(text, locale=locale)

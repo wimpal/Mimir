@@ -32,6 +32,8 @@ from brain.tools import Tool
 
 
 def _mcp_tool_timeout_s(name: str, settings: Settings) -> float:
+    if name == "homebase.lights.party_mode":
+        return settings.timeouts.mcp_party_s
     if name.endswith(".search"):
         return settings.timeouts.mcp_search_s
     return settings.timeouts.mcp_default_s

@@ -20,6 +20,10 @@ from brain.mcp.lights import (
     set_state_tool_succeeded,
     user_message_requests_light_write,
 )
+from brain.mcp.party_mode import (
+    build_party_mode_args_from_user_message,
+    party_mode_tool_succeeded,
+)
 
 
 def _turn_requests_light_toggle(user_message: str) -> bool:
@@ -34,6 +38,12 @@ from brain.mcp.write_guard import (
     user_message_requests_write,
     write_retry_nudge,
 )
+from brain.shopping_list import filter_shopping_list_tool_result
+from brain.turn_fixup import (
+    can_tool_backed_weather_shopping_reply,
+    fix_weather_shopping_reply,
+    needs_weather_shopping_fixup,
+)
 from brain.morning_brief import (
     calendar_events_from_payload,
     fix_morning_brief,
@@ -46,14 +56,17 @@ from brain.ollama import (
     ChatResponse,
     OllamaClient,
     OllamaError,
+    OllamaTimings,
     ToolCall,
     ToolCallFunction,
+    parse_message,
 )
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 
 AfterToolCallback = Callable[[str, str, list[ChatMessage]], None]
 OnToolStartCallback = Callable[[str, dict[str, Any] | None], None]
 OnToolEndCallback = Callable[[str, bool, str], None]
+OnAssistantDelta = Callable[[str], None]
 
 
 class ChatClient(Protocol):
@@ -141,6 +154,18 @@ def _latest_user_message(messages: list[ChatMessage]) -> str:
     return ""
 
 
+def _has_tool_results_this_turn(messages: list[ChatMessage]) -> bool:
+    """True when tool results for the current user turn are already in ``messages``."""
+    last_user_idx: int | None = None
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].role == "user" and (messages[i].content or "").strip():
+            last_user_idx = i
+            break
+    if last_user_idx is None:
+        return False
+    return any(m.role == "tool" for m in messages[last_user_idx + 1 :])
+
+
 def _dispatch_with_timeout(
     name: str,
     arguments: dict[str, Any] | None,
@@ -189,6 +214,87 @@ def _step_from_ollama_response(
     )
 
 
+def _step_from_timings(
+    timings: OllamaTimings,
+    *,
+    ollama_latency_ms: float,
+    **kwargs: Any,
+) -> StepTrace:
+    return StepTrace(
+        ollama_latency_ms=ollama_latency_ms,
+        ollama_load_ms=timings.load_duration_ms,
+        ollama_prompt_eval_ms=timings.prompt_eval_duration_ms,
+        ollama_eval_ms=timings.eval_duration_ms,
+        ollama_prompt_tokens=timings.prompt_eval_count,
+        ollama_eval_tokens=timings.eval_count,
+        **kwargs,
+    )
+
+
+def _call_ollama(
+    client: ChatClient | OllamaClient,
+    messages: list[ChatMessage],
+    schemas: list[dict[str, Any]],
+    *,
+    think: bool,
+    stream_final: bool,
+    on_assistant_delta: OnAssistantDelta | None,
+    user_message: str,
+    write_tool_called_this_turn: bool,
+) -> ChatResponse:
+    """Blocking or streaming Ollama call for one agent iteration."""
+    write_pending = user_message_requests_write(user_message) and not write_tool_called_this_turn
+    tools_available = bool(schemas)
+    after_tools = _has_tool_results_this_turn(messages)
+    can_stream = (
+        stream_final
+        and on_assistant_delta is not None
+        and not is_morning_greeting(user_message)
+        and not write_pending
+        and hasattr(client, "chat_stream")
+        # Tool calls are unreliable over Ollama stream — block until tools have run.
+        and (not tools_available or after_tools)
+    )
+
+    if not can_stream:
+        response = client.chat(messages, tools=schemas, think=think, stream=False)
+        msg = response.message
+        if (
+            on_assistant_delta is not None
+            and stream_final
+            and not msg.tool_calls
+            and (msg.content or "").strip()
+        ):
+            on_assistant_delta(msg.content)
+        return response
+
+    accumulated = ""
+    final_raw: dict[str, Any] = {}
+    timings = OllamaTimings()
+    for chunk in client.chat_stream(messages, tools=schemas, think=think):  # type: ignore[attr-defined]
+        if chunk.delta:
+            accumulated += chunk.delta
+            if on_assistant_delta is not None:
+                on_assistant_delta(chunk.delta)
+        if chunk.done:
+            final_raw = chunk.raw
+            timings = chunk.timings
+
+    raw_msg = final_raw.get("message")
+    if isinstance(raw_msg, dict):
+        msg = parse_message(raw_msg)
+    else:
+        msg = ChatMessage(role="assistant", content=accumulated)
+
+    if msg.tool_calls:
+        return ChatResponse(message=msg, raw=final_raw, timings=timings)
+
+    if not (msg.content or "").strip() and accumulated:
+        msg = ChatMessage(role="assistant", content=accumulated)
+
+    return ChatResponse(message=msg, raw=final_raw, timings=timings)
+
+
 def run_turn(
     client: ChatClient | OllamaClient,
     messages: list[ChatMessage],
@@ -201,6 +307,8 @@ def run_turn(
     after_tool: AfterToolCallback | None = None,
     on_tool_start: OnToolStartCallback | None = None,
     on_tool_end: OnToolEndCallback | None = None,
+    on_assistant_delta: OnAssistantDelta | None = None,
+    stream_final: bool = True,
     data_dir: Path | None = None,
 ) -> TurnResult:
     """Run one user turn through Ollama with optional tools.
@@ -224,6 +332,8 @@ def run_turn(
     calendar_fallback_used = False
     calendar_events_this_turn: list[dict[str, Any]] = []
     weather_payload_this_turn: dict[str, Any] | None = None
+    shopping_list_fetched_this_turn = False
+    shopping_list_items_this_turn: list[dict[str, Any]] = []
 
     for _ in range(max_iterations):
         if _deadline_exceeded(deadline_monotonic):
@@ -243,8 +353,18 @@ def run_turn(
             )
 
         t0 = time.perf_counter()
+        ollama_schemas = [] if _has_tool_results_this_turn(working) else schemas
         try:
-            response = client.chat(working, tools=schemas, think=think, stream=False)
+            response = _call_ollama(
+                client,
+                working,
+                ollama_schemas,
+                think=think,
+                stream_final=stream_final,
+                on_assistant_delta=on_assistant_delta,
+                user_message=user_message,
+                write_tool_called_this_turn=write_tool_called_this_turn,
+            )
         except OllamaError as exc:
             latency = (time.perf_counter() - t0) * 1000
             steps.append(
@@ -275,6 +395,34 @@ def run_turn(
         if not msg.tool_calls:
             anomaly = None
             if not (msg.content or "").strip():
+                if can_tool_backed_weather_shopping_reply(
+                    user_message,
+                    weather=weather_payload_this_turn,
+                    shopping_list_fetched=shopping_list_fetched_this_turn,
+                ):
+                    fixed = fix_weather_shopping_reply(
+                        "",
+                        user_message,
+                        weather=weather_payload_this_turn,
+                        shopping_list_fetched=shopping_list_fetched_this_turn,
+                        shopping_items=shopping_list_items_this_turn,
+                    )
+                    if fixed.strip():
+                        steps.append(
+                            _step(
+                                tool_names=[],
+                                success=True,
+                                anomaly="weather_shopping_fixup",
+                                content_preview=fixed[:120],
+                            )
+                        )
+                        working.append(ChatMessage(role="assistant", content=fixed))
+                        return TurnResult(
+                            content=fixed,
+                            messages=working,
+                            steps=steps,
+                            stopped_reason=StoppedReason.FINAL,
+                        )
                 anomaly = "empty_response"
                 steps.append(
                     _step(
@@ -361,6 +509,36 @@ def run_turn(
                         steps=steps,
                         stopped_reason=StoppedReason.FINAL,
                     )
+            reply_text = msg.content or ""
+            if needs_weather_shopping_fixup(
+                user_message,
+                reply_text,
+                weather=weather_payload_this_turn,
+                shopping_list_fetched=shopping_list_fetched_this_turn,
+                shopping_items=shopping_list_items_this_turn,
+            ):
+                fixed = fix_weather_shopping_reply(
+                    reply_text,
+                    user_message,
+                    weather=weather_payload_this_turn,
+                    shopping_list_fetched=shopping_list_fetched_this_turn,
+                    shopping_items=shopping_list_items_this_turn,
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="weather_shopping_fixup",
+                        content_preview=fixed[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=fixed))
+                return TurnResult(
+                    content=fixed,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             steps.append(
                 _step(
                     tool_names=[],
@@ -403,6 +581,9 @@ def run_turn(
 
             remaining = _remaining_s(deadline_monotonic)
             per_tool = default_tool_timeout_s
+            tool_entry = registry.get(tc.function.name)
+            if tool_entry is not None and tool_entry.timeout_s is not None:
+                per_tool = max(per_tool, tool_entry.timeout_s)
             if remaining is not None:
                 per_tool = min(per_tool, remaining)
 
@@ -464,6 +645,10 @@ def run_turn(
                     tool_args = build_set_state_args_from_user_message(
                         user_message, tool_args
                     )
+                elif tc.function.name == "homebase.lights.party_mode":
+                    tool_args = build_party_mode_args_from_user_message(
+                        user_message, tool_args
+                    )
                 result = _dispatch_with_timeout(
                     tc.function.name,
                     tool_args,
@@ -488,10 +673,25 @@ def run_turn(
                     "error: homebase.lights.set_state did not succeed "
                     "(success is not true). Pass the lamp name as device_id."
                 )
+            if (
+                tc.function.name == "homebase.lights.party_mode"
+                and not tool_result_is_error(result)
+                and not party_mode_tool_succeeded(result)
+            ):
+                result = (
+                    "error: homebase.lights.party_mode did not succeed "
+                    "(success is not true). Check error in tool JSON."
+                )
             ok = not tool_result_is_error(result)
             if on_tool_end is not None:
                 preview = result if len(result) <= 200 else result[:197] + "..."
                 on_tool_end(tc.function.name, ok, preview)
+
+            if (
+                tc.function.name == "homebase.shopping_list.list"
+                and not tool_result_is_error(result)
+            ):
+                result = filter_shopping_list_tool_result(result)
 
             if tool_result_is_error(result):
                 dispatch_failed = True
@@ -516,6 +716,21 @@ def run_turn(
                         weather_payload_this_turn = wx_data
                 except (json.JSONDecodeError, TypeError):
                     pass
+            if (
+                tc.function.name == "homebase.shopping_list.list"
+                and not tool_result_is_error(result)
+            ):
+                shopping_list_fetched_this_turn = True
+                try:
+                    sl_data = json.loads(result)
+                    if isinstance(sl_data, list):
+                        shopping_list_items_this_turn = [
+                            item for item in sl_data if isinstance(item, dict)
+                        ]
+                    else:
+                        shopping_list_items_this_turn = []
+                except (json.JSONDecodeError, TypeError):
+                    shopping_list_items_this_turn = []
 
         if (
             _turn_requests_light_toggle(user_message)

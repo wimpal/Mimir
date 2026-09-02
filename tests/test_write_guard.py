@@ -19,6 +19,12 @@ def test_read_only_questions_do_not_request_write() -> None:
     assert not user_message_requests_write("wat staat er op de boodschappenlijst?")
     assert not user_message_requests_write("wat is er op de boodschappenlijst?")
     assert not user_message_requests_write("toon de boodschappenlijst")
+    assert not user_message_requests_write(
+        "Vertel me in twee zinnen wat het weer is en wat er op de boodschappenlijst staat."
+    )
+    assert not user_message_requests_write(
+        "Vertel me in twee zinnen het weer morgen en wat er op de lijst staat."
+    )
 
 
 def test_mutation_phrases_request_write() -> None:
@@ -115,6 +121,26 @@ def test_check_write_allowed_blocks_lights_set_state_for_read() -> None:
     )
     assert err_nl is not None
     assert "write blocked" in err_nl
+
+
+def test_party_mode_mutation_phrases_request_write() -> None:
+    assert user_message_requests_write("Party mode!")
+    assert user_message_requests_write("Let's party")
+    assert user_message_requests_write("30 second party")
+    assert user_message_requests_write("feest")
+    assert user_message_requests_write("party tijd")
+    assert user_message_requests_write("feestmodus")
+    assert user_message_requests_write("disco")
+    assert check_write_allowed("homebase.lights.party_mode", "Party mode!") is None
+
+
+def test_check_write_allowed_blocks_party_mode_for_read() -> None:
+    err = check_write_allowed(
+        "homebase.lights.party_mode",
+        "Which IKEA lights are on right now?",
+    )
+    assert err is not None
+    assert "write blocked" in err
 
 
 class _ScriptedClient:

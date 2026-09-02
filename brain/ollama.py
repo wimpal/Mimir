@@ -6,6 +6,7 @@ Phase 1 proof surface; Phase 2 FastAPI wraps the same client.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -108,6 +109,16 @@ class ChatResponse:
     timings: OllamaTimings = field(default_factory=OllamaTimings)
 
 
+@dataclass(frozen=True)
+class ChatStreamChunk:
+    """One NDJSON line from Ollama ``/api/chat`` with ``stream: true``."""
+
+    delta: str
+    done: bool
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    timings: OllamaTimings = field(default_factory=OllamaTimings)
+
+
 def _parse_tool_calls(raw_calls: Any) -> list[ToolCall]:
     if not raw_calls:
         return []
@@ -199,17 +210,14 @@ class OllamaClient:
     def __exit__(self, *args: object) -> None:
         self.close()
 
-    def chat(
+    def _build_chat_body(
         self,
         messages: list[ChatMessage | dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | None,
         *,
-        think: bool = False,
-        stream: bool = False,
-    ) -> ChatResponse:
-        if stream:
-            raise OllamaError("streaming is not supported yet (see docs/api-streaming.md)")
-
+        think: bool,
+        stream: bool,
+    ) -> dict[str, Any]:
         api_messages: list[dict[str, Any]] = []
         for m in messages:
             if isinstance(m, ChatMessage):
@@ -222,7 +230,7 @@ class OllamaClient:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
-            "stream": False,
+            "stream": stream,
             "think": think,
             "options": {"num_ctx": self.num_ctx},
         }
@@ -230,6 +238,22 @@ class OllamaClient:
             body["keep_alive"] = self.keep_alive
         if tools is not None:
             body["tools"] = tools
+        return body
+
+    def chat(
+        self,
+        messages: list[ChatMessage | dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        think: bool = False,
+        stream: bool = False,
+    ) -> ChatResponse:
+        if stream:
+            raise OllamaError(
+                "use chat_stream() for streaming (see docs/api-streaming.md)"
+            )
+
+        body = self._build_chat_body(messages, tools, think=think, stream=False)
 
         try:
             resp = self._client.post("/api/chat", json=body)
@@ -261,6 +285,63 @@ class OllamaClient:
             raw=data,
             timings=parse_ollama_timings(data),
         )
+
+    def chat_stream(
+        self,
+        messages: list[ChatMessage | dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        think: bool = False,
+    ) -> Iterator[ChatStreamChunk]:
+        """Stream assistant content deltas from Ollama NDJSON."""
+        body = self._build_chat_body(messages, tools, think=think, stream=True)
+
+        try:
+            with self._client.stream("POST", "/api/chat", json=body) as resp:
+                if resp.status_code >= 400:
+                    detail = resp.read().decode("utf-8", errors="replace").strip()[:300]
+                    raise OllamaError(
+                        f"Ollama HTTP {resp.status_code}: {detail or resp.reason_phrase}"
+                    )
+
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise OllamaError("Ollama stream returned non-JSON line") from exc
+                    if not isinstance(data, dict):
+                        raise OllamaError("Ollama stream line must be a JSON object")
+
+                    raw_msg = data.get("message")
+                    delta = ""
+                    if isinstance(raw_msg, dict):
+                        content = raw_msg.get("content") or ""
+                        if not isinstance(content, str):
+                            content = str(content)
+                        delta = content
+
+                    done = bool(data.get("done"))
+                    timings = (
+                        parse_ollama_timings(data) if done else OllamaTimings()
+                    )
+                    yield ChatStreamChunk(
+                        delta=delta,
+                        done=done,
+                        raw=data,
+                        timings=timings,
+                    )
+                    if done:
+                        break
+        except OllamaError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise OllamaError(
+                f"Ollama timed out after {self.timeout_s}s at {self.base_url}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise OllamaError(f"Ollama unreachable at {self.base_url}: {exc}") from exc
 
     def ping(self, *, timeout_s: float = 5.0) -> bool:
         """Cheap reachability check via GET /api/tags."""

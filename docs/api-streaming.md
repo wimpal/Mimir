@@ -26,16 +26,39 @@ Do not invent a second streaming URL.
 | `type` | Meaning |
 |---|---|
 | `meta` | Early turn metadata (`conversation_id` when minted/known) |
-| `token` | Assistant text chunk (`text`) — Phase 6 emits after the tool loop finishes (not live Ollama deltas) |
+| `token` | Live Ollama content delta on the **final** assistant generation (after any tool loop) |
+| `sentence` | Speakable sentence completed (`index` 0-based, `text`). Voice clients should start TTS per sentence. |
 | `tool_start` | Tool about to run (`name`, optional `arguments`) |
 | `tool_end` | Tool finished (`name`, `ok`, optional `result_preview`) |
 | `done` | Final turn metadata (`stopped_reason`, `tools_used`, `turn_id`, `conversation_id`) |
 | `error` | Fail-loud short message (`message`); stream ends. May include `conversation_id` |
 
+Event order: `meta` → `tool_start`/`tool_end`* → `token`* → `sentence`* → `done` | `error`.
+
 Clients should treat unknown event types as ignorable. The Textual Chat client
 (`uv run mimir`) shows dim tool lines and streams tokens into the transcript.
-Phase 6 tokens are emitted **after** the tool loop finishes (not live Ollama
-deltas) — the TUI status line shows “working…” during the quiet window.
+During tool execution the stream is quiet (no tokens or sentences).
+
+### Tool-heavy turns
+
+1. **First Ollama pass** — blocking `chat()` with tool schemas (tool calls are not
+   streamed).
+2. **`tool_start` / `tool_end`** — one pair per tool execution; stream is quiet.
+3. **Final pass** — tools omitted from the Ollama request; live `token` and `sentence`
+   events may follow.
+
+Brain-side fixups (e.g. compound NL weather + shopping list) may adjust the final
+reply text; clients should still render streamed `token` events and match `done`.
+
+**Operator verified (2026-09-02):** chat prompt *"Vertel me in twee zinnen wat het weer
+is en wat op de boodschappenlijst staat."* — `get_weather` + `homebase.shopping_list.list`,
+Dutch reply, list grounded to kaas/melk.
+
+### Voice clients (T-029)
+
+On push-to-talk, call `POST /v1/tts` for each `sentence` event while the chat
+SSE continues. Play audio in `index` order; parallel TTS requests are fine.
+Cancel playback on new PTT or `error`. Typed chat may ignore `sentence` events.
 
 ## Persistence
 

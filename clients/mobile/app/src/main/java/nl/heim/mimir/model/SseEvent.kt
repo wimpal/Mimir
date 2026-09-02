@@ -5,6 +5,8 @@ sealed class SseEvent {
 
     data class Token(val text: String) : SseEvent()
 
+    data class Sentence(val index: Int, val text: String) : SseEvent()
+
     data class ToolStart(val name: String) : SseEvent()
 
     data object ToolEnd : SseEvent()
