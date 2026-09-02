@@ -232,7 +232,7 @@ def test_parse_conventions_error() -> None:
 def test_mcp_request_host_header_defaults_for_lan() -> None:
     from brain.config import McpServiceSettings, mcp_request_host_header
 
-    lan = McpServiceSettings(host="192.168.0.170", port=8080)
+    lan = McpServiceSettings(host="192.168.1.142", port=8080)
     assert mcp_request_host_header(lan) == "localhost"
     loopback = McpServiceSettings(host="127.0.0.1", port=8080)
     assert mcp_request_host_header(loopback) is None

@@ -44,10 +44,10 @@ Or copy the APK to the phone and install (enable “Install unknown apps” for 
 ## Configure
 
 1. PC brain: `runtime.host: 0.0.0.0`, `auth.mode: token`, `MIMIR_CLIENT_TOKEN` in `.env`
-2. Phone on **Archer Wi‑Fi** (`192.168.0.x`) — not T-56 Wi‑Fi alone (see below)
-3. Discover PC IP: `ipconfig` → IPv4 (e.g. `192.168.0.42`)
+2. Phone on **any home Wi‑Fi** (T-56 or Archer AP — same flat subnet; see below)
+3. Discover PC IP: `ipconfig` → IPv4 (e.g. `192.168.1.157`)
 4. In app **Settings**:
-   - **Home URL (LAN):** `http://192.168.0.42:8000` — used on home Wi‑Fi
+   - **Home URL (LAN):** `http://192.168.1.157:8000` — used on home Wi‑Fi
    - **Away URL (Tailscale):** `http://100.x.y.z:8000` — PC Tailscale IP; used when LAN unreachable
    - **Bearer token:** same value as TUI `.env` (`MIMIR_CLIENT_TOKEN`)
 5. Tap **Save & test connection** → health indicator green (shows which URL is active)
@@ -55,12 +55,13 @@ Or copy the APK to the phone and install (enable “Install unknown apps” for 
 
 The app **probes LAN first**, then falls back to the away URL — no manual switching.
 
-### Home network (Archer Wi‑Fi only for LAN)
+### Home network (flat T-56 LAN)
 
-Operator household: **Zyxel T-56** → **TP-Link Archer**. PC brain and NAS are on Archer
-LAN (`192.168.0.0/24`). **Home URL works only on Archer Wi‑Fi.** On T-56 Wi‑Fi
-(`192.168.1.x`) or mobile data, the LAN probe fails and the app uses **Away URL**
-(Tailscale must be on for away access).
+Operator household: **flat T-56 LAN** (`192.168.1.0/24`; gateway `192.168.1.1`). **TP-Link
+Archer** is in Access Point mode and extends the same subnet. PC brain and NAS are both on
+`192.168.1.x`. **Home URL works on home Wi‑Fi** (T-56 or Archer) when phone and PC share
+the subnet. On mobile data or away from home, the LAN probe fails and the app uses **Away
+URL** (Tailscale must be on for away access).
 
 ### Away from home (M7 — Tailscale)
 
@@ -130,7 +131,7 @@ launch; to see the same history on PC, use TUI `/history` and pick the conversat
 
 ## Acceptance checklist (operator)
 
-**T-024 typed chat** — run on **Archer** home Wi‑Fi with brain running:
+**T-024 typed chat** — run on **home Wi‑Fi (flat LAN)** with brain running:
 
 1. [x] Debug APK installs on operator Android phone
 2. [x] Settings: save LAN URL + token → health indicator green
@@ -150,8 +151,8 @@ launch; to see the same history on PC, use TUI `/history` and pick the conversat
 
 1. [x] Mobile data + Tailscale → chat + PTT over away URL
 2. [x] Public IP / tailnet URL with Tailscale off → unreachable
-3. [x] Dual URL: Archer Wi‑Fi + home URL; away via Tailscale fallback
-4. [x] Home URL on Archer Wi‑Fi with Tailscale off
+3. [x] Dual URL: home Wi‑Fi + home URL; away via Tailscale fallback
+4. [x] Home URL on home Wi‑Fi with Tailscale off
 
 ## Architecture
 

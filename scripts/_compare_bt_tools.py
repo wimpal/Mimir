@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-URL = "http://192.168.0.170:8080/mcp"
+URL = "http://192.168.1.142:8080/mcp"
 TOKEN = os.environ.get("BUDGETTRACKER_TOKEN", "")
 HEADERS = {
     "Host": "localhost",

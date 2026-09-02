@@ -190,8 +190,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_brain_firewa
 ```
 
 Discover the PC LAN address: `ipconfig` → IPv4 on the home adapter (e.g.
-`192.168.0.x`). Mobile clients use `http://<PC-LAN-IP>:8000` with the same bearer
-token as the TUI. **Do not port-forward 8000** to the internet (ADR-004 / M7).
+`192.168.1.157` on flat T-56 LAN). Mobile clients use `http://<PC-LAN-IP>:8000` with the
+same bearer token as the TUI. **Do not port-forward 8000** to the internet (ADR-004 / M7).
+
+**Operator:** gitignored `config/config.yaml` — if `jellyfin.url` still points at
+`192.168.0.170:8899`, set `http://192.168.1.142:8096` manually (do not commit).
 
 Verify resolved config after edits:
 
@@ -256,15 +259,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_brain_firewa
 
 | Where | How |
 |---|---|
-| Archer Wi‑Fi (home) | Mobile **Home URL** `http://<PC-LAN-IP>:8000` |
-| Away / T-56 Wi‑Fi / mobile data | Mobile **Away URL** `http://100.x.y.z:8000` + Tailscale on |
+| Home LAN (T-56 / Archer AP) | Mobile **Home URL** `http://<PC-LAN-IP>:8000` |
+| Away / mobile data | Mobile **Away URL** `http://100.x.y.z:8000` + Tailscale on |
 | Laptop away (TUI) | `MIMIR_BRAIN_URL` = tailnet URL or MagicDNS |
 
 **Mobile:** dual URL with LAN-first auto-fallback — see
 [`clients/mobile/README.md`](clients/mobile/README.md).
 
-**Household network:** brain/NAS on Archer LAN (`192.168.0.x`). T-56 Wi‑Fi cannot
-reach LAN IP; use Tailscale there.
+**Household network:** flat `192.168.1.x` LAN (T-56; Archer AP extends same subnet). Brain
+on operator PC; NAS MCP @ `192.168.1.142`. Mobile Home URL = PC LAN IP, not NAS.
 
 Bearer auth mandatory on tailnet; auth failures logged; 10 failures / 60 s / IP → 429.
 
@@ -275,7 +278,7 @@ Bearer auth mandatory on tailnet; auth failures logged; 10 failures / 60 s / IP 
 | Public IP `:8000` unreachable (mobile data) | pass |
 | Tailscale on → chat + PTT from mobile data | pass |
 | Dual URL home/away fallback | pass |
-| Archer Wi‑Fi home regression | pass |
+| Home LAN regression | pass |
 
 ## Voice endpoints (T-023)
 

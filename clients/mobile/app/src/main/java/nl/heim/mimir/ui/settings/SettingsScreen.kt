@@ -57,7 +57,7 @@ fun SettingsScreen(
                 value = state.brainLanUrl,
                 onValueChange = viewModel::onLanUrlChange,
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("http://192.168.0.42:8000") },
+                placeholder = { Text("http://192.168.1.157:8000") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             )
