@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from brain.mcp.lights import (
     light_not_found_error,
     looks_like_dirigera_device_id,
@@ -203,3 +205,141 @@ def test_resolve_set_state_device_ids_room_all() -> None:
     ids, err = resolve_set_state_device_ids(lights, "room:woonkamer")
     assert err is None
     assert set(ids) == {"w1", "w2", "w3"}
+
+
+def test_nl_en_room_aliases_resolve_to_hub_rooms() -> None:
+    from brain.mcp.lights import (
+        canonical_room_key,
+        extract_room_all_hint,
+        extract_room_hint,
+        light_set_state_args_from_user_message,
+        pick_light_id,
+        prefer_device_id_for_set_state,
+        resolve_light,
+        resolve_set_state_device_ids,
+    )
+
+    assert canonical_room_key("living room") == canonical_room_key("Woonkamer")
+    assert canonical_room_key("office") == canonical_room_key("Kantoor")
+    assert canonical_room_key("kitchen") == "keuken"
+
+    lights = [
+        {"id": "w1", "name": "eettafel", "room": "Woonkamer", "isOn": True},
+        {"id": "w2", "name": "paarse", "room": "Woonkamer", "isOn": True},
+        {"id": "w3", "name": "bank", "room": "Woonkamer", "isOn": False},
+        {"id": "k1", "name": "Ballon", "room": "Kantoor", "isOn": True},
+    ]
+
+    assert extract_room_all_hint("Turn off the living room lights") == "living room"
+    assert prefer_device_id_for_set_state(
+        "Turn off the living room lights",
+        "e47ca80f-4d4c-4317-9e94-48ce765131d9_1",
+    ) == "room:living room"
+    assert light_set_state_args_from_user_message(
+        "Turn on the living room lights"
+    ) == {"device_id": "room:living room", "on": True}
+
+    ids_nl, err_nl = resolve_set_state_device_ids(lights, "room:woonkamer")
+    ids_en, err_en = resolve_set_state_device_ids(lights, "room:living room")
+    assert err_nl is None and err_en is None
+    assert set(ids_nl) == set(ids_en) == {"w1", "w2", "w3"}
+
+    assert extract_room_hint("Turn off the office light") == "office"
+    assert light_set_state_args_from_user_message("Turn off the office light") == {
+        "device_id": "office",
+        "on": False,
+    }
+    assert pick_light_id(lights, "office") == "k1"
+    assert resolve_light(lights, "office").status == "found"
+    assert resolve_light(lights, "office").device_id == "k1"
+
+
+def test_alias_room_ambiguous_and_not_found() -> None:
+    from brain.mcp.lights import resolve_light, resolve_set_state_device_ids
+
+    two = _kantoor_two_lamps()
+    assert resolve_light(two, "office").status == "ambiguous"
+    ids, err = resolve_set_state_device_ids(two, "office")
+    assert ids == [] and err is not None and err.startswith("ambiguous:")
+
+    assert resolve_light(_lights(), "Garage").status == "not_found"
+    ids2, err2 = resolve_set_state_device_ids(_lights(), "room:garage")
+    assert ids2 == [] and err2 is not None
+
+
+def test_present_lights_list_treats_unreachable_as_off() -> None:
+    from brain.mcp.lights import (
+        light_is_effectively_on,
+        parse_lights_list,
+        present_lights_list_json,
+    )
+
+    raw = json.dumps(
+        [
+            {"id": "1", "name": "Ballon", "room": "Kantoor", "isOn": False},
+            {
+                "id": "2",
+                "name": "plafond",
+                "room": "Keuken",
+                "isOn": True,
+                "reachable": False,
+            },
+        ]
+    )
+    assert not light_is_effectively_on(
+        {"name": "plafond", "isOn": True, "reachable": False}
+    )
+    out = present_lights_list_json(raw)
+    assert "all_off=true" in out
+    assert out.startswith("Note:")
+    parsed = parse_lights_list(out)
+    assert parsed is not None and len(parsed) == 2
+
+    on_raw = json.dumps(
+        [
+            {"id": "1", "name": "Ballon", "room": "Kantoor", "isOn": True},
+            {
+                "id": "2",
+                "name": "plafond",
+                "room": "Keuken",
+                "isOn": True,
+                "reachable": False,
+            },
+        ]
+    )
+    on_out = present_lights_list_json(on_raw)
+    assert "all_off=false" in on_out
+    assert "Ballon" in on_out
+    assert "effectively_on_count=1" in on_out
+
+    from brain.mcp.lights import (
+        MESH_UNREACHABLE_ERROR,
+        STALE_DEVICE_ID_ERROR,
+        extract_set_state_error_message,
+        format_set_state_failure_for_model,
+        is_stale_device_id_error,
+        present_lights_set_state_json,
+    )
+
+    raw = '{"success": false, "error": "Failed to reach Dirigera hub"}'
+    out = present_lights_set_state_json(raw)
+    assert out.startswith("Note:")
+    assert "failed" in out.lower()
+    assert "Failed to reach Dirigera hub" in out
+    assert extract_set_state_error_message(out) == "Failed to reach Dirigera hub"
+    assert "Failed to reach Dirigera hub" in format_set_state_failure_for_model(raw)
+    assert "do not claim" in format_set_state_failure_for_model(
+        '{"success": false}'
+    ).lower()
+
+    stale = f'{{"success": false, "error": "{STALE_DEVICE_ID_ERROR}"}}'
+    assert is_stale_device_id_error(stale)
+    assert not is_stale_device_id_error(
+        f'{{"success": false, "error": "{MESH_UNREACHABLE_ERROR}"}}'
+    )
+    mesh_out = present_lights_set_state_json(
+        f'{{"success": false, "error": "{MESH_UNREACHABLE_ERROR}"}}',
+        light={"name": "Ballon", "room": "Kantoor"},
+    )
+    assert MESH_UNREACHABLE_ERROR in mesh_out
+    assert "Ballon" in mesh_out

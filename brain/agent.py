@@ -16,6 +16,7 @@ from brain.mcp.errors import is_write_tool, tool_result_is_error
 from brain.mcp.tasks import complete_tool_succeeded
 from brain.mcp.lights import (
     build_set_state_args_from_user_message,
+    format_set_state_failure_for_model,
     light_set_state_args_from_user_message,
     set_state_tool_succeeded,
     user_message_requests_light_write,
@@ -669,10 +670,7 @@ def run_turn(
                 and not tool_result_is_error(result)
                 and not set_state_tool_succeeded(result)
             ):
-                result = (
-                    "error: homebase.lights.set_state did not succeed "
-                    "(success is not true). Pass the lamp name as device_id."
-                )
+                result = format_set_state_failure_for_model(result)
             if (
                 tc.function.name == "homebase.lights.party_mode"
                 and not tool_result_is_error(result)
@@ -760,10 +758,7 @@ def run_turn(
                         not tool_result_is_error(chain_result)
                         and not set_state_tool_succeeded(chain_result)
                     ):
-                        chain_result = (
-                            "error: homebase.lights.set_state did not succeed "
-                            "(success is not true). Pass the lamp name as device_id."
-                        )
+                        chain_result = format_set_state_failure_for_model(chain_result)
                     if on_tool_end is not None:
                         preview = (
                             chain_result

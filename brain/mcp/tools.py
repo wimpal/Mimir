@@ -18,15 +18,19 @@ from brain.mcp.tasks import (
     resolve_complete_ids,
 )
 from brain.mcp.lights import (
+    is_room_all_phrase,
+    is_stale_device_id_error,
     light_ambiguous_error,
     light_not_found_error,
     light_resolve_error,
+    looks_like_dirigera_device_id,
     parse_lights_list,
+    present_lights_list_json,
     present_lights_set_state_batch,
     present_lights_set_state_json,
     resolve_set_state_device_ids,
     room_phrase_from_target,
-    is_room_all_phrase,
+    set_state_tool_succeeded,
 )
 from brain.tools import Tool
 
@@ -105,6 +109,11 @@ def mcp_tool_to_local(
                 if tool_result_is_error(last_result):
                     return last_result
             return present_task_complete_json(last_result)
+        if name == "homebase.lights.list":
+            list_raw = bridge.call_tool_sync(name, args, timeout_s=timeout_s)
+            if tool_result_is_error(list_raw):
+                return list_raw
+            return present_lights_list_json(list_raw)
         if name == "homebase.lights.set_state":
             raw_device_id = str(args.get("device_id", "")).strip()
             if not raw_device_id:
@@ -157,12 +166,58 @@ def mcp_tool_to_local(
             by_id = {str(light["id"]): light for light in lights if light.get("id")}
             batch_results: list[dict[str, Any]] = []
             last_result = ""
+            stale_retried = False
             for device_id in device_ids:
                 call_args = {"device_id": device_id, **call_base}
                 last_result = bridge.call_tool_sync(name, call_args, timeout_s=timeout_s)
-                if tool_result_is_error(last_result):
-                    return last_result
                 light = by_id.get(device_id, {})
+                failed = tool_result_is_error(last_result) or not set_state_tool_succeeded(
+                    last_result
+                )
+                # Homebase: Unknown or stale device_id → fresh list + re-resolve once
+                # (prefer name/room phrase; never invent an id).
+                if (
+                    failed
+                    and not stale_retried
+                    and is_stale_device_id_error(last_result)
+                    and not looks_like_dirigera_device_id(raw_device_id)
+                ):
+                    stale_retried = True
+                    list_raw = bridge.call_tool_sync(
+                        "homebase.lights.list",
+                        {},
+                        timeout_s=timeout_s,
+                    )
+                    refreshed = parse_lights_list(list_raw)
+                    if refreshed is not None:
+                        lights = refreshed
+                        by_id = {
+                            str(light["id"]): light
+                            for light in lights
+                            if light.get("id")
+                        }
+                        new_ids, new_err = resolve_set_state_device_ids(
+                            lights, raw_device_id
+                        )
+                        if not new_err and new_ids:
+                            # Retry once with a freshly resolved id for this phrase.
+                            retry_id = (
+                                new_ids[0]
+                                if len(device_ids) == 1
+                                else (device_id if device_id in new_ids else new_ids[0])
+                            )
+                            call_args = {"device_id": retry_id, **call_base}
+                            last_result = bridge.call_tool_sync(
+                                name, call_args, timeout_s=timeout_s
+                            )
+                            device_id = retry_id
+                            light = by_id.get(device_id, {})
+                            failed = tool_result_is_error(
+                                last_result
+                            ) or not set_state_tool_succeeded(last_result)
+                if failed:
+                    # Stop the batch — do not claim success for remaining lamps.
+                    return present_lights_set_state_json(last_result, light=light)
                 batch_results.append(
                     {
                         "device_id": device_id,

@@ -9,6 +9,9 @@ from typing import Any, Literal
 
 from brain.mcp.errors import tool_result_is_error
 
+# Multi-word room capture: "living room", "dining room", or a single token.
+_ROOM_WORD = r"(?:[\w]+(?:\s+[\w]+)?)"
+
 _LAMP_NAME_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
@@ -21,18 +24,20 @@ _LAMP_NAME_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 _ROOM_ALL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:zet|doe|turn|switch)\s+(?:de\s+|het\s+)?(\w+)\s+lampen\b",
-        r"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(\w+)\s+(?:room\s+)?lights\b",
-        r"\b(?:alle\s+)?lichten\s+in\s+(?:de\s+)?(\w+)\b",
-        r"\blights?\s+in\s+(?:the\s+)?(\w+)\b",
+        rf"\b(?:zet|doe|turn|switch)\s+(?:de\s+|het\s+)?({_ROOM_WORD})\s+lampen\b",
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?({_ROOM_WORD})\s+(?:room\s+)?lights\b",
+        rf"\b(?:alle\s+)?lichten\s+in\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\b",
+        rf"\blights?\s+in\s+(?:the\s+|de\s+|het\s+)?({_ROOM_WORD})\b",
     )
 )
 
 _ROOM_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+|the\s+)?(\w+)\b",
-        r"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lamp)\s+in\s+(?:the\s+)?(\w+)\b",
+        rf"\b(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+|the\s+)?({_ROOM_WORD})\b",
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lamp)\s+in\s+(?:the\s+)?({_ROOM_WORD})\b",
+        # "turn off the office light" / "turn on the living room light" (singular)
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?({_ROOM_WORD})\s+(?:light|lamp)\b",
     )
 )
 
@@ -44,6 +49,36 @@ _ARTICLE_REPEAT = re.compile(r"\b(de|het|the)\s+(?:\1\s+)+", re.IGNORECASE)
 _COMPOUND_LAMPEN = re.compile(r"\b(\w+)lampen\b", re.IGNORECASE)
 _COMPOUND_LAMP = re.compile(r"\b(\w+)lamp\b", re.IGNORECASE)
 _FUZZY_ROOM_MAX_DISTANCE = 1
+
+# NL ↔ EN room aliases. Keys are canonical; match against hub `room` from lights.list
+# (household hubs use Dutch labels: Woonkamer, Kantoor, … — bidirectional anyway).
+_ROOM_ALIAS_GROUPS: dict[str, frozenset[str]] = {
+    "woonkamer": frozenset({"woonkamer", "living room", "livingroom", "living"}),
+    "kantoor": frozenset({"kantoor", "office", "kantor"}),
+    "keuken": frozenset({"keuken", "kitchen"}),
+    "slaapkamer": frozenset({"slaapkamer", "bedroom"}),
+    "badkamer": frozenset({"badkamer", "bathroom"}),
+    "eetkamer": frozenset({"eetkamer", "dining room", "diningroom", "dining"}),
+}
+
+_ALIAS_TO_CANONICAL: dict[str, str] = {
+    phrase: key
+    for key, phrases in _ROOM_ALIAS_GROUPS.items()
+    for phrase in phrases | {key}
+}
+# Compact form without spaces (livingroom) already in sets; also index space-stripped.
+for _key, _phrases in _ROOM_ALIAS_GROUPS.items():
+    for _p in _phrases:
+        _ALIAS_TO_CANONICAL.setdefault(_p.replace(" ", ""), _key)
+    _ALIAS_TO_CANONICAL.setdefault(_key.replace(" ", ""), _key)
+
+_MULTIWORD_ALIASES_LONGEST: tuple[str, ...] = tuple(
+    sorted(
+        {p for phrases in _ROOM_ALIAS_GROUPS.values() for p in phrases if " " in p},
+        key=len,
+        reverse=True,
+    )
+)
 
 
 def _edit_distance(a: str, b: str, *, max_distance: int = _FUZZY_ROOM_MAX_DISTANCE) -> int:
@@ -82,16 +117,76 @@ def _unique_room_names(lights: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _normalize_room(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _normalize_room_phrase(value: str | None) -> str:
+    """Lowercase + collapse whitespace for alias lookup."""
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def canonical_room_key(phrase: str | None) -> str:
+    """Map NL/EN room phrase (or hub label) to a canonical key; identity if unknown."""
+    lower = _normalize_room_phrase(phrase)
+    if not lower:
+        return ""
+    if lower in _ALIAS_TO_CANONICAL:
+        return _ALIAS_TO_CANONICAL[lower]
+    compact = lower.replace(" ", "")
+    if compact in _ALIAS_TO_CANONICAL:
+        return _ALIAS_TO_CANONICAL[compact]
+    return lower
+
+
+def _alias_phrases_for_hub_room(hub_room: str) -> set[str]:
+    """All phrases that should match this hub room label (including aliases)."""
+    key = canonical_room_key(hub_room)
+    phrases: set[str] = {key, _normalize_room_phrase(hub_room)}
+    phrases.update(_ROOM_ALIAS_GROUPS.get(key, frozenset()))
+    phrases.add(key.replace(" ", ""))
+    phrases.add(_normalize_room_phrase(hub_room).replace(" ", ""))
+    return {p for p in phrases if p}
+
+
+def rooms_equivalent(a: str | None, b: str | None) -> bool:
+    """True when two room phrases refer to the same hub room via aliases."""
+    ka, kb = canonical_room_key(a), canonical_room_key(b)
+    return bool(ka) and ka == kb
+
+
+def _expand_captured_room_hint(word: str, text: str) -> str:
+    """Prefer longest multi-word alias in the message when regex captured a short token."""
+    lower_word = _normalize_room_phrase(word)
+    if not lower_word or lower_word in _SKIP_HINT_WORDS:
+        return word
+    lower_text = text.lower()
+    for phrase in _MULTIWORD_ALIASES_LONGEST:
+        if phrase in lower_text and (
+            lower_word == phrase
+            or lower_word == phrase.split()[0]
+            or lower_word in phrase.split()
+        ):
+            return phrase
+    return word
+
+
 def _fuzzy_room_names(lights: list[dict[str, Any]], needle: str) -> list[str]:
     """Room names within edit distance of needle (for STT typos like kantor → kantoor)."""
     lower = needle.strip().lower()
     if not lower:
         return []
-    return [
-        room
-        for room in _unique_room_names(lights)
-        if _edit_distance(lower, room) <= _FUZZY_ROOM_MAX_DISTANCE
-    ]
+    matched: list[str] = []
+    for room in _unique_room_names(lights):
+        if _edit_distance(lower, room) <= _FUZZY_ROOM_MAX_DISTANCE:
+            matched.append(room)
+            continue
+        if any(
+            _edit_distance(lower, phrase) <= _FUZZY_ROOM_MAX_DISTANCE
+            for phrase in _alias_phrases_for_hub_room(room)
+        ):
+            matched.append(room)
+    return matched
 
 
 def _lights_for_fuzzy_room(lights: list[dict[str, Any]], needle: str) -> list[dict[str, Any]] | None:
@@ -104,6 +199,18 @@ def _lights_for_fuzzy_room(lights: list[dict[str, Any]], needle: str) -> list[di
         light
         for light in lights
         if _normalize_room(light.get("room")) == room
+    ]
+
+
+def _lights_for_aliased_room(lights: list[dict[str, Any]], needle: str) -> list[dict[str, Any]]:
+    """Lights whose hub room shares a canonical alias key with needle."""
+    key = canonical_room_key(needle)
+    if not key:
+        return []
+    return [
+        light
+        for light in lights
+        if canonical_room_key(light.get("room")) == key
     ]
 
 
@@ -129,10 +236,6 @@ def looks_like_dirigera_device_id(value: str) -> bool:
     return len(s) > 20 and "-" in s
 
 
-def _normalize_room(value: str | None) -> str:
-    return (value or "").strip().lower()
-
-
 def extract_room_all_hint(user_message: str) -> str | None:
     """Room name when user wants every lamp in that room (e.g. woonkamer lampen)."""
     text = _message_for_hints(user_message)
@@ -141,7 +244,7 @@ def extract_room_all_hint(user_message: str) -> str | None:
     for pattern in _ROOM_ALL_HINT_PATTERNS:
         match = pattern.search(text)
         if match:
-            word = match.group(1).strip()
+            word = _expand_captured_room_hint(match.group(1).strip(), text)
             if word.lower() not in _SKIP_HINT_WORDS:
                 return word
     return None
@@ -157,7 +260,7 @@ def extract_room_hint(user_message: str) -> str | None:
     for pattern in _ROOM_HINT_PATTERNS:
         match = pattern.search(text)
         if match:
-            word = match.group(1).strip()
+            word = _expand_captured_room_hint(match.group(1).strip(), text)
             if word.lower() not in _SKIP_HINT_WORDS:
                 return word
     return None
@@ -167,6 +270,15 @@ def extract_lamp_name_hint(user_message: str) -> str | None:
     """Best-effort single-lamp name from the user's latest message."""
     if extract_room_all_hint(user_message):
         return None
+    # Singular "… office light" / "… living room light" is a room hint, not a lamp name.
+    if extract_room_hint(user_message):
+        text = _message_for_hints(user_message)
+        if re.search(
+            rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?{_ROOM_WORD}\s+(?:light|lamp)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return None
     text = _message_for_hints(user_message)
     if not text:
         return None
@@ -264,7 +376,7 @@ def room_phrase_from_target(phrase: str) -> str:
 
 
 def lights_in_room(lights: list[dict[str, Any]], room_phrase: str) -> list[dict[str, Any]]:
-    """All lights whose room matches room_phrase (case-insensitive, trimmed)."""
+    """All lights whose room matches room_phrase (exact, partial, NL/EN alias, or fuzzy)."""
     lower = room_phrase.strip().lower()
     exact = [
         light
@@ -273,6 +385,9 @@ def lights_in_room(lights: list[dict[str, Any]], room_phrase: str) -> list[dict[
     ]
     if exact:
         return exact
+    aliased = _lights_for_aliased_room(lights, lower)
+    if aliased:
+        return aliased
     partial = [
         light
         for light in lights
@@ -339,7 +454,12 @@ def parse_lights_list(raw: str) -> list[dict[str, Any]] | None:
     if raw.startswith("error:"):
         return None
     body = raw.strip()
-    if "\n" in body and body.split("\n", 1)[0].startswith("Note:"):
+    # Strip leading Note: lines (status / set_state presentation wrappers).
+    while body.startswith("Note:") or (
+        "\n" in body and body.split("\n", 1)[0].startswith("Note:")
+    ):
+        if "\n" not in body:
+            return None
         body = body.split("\n", 1)[1].strip()
     try:
         parsed = json.loads(body)
@@ -389,6 +509,18 @@ def resolve_light(lights: list[dict[str, Any]], phrase: str) -> LightResolveResu
         return LightResolveResult(status="found", device_id=str(exact_room[0]["id"]))
     if len(exact_room) > 1:
         return LightResolveResult(status="ambiguous", matches=tuple(exact_room))
+
+    alias_room = _lights_for_aliased_room(lights, lower)
+    # Only treat as room-alias resolve when the phrase is an alias/hub room, not a lamp name.
+    if alias_room and (
+        lower in _ALIAS_TO_CANONICAL
+        or lower.replace(" ", "") in _ALIAS_TO_CANONICAL
+        or any(rooms_equivalent(lower, light.get("room")) for light in lights)
+    ):
+        if len(alias_room) == 1:
+            return LightResolveResult(status="found", device_id=str(alias_room[0]["id"]))
+        if len(alias_room) > 1:
+            return LightResolveResult(status="ambiguous", matches=tuple(alias_room))
 
     partial_name = [
         light
@@ -451,17 +583,143 @@ def light_ambiguous_error(phrase: str, matches: list[dict[str, Any]]) -> str:
     return light_resolve_error("ambiguous", hint)
 
 
+_LIGHTS_LIST_STATUS_NOTE = (
+    "Note: for 'which lights are on' / status questions — a lamp counts as **on** only when "
+    "`isOn: true` **and** `reachable` is not false. Treat `reachable: false` as **off** "
+    "(mesh offline). If no lamps are effectively on, reply in one short sentence that all "
+    "IKEA lights are off — do not narrate every room or name offline lamps. When naming "
+    "lamps that are on, use name + room; do not mention reachable/offline unless asked."
+)
+
 _LIGHTS_SET_STATE_NOTE = (
     "Note: homebase.lights.set_state succeeded when success is true. "
     "Lights toggles are not in homebase.changes v1 — no revert. "
     "When devices_toggled > 1, every listed lamp was updated — name each in the reply."
 )
 
+
+def light_is_effectively_on(light: dict[str, Any]) -> bool:
+    """Household status rule: unreachable lamps count as off."""
+    if light.get("reachable") is False:
+        return False
+    return light.get("isOn") is True
+
+
+def present_lights_list_json(text: str) -> str:
+    """Annotate lights.list for status replies (unreachable = off; empty → all off)."""
+    stripped = text.strip()
+    if not stripped or stripped.startswith("error:"):
+        return text
+    lights = parse_lights_list(stripped)
+    if lights is None:
+        return text
+    on_lamps = [light for light in lights if light_is_effectively_on(light)]
+    if not on_lamps:
+        status_line = (
+            "Note: status summary — effectively_on_count=0 all_off=true. "
+            "Reply that all IKEA lights are off (one short sentence)."
+        )
+    else:
+        labels = ", ".join(
+            f"{light.get('name') or '?'} ({light.get('room') or '?'})"
+            for light in on_lamps
+        )
+        status_line = (
+            f"Note: status summary — effectively_on_count={len(on_lamps)} "
+            f"all_off=false; on: {labels}. Name only these as on."
+        )
+    body = json.dumps(lights, ensure_ascii=False)
+    return f"{_LIGHTS_LIST_STATUS_NOTE}\n{status_line}\n{body}"
+
+
 _LIGHTS_UNREACHABLE_NOTE = (
     "Note: hub reports reachable: false — isOn from list may be stale. "
     "Confirm from success: true; do not tell the user the lamp was already on/off "
     "from list data alone."
 )
+
+_LIGHTS_SET_STATE_FAIL_NOTE = (
+    "Note: homebase.lights.set_state failed (success is false). "
+    "Quote the JSON `error` string to the user (exact Homebase text); "
+    "do not claim the lamp changed. If name/room are present, say which lamp failed. "
+    "On 'Unknown or stale device_id', call lights.list and pass name/room — never invent an id. "
+    "On 'Device unreachable (Zigbee mesh)', the hub refused the write (mesh); try again later."
+)
+
+# Stable Homebase lights.set_state error strings (contracts/homebase.tools.yaml).
+HOMEBASE_LIGHTS_SET_STATE_ERRORS = frozenset(
+    {
+        "Dirigera not configured",
+        "Failed to reach Dirigera hub",
+        "Dirigera authentication failed",
+        "Unknown or stale device_id",
+        "Device unreachable (Zigbee mesh)",
+    }
+)
+STALE_DEVICE_ID_ERROR = "Unknown or stale device_id"
+MESH_UNREACHABLE_ERROR = "Device unreachable (Zigbee mesh)"
+
+
+def _strip_leading_notes(text: str) -> str:
+    body = text.strip()
+    while body.startswith("Note:") or (
+        "\n" in body and body.split("\n", 1)[0].startswith("Note:")
+    ):
+        if "\n" not in body:
+            return ""
+        body = body.split("\n", 1)[1].strip()
+    return body
+
+
+def extract_set_state_error_message(text: str) -> str | None:
+    """Pull Homebase error string from a set_state tool result, if present."""
+    body = _strip_leading_notes(text)
+    if not body:
+        return None
+    if body.startswith("error:"):
+        rest = body[len("error:") :].strip()
+        try:
+            parsed = json.loads(rest)
+        except json.JSONDecodeError:
+            return rest or None
+        if isinstance(parsed, dict):
+            err = parsed.get("error")
+            if isinstance(err, dict) and err.get("message"):
+                return str(err["message"])
+            if isinstance(err, str) and err:
+                return err
+            if parsed.get("message"):
+                return str(parsed["message"])
+        return rest or None
+    if not body.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    err = parsed.get("error")
+    if isinstance(err, str) and err:
+        return err
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"])
+    if parsed.get("success") is False:
+        return "success is not true"
+    return None
+
+
+def is_stale_device_id_error(text: str) -> bool:
+    return extract_set_state_error_message(text) == STALE_DEVICE_ID_ERROR
+
+
+def format_set_state_failure_for_model(text: str) -> str:
+    """Ensure the model sees a clear failure with Homebase error text."""
+    detail = extract_set_state_error_message(text) or "success is not true"
+    return (
+        f"error: homebase.lights.set_state failed: {detail}. "
+        "Quote that error to the user; do not claim the lamp changed."
+    )
 
 
 def present_lights_set_state_batch(
@@ -487,7 +745,7 @@ def present_lights_set_state_json(
     *,
     light: dict[str, Any] | None = None,
 ) -> str:
-    """Add success hint and optional list snapshot so the model trusts success: true."""
+    """Add success/failure hint and optional list snapshot for the model."""
     stripped = text.strip()
     if not stripped or stripped.startswith("error:") or stripped[:1] != "{":
         return text
@@ -495,8 +753,23 @@ def present_lights_set_state_json(
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
         return text
-    if not isinstance(parsed, dict) or parsed.get("error") or not parsed.get("success"):
+    if not isinstance(parsed, dict):
         return text
+
+    if parsed.get("success") is False or (
+        "error" in parsed and parsed.get("success") is not True
+    ):
+        if light:
+            if light.get("name") is not None:
+                parsed.setdefault("name", light.get("name"))
+            if light.get("room") is not None:
+                parsed.setdefault("room", light.get("room"))
+        body = json.dumps(parsed, ensure_ascii=False)
+        return f"{_LIGHTS_SET_STATE_FAIL_NOTE}\n{body}"
+
+    if parsed.get("error") or not parsed.get("success"):
+        return text
+
     if light:
         if light.get("name") is not None:
             parsed.setdefault("name", light.get("name"))
@@ -517,13 +790,7 @@ def present_lights_set_state_json(
 def set_state_tool_succeeded(text: str) -> bool:
     if tool_result_is_error(text):
         return False
-    body = text.strip()
-    while body.startswith("Note:") or (
-        "\n" in body and body.split("\n", 1)[0].startswith("Note:")
-    ):
-        if "\n" not in body:
-            return False
-        body = body.split("\n", 1)[1].strip()
+    body = _strip_leading_notes(text)
     if not body.startswith("{"):
         return False
     try:
