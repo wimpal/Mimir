@@ -18,6 +18,13 @@ from brain.mcp.tasks import (
     resolve_complete_ids,
 )
 from brain.mcp.lights import (
+    DEVICE_NO_COLOUR_ERROR,
+    DEVICE_NO_COLOR_TEMP_ERROR,
+    args_request_color_temp,
+    args_request_colour,
+    capability_error_for_light,
+    format_capability_failure,
+    is_house_all_phrase,
     is_room_all_phrase,
     is_stale_device_id_error,
     light_ambiguous_error,
@@ -161,13 +168,56 @@ def mcp_tool_to_local(
                 return light_not_found_error(raw_device_id, known=labels)
             on_value = args.get("on")
             call_base: dict[str, Any] = {"on": on_value}
-            if "brightness" in args:
-                call_base["brightness"] = args["brightness"]
+            for key in (
+                "brightness",
+                "color_temp_kelvin",
+                "color_preset",
+                "color_hex",
+            ):
+                if key in args and args[key] is not None:
+                    call_base[key] = args[key]
+            # Prefer color_preset over color_hex when both present.
+            if "color_preset" in call_base and "color_hex" in call_base:
+                call_base.pop("color_hex", None)
             by_id = {str(light["id"]): light for light in lights if light.get("id")}
+            house_wide = is_house_all_phrase(raw_device_id)
+            wants_colour = args_request_colour(call_base)
+            wants_ct = args_request_color_temp(call_base)
+            if len(device_ids) == 1 and (wants_colour or wants_ct):
+                target_light = by_id.get(device_ids[0], {})
+                cap_err = capability_error_for_light(target_light, call_base)
+                if cap_err:
+                    return format_capability_failure(cap_err, light=target_light)
+            skipped_pre: list[dict[str, Any]] = []
+            if house_wide:
+                for light in lights:
+                    if light.get("id") and light.get("reachable") is False:
+                        skipped_pre.append(
+                            {
+                                "device_id": str(light["id"]),
+                                "name": light.get("name"),
+                                "room": light.get("room"),
+                            }
+                        )
             batch_results: list[dict[str, Any]] = []
+            skipped_runtime: list[dict[str, Any]] = []
             last_result = ""
             stale_retried = False
             for device_id in device_ids:
+                light = by_id.get(device_id, {})
+                # Batch colour/CT: skip lamps that explicitly lack the capability.
+                if len(device_ids) > 1 and (wants_colour or wants_ct):
+                    cap_err = capability_error_for_light(light, call_base)
+                    if cap_err:
+                        skipped_runtime.append(
+                            {
+                                "device_id": device_id,
+                                "name": light.get("name"),
+                                "room": light.get("room"),
+                                "reason": cap_err,
+                            }
+                        )
+                        continue
                 call_args = {"device_id": device_id, **call_base}
                 last_result = bridge.call_tool_sync(name, call_args, timeout_s=timeout_s)
                 light = by_id.get(device_id, {})
@@ -216,6 +266,31 @@ def mcp_tool_to_local(
                                 last_result
                             ) or not set_state_tool_succeeded(last_result)
                 if failed:
+                    # Hub capability errors in a batch: skip that lamp, continue others.
+                    if len(device_ids) > 1 and (
+                        DEVICE_NO_COLOUR_ERROR in last_result
+                        or DEVICE_NO_COLOR_TEMP_ERROR in last_result
+                    ):
+                        skipped_runtime.append(
+                            {
+                                "device_id": device_id,
+                                "name": light.get("name"),
+                                "room": light.get("room"),
+                            }
+                        )
+                        continue
+                    if house_wide and (
+                        "unreachable" in last_result.lower()
+                        or "Device unreachable" in last_result
+                    ):
+                        skipped_runtime.append(
+                            {
+                                "device_id": device_id,
+                                "name": light.get("name"),
+                                "room": light.get("room"),
+                            }
+                        )
+                        continue
                     # Stop the batch — do not claim success for remaining lamps.
                     return present_lights_set_state_json(last_result, light=light)
                 batch_results.append(
@@ -225,14 +300,38 @@ def mcp_tool_to_local(
                         "room": light.get("room"),
                     }
                 )
-            if len(batch_results) > 1:
+            skipped_all = skipped_pre + skipped_runtime
+            if not batch_results and skipped_all and (wants_colour or wants_ct):
+                # Every target lacked colour/CT support.
+                sample = by_id.get(str(skipped_all[0].get("device_id") or ""), {})
+                err = (
+                    DEVICE_NO_COLOUR_ERROR
+                    if wants_colour
+                    else DEVICE_NO_COLOR_TEMP_ERROR
+                )
+                return format_capability_failure(err, light=sample or None)
+            if house_wide:
+                if not batch_results and skipped_all:
+                    return light_resolve_error(
+                        "not_found",
+                        "no includable lights for house-wide set_state",
+                    )
+                return present_lights_set_state_batch(
+                    batch_results,
+                    on=bool(on_value),
+                    skipped=skipped_all,
+                    house_wide=True,
+                )
+            if len(batch_results) > 1 or (
+                len(device_ids) > 1 and batch_results
+            ):
                 room_label = (
                     room_phrase_from_target(raw_device_id)
                     if is_room_all_phrase(raw_device_id)
                     else None
                 )
                 return present_lights_set_state_batch(
-                    batch_results, on=bool(on_value), room=room_label
+                    batch_results, on=bool(on_value), room=room_label, skipped=skipped_all
                 )
             single_light = by_id.get(device_ids[0], {}) if device_ids else {}
             return present_lights_set_state_json(last_result, light=single_light)

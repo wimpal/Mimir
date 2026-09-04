@@ -23,10 +23,13 @@ _TASK_COMPLETE_NUDGE = (
 
 _LIGHTS_SET_STATE_NUDGE = (
     "System correction (do not repeat to the user): the user asked to change a light "
-    "THIS turn. Call homebase.lights.set_state now — pass lamp **name** or room:room "
-    "(e.g. room:woonkamer for all lamps in Woonkamer) as device_id, and set `on` from "
-    "aan/uit (true/false). Do not list again without set_state. Do not confirm without "
-    "a tool result showing success: true."
+    "THIS turn. Call homebase.lights.set_state now — pass lamp **name**, room:room "
+    "(e.g. room:woonkamer for all lamps in Woonkamer), or all: for house-wide on/off "
+    "as device_id. For dim/warmth/colour: set `on: true` plus `brightness` (0–100), "
+    "`color_temp_kelvin` (warm≈2700, cool≈4000), or `color_preset` (prefer over "
+    "color_hex); never colour and color temperature together. For aan/uit use `on` "
+    "true/false. Do not call party_mode for routine all-lights on/off. Do not list "
+    "again without set_state. Do not confirm without a tool result showing success: true."
 )
 
 _WRITE_NUDGE_GENERIC = (
@@ -71,6 +74,12 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\blist\s+(the\s+)?lamps?\b",
         r"\bwelke\s+(lampen|lichten)\b",
         r"\blichten?\s+in\s+\w+",
+        # Colour/brightness status questions (T-040) — before appearance mutations
+        # Only pure questions (no make/zet/dim imperative in the same message).
+        r"^(?=.*\b(what|which|welke|hoe)\b)(?!.*(make|maak|zet|doe|dim|turn\s+\w+\s+to))\b.*\b(colour|color|kleur|brightness|warmth)\b",
+        r"^(?=.*\bwhat\s+(colour|color)\s+is\b)(?!.*(make|maak|zet|doe|dim))",
+        r"^(?=.*\bwelke\s+kleur\b)(?!.*(make|maak|zet|doe|dim))",
+        r"^(?=.*\bhoe\s+fel\b)(?!.*(make|maak|zet|doe|dim))",
     )
 )
 
@@ -118,6 +127,16 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bturn\s+(on|off)\b",
         r"\bswitch\b.*\b(on|off)\b",
         r"\bdim\b.*\b\d+\s*%",
+        r"\bdim\b.*\b(lamp|light|ballon|licht)\b",
+        r"\b(bright(?:en)?|brightness)\b.*\b(lamp|light|to\s+\d+)\b",
+        r"\bzet\b.*\bop\s+\d+\s*%",
+        r"\b(make|maak|zet|doe)\b.*\b(warm(?:e)?\s+wit|warm\s+white|cool\s+white|koel)\b",
+        r"\bturn\b.*\b(cool\s+white|warm\s+white|warm(?:e)?\s+wit)\b",
+        r"\b(warme?\s+wit|warm\s+white)\b.*\b(lamp|licht|ballon|kantoor|in)\b",
+        r"\b(make|maak|zet|doe|turn)\b.*\b\d{4}\s*(k|kelvin)\b",
+        r"\b(make|maak|zet|doe|turn)\b.*\b(red|rood|blue|blauw|green|groen|yellow|geel|"
+        r"pink|roze|purple|paars|orange|oranje|cyan)\b",
+        r"\bzet\b.*\blamp\b.*\bop\b",
         r"\bzet\b.*\b(het\s+)?licht\b.*\b(aan|uit)\b",
         r"\bzet\b.*\b(\w+)\s+lamp\b.*\b(aan|uit)\b",
         r"\bdoe\b.*\b(het\s+)?licht\b.*\b(aan|uit)\b",
@@ -144,10 +163,35 @@ def user_message_requests_write(text: str) -> bool:
     if not (text or "").strip():
         return False
     from brain.mcp.lights import message_for_hints
-    from brain.mcp.party_mode import user_message_requests_party_mode
+    from brain.mcp.party_mode import (
+        LightsWriteIntent,
+        classify_lights_write_intent,
+        user_message_requests_house_wide_lights,
+        user_message_requests_party_mode,
+    )
 
     normalized = message_for_hints(text)
+    # Lights classifiers before broad lights-in-room read-only patterns
+    # ("light in the house" must not suppress house-wide on/off).
+    intent = classify_lights_write_intent(normalized)
+    if intent in {
+        LightsWriteIntent.PARTY,
+        LightsWriteIntent.HOUSE_WIDE,
+    }:
+        return True
+    if intent == LightsWriteIntent.REFUSED_PARTY:
+        return user_message_requests_house_wide_lights(
+            normalized
+        ) or any(p.search(normalized) for p in _MUTATION_PATTERNS)
     if any(p.search(normalized) for p in _READ_ONLY_PATTERNS):
+        return False
+    # Negated appearance / toggle ("don't make it red", "niet rood")
+    if re.search(
+        r"\b(don'?t|do\s+not|niet|geen)\b.*\b(make|zet|doe|turn|dim|"
+        r"red|rood|warm|cool|lamp|licht)\b",
+        normalized,
+        re.IGNORECASE,
+    ):
         return False
     if user_message_requests_party_mode(normalized):
         return True
@@ -157,7 +201,11 @@ def user_message_requests_write(text: str) -> bool:
 def write_retry_nudge(user_message: str) -> str:
     """Prompt the model to call a write tool when it replied without one."""
     from brain.mcp.lights import message_for_hints
-    from brain.mcp.party_mode import user_message_requests_party_mode
+    from brain.mcp.party_mode import (
+        LightsWriteIntent,
+        classify_lights_write_intent,
+        party_mode_disallowed_this_turn,
+    )
 
     normalized = message_for_hints(user_message)
     if re.search(
@@ -172,12 +220,20 @@ def write_retry_nudge(user_message: str) -> str:
         re.IGNORECASE,
     ):
         return _TASK_COMPLETE_NUDGE
-    if user_message_requests_party_mode(normalized):
+    intent = classify_lights_write_intent(normalized)
+    if intent == LightsWriteIntent.PARTY and not party_mode_disallowed_this_turn(
+        normalized
+    ):
         return _PARTY_MODE_NUDGE
-    if re.search(
+    if intent in {
+        LightsWriteIntent.HOUSE_WIDE,
+        LightsWriteIntent.REFUSED_PARTY,
+    } or re.search(
         r"\b(turn\s+(on|off)|switch\b.*\b(on|off)\b|"
         r"zet\b.*\blicht\b|doe\b.*\blicht\b.*\b(aan|uit)\b|"
-        r"lamp(en)?\b.*\b(aan|uit)\b|dim\b.*\d+\s*%|"
+        r"lamp(en)?\b.*\b(aan|uit)\b|dim\b|"
+        r"(?:make|zet|doe|turn)\b.*\b(warm|cool|koel|red|rood|\d+\s*%|\d{4}\s*k)|"
+        r"warm(?:e)?\s+wit|warm\s+white|\d{4}\s*(?:k|kelvin)|"
         r"(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+)?\w+\b.*\b(aan|uit)\b|"
         r"(?:zet|doe|turn|switch)\b.*\blampen\b)\b",
         normalized,
@@ -191,6 +247,26 @@ def check_write_allowed(tool_name: str, user_message: str) -> str | None:
     """Return an error string when a write tool must be blocked, else None."""
     if not is_write_tool(tool_name):
         return None
+    from brain.mcp.party_mode import (
+        LightsWriteIntent,
+        classify_lights_write_intent,
+        party_mode_disallowed_this_turn,
+    )
+
+    if tool_name == "homebase.lights.party_mode" and party_mode_disallowed_this_turn(
+        user_message
+    ):
+        return (
+            "error: write blocked — party_mode not allowed for this turn "
+            "(need explicit party/feest/disco; house-wide on/off uses set_state)"
+        )
+    if tool_name == "homebase.lights.set_state":
+        intent = classify_lights_write_intent(user_message)
+        if intent == LightsWriteIntent.PARTY:
+            return (
+                "error: write blocked — party mode uses homebase.lights.party_mode, "
+                "not set_state"
+            )
     if user_message_requests_write(user_message):
         return None
     return (

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from brain.agent import StoppedReason, run_turn
 from brain.mcp.log import mcp_tools_log_path
-from brain.mcp.write_guard import check_write_allowed, user_message_requests_write
+from brain.mcp.write_guard import (
+    check_write_allowed,
+    user_message_requests_write,
+    write_retry_nudge,
+)
 from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
 from brain.tools import Tool
 
@@ -108,6 +112,45 @@ def test_lights_mutation_phrases_request_write() -> None:
     ) is None
 
 
+def test_t040_appearance_phrases_request_write() -> None:
+    for msg in (
+        "Zet Ballon op 40%",
+        "Dim Ballon to 40%",
+        "Make Ballon warm white",
+        "Maak Ballon warm wit",
+        "Turn Ballon to 2700K",
+        "Turn Ballon to cool white",
+        "Zet paarse lamp op rood",
+        "Make paarse lamp red",
+        "zet de woonkamer lampen op rood",
+        "maak de woonkamer lampen blauw",
+        "make the living room lights blue",
+        "warme wit in kantoor",
+    ):
+        assert user_message_requests_write(msg), msg
+        assert check_write_allowed("homebase.lights.set_state", msg) is None, msg
+    nudge = write_retry_nudge("Make Ballon warm white")
+    assert "color_temp_kelvin" in nudge or "color_preset" in nudge
+    assert "on: true" in nudge
+
+
+def test_t040_appearance_questions_and_negations_do_not_request_write() -> None:
+    assert not user_message_requests_write("What colour is Ballon?")
+    assert not user_message_requests_write("Don't make Ballon red")
+    assert not user_message_requests_write("Do not make Ballon warm white")
+    assert not user_message_requests_write("What does 2700K mean?")
+    assert check_write_allowed(
+        "homebase.lights.set_state", "What colour is Ballon?"
+    ) is not None
+    assert check_write_allowed(
+        "homebase.lights.set_state", "Don't make Ballon red"
+    ) is not None
+    assert check_write_allowed(
+        "homebase.lights.set_state", "What does 2700K mean?"
+    ) is not None
+    # Compound: question + imperative still allows write.
+    assert user_message_requests_write("What colour is Ballon? Make it red")
+
 def test_check_write_allowed_blocks_lights_set_state_for_read() -> None:
     err = check_write_allowed(
         "homebase.lights.set_state",
@@ -132,6 +175,42 @@ def test_party_mode_mutation_phrases_request_write() -> None:
     assert user_message_requests_write("feestmodus")
     assert user_message_requests_write("disco")
     assert check_write_allowed("homebase.lights.party_mode", "Party mode!") is None
+
+
+def test_house_wide_blocks_party_mode_allows_set_state() -> None:
+    msg = "Turn on every light in the house"
+    assert user_message_requests_write(msg)
+    blocked = check_write_allowed("homebase.lights.party_mode", msg)
+    assert blocked is not None
+    assert "party_mode not allowed" in blocked
+    assert check_write_allowed("homebase.lights.set_state", msg) is None
+    nudge = write_retry_nudge(msg)
+    assert "set_state" in nudge
+    assert "party_mode" not in nudge.lower() or "Do not call party_mode" in nudge
+
+
+def test_refusal_plus_all_on_blocks_party_mode() -> None:
+    msg = "No, not party mode. Simply turn on all of the lights."
+    assert user_message_requests_write(msg)
+    blocked = check_write_allowed("homebase.lights.party_mode", msg)
+    assert blocked is not None
+    assert check_write_allowed("homebase.lights.set_state", msg) is None
+
+
+def test_bare_confirm_does_not_trip_party_house_wide_block() -> None:
+    """M3 yes/ja must not be treated as house-wide; party requires explicit phrase."""
+    err = check_write_allowed("homebase.lights.party_mode", "yes")
+    assert err is not None
+    # Positive party gate (not house-wide-specific wording).
+    assert "party_mode not allowed" in err or "did not request a mutation" in err
+
+
+def test_ordinary_light_toggle_blocks_party_mode() -> None:
+    err = check_write_allowed("homebase.lights.party_mode", "Turn off Ballon")
+    assert err is not None
+    assert "party_mode not allowed" in err
+    assert check_write_allowed("homebase.lights.set_state", "Turn off Ballon") is None
+    assert check_write_allowed("homebase.lights.set_state", "Party mode!") is not None
 
 
 def test_check_write_allowed_blocks_party_mode_for_read() -> None:
@@ -162,6 +241,108 @@ def _write_tool(name: str, result: str) -> Tool:
         execute=execute,
         service="homebase" if name.startswith("homebase.") else "budgettracker",
     )
+
+
+def _recording_tools() -> tuple[dict[str, Tool], list[str]]:
+    called: list[str] = []
+
+    def list_execute(**kwargs: object) -> str:
+        called.append("homebase.lights.list")
+        return json.dumps(
+            [
+                {
+                    "id": "a1",
+                    "name": "Ballon",
+                    "room": "Kantoor",
+                    "isOn": False,
+                    "reachable": True,
+                },
+                {
+                    "id": "a2",
+                    "name": "eettafel",
+                    "room": "Woonkamer",
+                    "isOn": False,
+                    "reachable": True,
+                },
+            ]
+        )
+
+    def set_execute(**kwargs: object) -> str:
+        called.append("homebase.lights.set_state")
+        return (
+            'Note: ok\n'
+            '{"success": true, "on": true, "devices_toggled": 2, '
+            '"names": ["Ballon", "eettafel"], "house_wide": true}'
+        )
+
+    def party_execute(**kwargs: object) -> str:
+        called.append("homebase.lights.party_mode")
+        return '{"success": true, "devices_affected": 2}'
+
+    registry = {
+        "homebase.lights.list": Tool(
+            name="homebase.lights.list",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            execute=list_execute,
+            service="homebase",
+        ),
+        "homebase.lights.set_state": Tool(
+            name="homebase.lights.set_state",
+            description="set",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                },
+            },
+            execute=set_execute,
+            service="homebase",
+        ),
+        "homebase.lights.party_mode": Tool(
+            name="homebase.lights.party_mode",
+            description="party",
+            parameters={"type": "object", "properties": {}},
+            execute=party_execute,
+            service="homebase",
+        ),
+    }
+    return registry, called
+
+
+def test_agent_reroutes_party_mode_to_house_wide_set_state() -> None:
+    """T-041: model calls party_mode for all-lights → set_state runs, party never."""
+    registry, called = _recording_tools()
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.lights.party_mode",
+                            arguments={},
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="All lights are on, sir.",
+            ),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="Turn on every light in the house")],
+        tools=registry,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "homebase.lights.party_mode" not in called
+    assert "homebase.lights.set_state" in called
+    assert "All lights are on" in (result.content or "")
 
 
 def test_agent_nudges_when_write_skipped_then_completes() -> None:

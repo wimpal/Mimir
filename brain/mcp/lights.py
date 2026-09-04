@@ -15,17 +15,73 @@ _ROOM_WORD = r"(?:[\w]+(?:\s+[\w]+)?)"
 _LAMP_NAME_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(?:zet|doe|turn|switch)\s+(?:de\s+|het\s+)?(\w+)\s+lamp\b",
+        r"\b(?:zet|doe|turn|switch|maak)\s+(?:de\s+|het\s+)?(\w+)\s+lamp\b",
+        # T-040 appearance: "Zet Ballon op 40%", "Dim Ballon to 40%", …
+        r"\b(?:zet|doe|maak)\s+(?:de\s+|het\s+)?(\w+)\s+op\b",
+        r"\bdim\s+(?:de\s+|het\s+|the\s+)?(\w+)\b",
+        r"\b(?:make|maak)\s+(?:de\s+|het\s+|the\s+)?(\w+)\b",
+        r"\bturn\s+(?:de\s+|het\s+|the\s+)?(\w+)\s+to\b",
         r"\b(?:turn|switch)\s+(?:on|off)\s+(\w+)\b",
         r"\blamp\s+(\w+)\b",
     )
 )
 
+# Warmth defaults (Tradfri / handoff T-040).
+_WARM_KELVIN = 2700
+_COOL_KELVIN = 4000
+
+# Tiny NL/EN colour name → IKEA Tradfri chromatic preset id.
+_COLOUR_NAME_TO_PRESET: dict[str, str] = {
+    "red": "saturated_red",
+    "rood": "saturated_red",
+    "blue": "blue",
+    "blauw": "blue",
+    "green": "lime",
+    "groen": "lime",
+    "lime": "lime",
+    "yellow": "yellow",
+    "geel": "yellow",
+    "pink": "pink",
+    "roze": "pink",
+    "purple": "saturated_purple",
+    "paars": "saturated_purple",
+    "orange": "peach",
+    "oranje": "peach",
+    "peach": "peach",
+    "amber": "warm_amber",
+    "cyan": "light_blue",
+    "turquoise": "light_blue",
+}
+
+_BRIGHTNESS_RE = re.compile(r"\b(\d{1,3})\s*%", re.IGNORECASE)
+_KELVIN_RE = re.compile(r"\b(\d{4})\s*(?:k|kelvin)\b", re.IGNORECASE)
+_WARM_RE = re.compile(
+    r"\b(?:warm(?:e)?\s+wit|warm\s+white|warm(?:e)?)\b", re.IGNORECASE
+)
+_COOL_RE = re.compile(
+    r"\b(?:cool\s+white|koel(?:e)?\s+wit|cool|koel)\b", re.IGNORECASE
+)
+_COLOUR_WORD_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_COLOUR_NAME_TO_PRESET, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+_APPEARANCE_KEYS = frozenset(
+    {"brightness", "color_temp_kelvin", "color_preset", "color_hex"}
+)
+_COLOUR_KEYS = frozenset({"color_preset", "color_hex"})
+
+# Stable Homebase capability errors (T-040).
+DEVICE_NO_COLOUR_ERROR = "Device does not support colour"
+DEVICE_NO_COLOR_TEMP_ERROR = "Device does not support color temperature"
+COLOUR_AND_CT_BOTH_ERROR = "Specify colour or color temperature, not both"
+INVALID_COLOUR_OR_CT_ERROR = "Invalid colour or color temperature"
+
 _ROOM_ALL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        rf"\b(?:zet|doe|turn|switch)\s+(?:de\s+|het\s+)?({_ROOM_WORD})\s+lampen\b",
+        rf"\b(?:zet|doe|turn|switch|maak|make)\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\s+lampen\b",
         rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?({_ROOM_WORD})\s+(?:room\s+)?lights\b",
+        rf"\b(?:make|maak)\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\s+(?:room\s+)?lights\b",
         rf"\b(?:alle\s+)?lichten\s+in\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\b",
         rf"\blights?\s+in\s+(?:the\s+|de\s+|het\s+)?({_ROOM_WORD})\b",
     )
@@ -42,8 +98,9 @@ _ROOM_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 _ROOM_ALL_PREFIX = "room:"
+_HOUSE_ALL_PREFIX = "all:"
 _SKIP_HINT_WORDS = frozenset(
-    {"de", "het", "the", "a", "an", "on", "off", "aan", "uit", "alle", "all"}
+    {"de", "het", "the", "a", "an", "on", "off", "aan", "uit", "alle", "all", "every"}
 )
 _ARTICLE_REPEAT = re.compile(r"\b(de|het|the)\s+(?:\1\s+)+", re.IGNORECASE)
 _COMPOUND_LAMPEN = re.compile(r"\b(\w+)lampen\b", re.IGNORECASE)
@@ -294,6 +351,10 @@ def extract_lamp_name_hint(user_message: str) -> str | None:
 
 def prefer_device_id_for_set_state(user_message: str, model_device_id: str) -> str:
     """Prefer user intent over a model-copied Dirigera uuid."""
+    from brain.mcp.party_mode import user_message_requests_house_wide_lights
+
+    if user_message_requests_house_wide_lights(user_message):
+        return _HOUSE_ALL_PREFIX
     room_all = extract_room_all_hint(user_message)
     if room_all:
         return f"{_ROOM_ALL_PREFIX}{room_all}"
@@ -303,7 +364,11 @@ def prefer_device_id_for_set_state(user_message: str, model_device_id: str) -> s
     room_hint = extract_room_hint(user_message)
     if room_hint:
         return room_hint
-    return model_device_id.strip()
+    # Reject model-invented house-wide target without classifier validation.
+    raw = model_device_id.strip()
+    if is_house_all_phrase(raw):
+        return ""
+    return raw
 
 
 def infer_light_on_from_user_message(user_message: str) -> bool | None:
@@ -318,16 +383,138 @@ def infer_light_on_from_user_message(user_message: str) -> bool | None:
     return None
 
 
+def infer_brightness_from_user_message(user_message: str) -> int | None:
+    """Absolute brightness 0–100 from a percent in the message, if any."""
+    match = _BRIGHTNESS_RE.search(user_message or "")
+    if not match:
+        return None
+    value = int(match.group(1))
+    return max(0, min(100, value))
+
+
+def infer_color_temp_kelvin_from_user_message(user_message: str) -> int | None:
+    """Kelvin from NNNNK / kelvin, or warm≈2700 / cool≈4000 defaults."""
+    text = user_message or ""
+    kelvin_match = _KELVIN_RE.search(text)
+    if kelvin_match:
+        return int(kelvin_match.group(1))
+    # Explicit Kelvin wins over warm/cool adjectives; check kelvin first above.
+    if _WARM_RE.search(text):
+        return _WARM_KELVIN
+    if _COOL_RE.search(text):
+        return _COOL_KELVIN
+    return None
+
+
+def infer_color_preset_from_user_message(user_message: str) -> str | None:
+    """Map a tiny NL/EN colour name to a Tradfri chromatic preset id.
+
+    Prefers the colour after op/to; otherwise the last colour token when several
+    appear (so "Make purple lamp red" → red, not purple). Ignores a lone colour
+    word that is only the lamp name in an on/off toggle.
+    """
+    text = user_message or ""
+    colour_alt = "|".join(
+        re.escape(k) for k in sorted(_COLOUR_NAME_TO_PRESET, key=len, reverse=True)
+    )
+    after_op = re.search(
+        rf"\b(?:op|to)\s+({colour_alt})\b", text, re.IGNORECASE
+    )
+    if after_op:
+        return _COLOUR_NAME_TO_PRESET.get(after_op.group(1).lower())
+
+    matches = list(_COLOUR_WORD_RE.finditer(text))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return _COLOUR_NAME_TO_PRESET.get(matches[-1].group(1).lower())
+
+    # Single colour token: only when an appearance imperative is present and
+    # this is not a plain on/off of a colour-named lamp ("turn on purple lamp").
+    if re.search(r"\b(?:aan|uit|on|off|uitzetten)\b", text, re.IGNORECASE):
+        return None
+    if not re.search(r"\b(?:make|maak|zet|doe|turn)\b", text, re.IGNORECASE):
+        return None
+    return _COLOUR_NAME_TO_PRESET.get(matches[0].group(1).lower())
+
+
+def _has_appearance_args(args: dict[str, Any]) -> bool:
+    return any(k in args for k in _APPEARANCE_KEYS)
+
+
+def _has_colour_args(args: dict[str, Any]) -> bool:
+    return any(k in args and args[k] is not None for k in _COLOUR_KEYS)
+
+
+def _strip_appearance(args: dict[str, Any]) -> None:
+    for key in _APPEARANCE_KEYS:
+        args.pop(key, None)
+
+
+def _strip_colour(args: dict[str, Any]) -> None:
+    for key in _COLOUR_KEYS:
+        args.pop(key, None)
+
+
+def _apply_colour_ct_xor(
+    args: dict[str, Any],
+    *,
+    user_ct: bool,
+    user_colour: bool,
+) -> None:
+    """Ensure colour and color_temp_kelvin are never both present."""
+    has_ct = "color_temp_kelvin" in args and args["color_temp_kelvin"] is not None
+    has_colour = _has_colour_args(args)
+    if not (has_ct and has_colour):
+        return
+    if user_ct and not user_colour:
+        _strip_colour(args)
+    elif user_colour and not user_ct:
+        args.pop("color_temp_kelvin", None)
+    elif user_ct:
+        # Both inferred from user — warmth wins (handoff precedence).
+        _strip_colour(args)
+    else:
+        # Model-only conflict: drop colour, keep CT.
+        _strip_colour(args)
+
+
 def build_set_state_args_from_user_message(
     user_message: str, model_args: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Merge model args with lamp name/room and on/off from the user message."""
+    """Merge model args with lamp name/room, on/off, and appearance from the user message."""
     base = dict(model_args or {})
     raw_id = str(base.get("device_id", ""))
     base["device_id"] = prefer_device_id_for_set_state(user_message, raw_id)
+
+    brightness = infer_brightness_from_user_message(user_message)
+    color_temp = infer_color_temp_kelvin_from_user_message(user_message)
+    color_preset = infer_color_preset_from_user_message(user_message)
+    user_ct = color_temp is not None
+    user_colour = color_preset is not None
+
+    if brightness is not None:
+        base["brightness"] = brightness
+    if color_temp is not None:
+        base["color_temp_kelvin"] = color_temp
+    if color_preset is not None:
+        base["color_preset"] = color_preset
+        # Prefer preset over free hex when user named a colour.
+        base.pop("color_hex", None)
+    elif "color_preset" in base and "color_hex" in base:
+        # Model sent both — keep preset only.
+        base.pop("color_hex", None)
+
     on_hint = infer_light_on_from_user_message(user_message)
-    if on_hint is not None:
-        base["on"] = on_hint
+    if on_hint is False:
+        base["on"] = False
+        _strip_appearance(base)
+    elif on_hint is True:
+        base["on"] = True
+    elif _has_appearance_args(base):
+        base["on"] = True
+
+    _apply_colour_ct_xor(base, user_ct=user_ct, user_colour=user_colour)
     return base
 
 
@@ -340,18 +527,62 @@ def light_set_state_args_from_user_message(user_message: str) -> dict[str, Any] 
     if "on" not in args:
         return None
     out: dict[str, Any] = {"device_id": str(device_id), "on": bool(args["on"])}
-    if "brightness" in args:
-        out["brightness"] = args["brightness"]
+    for key in ("brightness", "color_temp_kelvin", "color_preset", "color_hex"):
+        if key in args and args[key] is not None:
+            out[key] = args[key]
     return out
+
+
+def args_request_colour(args: dict[str, Any]) -> bool:
+    """True when set_state args include a colour mode field."""
+    return _has_colour_args(args)
+
+
+def args_request_color_temp(args: dict[str, Any]) -> bool:
+    return "color_temp_kelvin" in args and args.get("color_temp_kelvin") is not None
+
+
+def capability_error_for_light(
+    light: dict[str, Any], args: dict[str, Any]
+) -> str | None:
+    """Return a stable T-040 error when list explicitly denies a capability."""
+    if args_request_colour(args) and light.get("supports_color") is False:
+        return DEVICE_NO_COLOUR_ERROR
+    if args_request_color_temp(args) and light.get("supports_color_temp") is False:
+        return DEVICE_NO_COLOR_TEMP_ERROR
+    return None
+
+
+def house_wide_set_state_args_from_user_message(
+    user_message: str,
+) -> dict[str, Any] | None:
+    """Args for classifier-validated house-wide set_state (all:)."""
+    from brain.mcp.party_mode import (
+        should_reroute_party_to_house_wide,
+        user_message_requests_house_wide_lights,
+    )
+
+    if not (
+        user_message_requests_house_wide_lights(user_message)
+        or should_reroute_party_to_house_wide(user_message)
+    ):
+        return None
+    on_hint = infer_light_on_from_user_message(user_message)
+    if on_hint is None:
+        return None
+    return {"device_id": _HOUSE_ALL_PREFIX, "on": on_hint}
 
 
 def user_message_requests_light_write(text: str) -> bool:
     """True when the user asked to toggle lamp(s) this turn."""
+    from brain.mcp.party_mode import user_message_requests_house_wide_lights
     from brain.mcp.write_guard import user_message_requests_write
 
     if not user_message_requests_write(text):
         return False
     normalized = (text or "").strip()
+    if user_message_requests_house_wide_lights(normalized):
+        return True
     if (
         extract_room_all_hint(normalized)
         or extract_lamp_name_hint(normalized)
@@ -371,8 +602,21 @@ def is_room_all_phrase(phrase: str) -> bool:
     return phrase.strip().lower().startswith(_ROOM_ALL_PREFIX)
 
 
+def is_house_all_phrase(phrase: str) -> bool:
+    return phrase.strip().lower().startswith(_HOUSE_ALL_PREFIX)
+
+
 def room_phrase_from_target(phrase: str) -> str:
     return phrase.strip()[len(_ROOM_ALL_PREFIX) :].strip()
+
+
+def lights_for_house_wide(lights: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lamps includable in house-wide fan-out (skip reachable: false only)."""
+    return [
+        light
+        for light in lights
+        if light.get("id") and light.get("reachable") is not False
+    ]
 
 
 def lights_in_room(lights: list[dict[str, Any]], room_phrase: str) -> list[dict[str, Any]]:
@@ -406,6 +650,12 @@ def resolve_set_state_device_ids(
     needle = phrase.strip()
     if not needle:
         return [], "empty device_id"
+
+    if is_house_all_phrase(needle):
+        matches = lights_for_house_wide(lights)
+        if not matches:
+            return [], "no includable lights for house-wide set_state"
+        return [str(light["id"]) for light in matches if light.get("id")], None
 
     if is_room_all_phrase(needle):
         room = room_phrase_from_target(needle)
@@ -654,10 +904,30 @@ HOMEBASE_LIGHTS_SET_STATE_ERRORS = frozenset(
         "Dirigera authentication failed",
         "Unknown or stale device_id",
         "Device unreachable (Zigbee mesh)",
+        DEVICE_NO_COLOUR_ERROR,
+        DEVICE_NO_COLOR_TEMP_ERROR,
+        COLOUR_AND_CT_BOTH_ERROR,
+        INVALID_COLOUR_OR_CT_ERROR,
     }
 )
 STALE_DEVICE_ID_ERROR = "Unknown or stale device_id"
 MESH_UNREACHABLE_ERROR = "Device unreachable (Zigbee mesh)"
+
+
+def format_capability_failure(
+    error: str, *, light: dict[str, Any] | None = None
+) -> str:
+    """JSON failure payload matching Homebase set_state shape, for the model."""
+    payload: dict[str, Any] = {"success": False, "error": error}
+    if light:
+        if light.get("id") is not None:
+            payload["device_id"] = light.get("id")
+        if light.get("name") is not None:
+            payload["name"] = light.get("name")
+        if light.get("room") is not None:
+            payload["room"] = light.get("room")
+    body = json.dumps(payload, ensure_ascii=False)
+    return f"{_LIGHTS_SET_STATE_FAIL_NOTE}\n{body}"
 
 
 def _strip_leading_notes(text: str) -> str:
@@ -723,11 +993,20 @@ def format_set_state_failure_for_model(text: str) -> str:
 
 
 def present_lights_set_state_batch(
-    results: list[dict[str, Any]], *, on: bool, room: str | None = None
+    results: list[dict[str, Any]],
+    *,
+    on: bool,
+    room: str | None = None,
+    skipped: list[dict[str, Any]] | None = None,
+    house_wide: bool = False,
 ) -> str:
     """Summarize multi-lamp set_state for the model."""
     names = [str(r.get("name") or r.get("device_id") or "?") for r in results]
-    payload = {
+    skipped = skipped or []
+    skipped_names = [
+        str(r.get("name") or r.get("device_id") or "?") for r in skipped
+    ]
+    payload: dict[str, Any] = {
         "success": True,
         "on": on,
         "devices_toggled": len(results),
@@ -736,6 +1015,11 @@ def present_lights_set_state_batch(
     }
     if room:
         payload["room"] = room
+    if house_wide:
+        payload["house_wide"] = True
+    if skipped_names:
+        payload["skipped"] = skipped_names
+        payload["devices_skipped"] = len(skipped_names)
     body = json.dumps(payload, ensure_ascii=False)
     return f"{_LIGHTS_SET_STATE_NOTE}\n{body}"
 

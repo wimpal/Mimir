@@ -135,6 +135,44 @@ def test_extract_lamp_name_hint() -> None:
         "zet de woonkamer lampen aan",
         "e47ca80f-4d4c-4317-9e94-48ce765131d9_1",
     ) == "room:woonkamer"
+    assert prefer_device_id_for_set_state(
+        "Turn on every light in the house",
+        "e47ca80f-4d4c-4317-9e94-48ce765131d9_1",
+    ) == "all:"
+    # Model-invented all: without house-wide intent is rejected / overridden by lamp hint.
+    assert prefer_device_id_for_set_state("Turn off Ballon", "all:").lower() == "ballon"
+    assert prefer_device_id_for_set_state("hello", "all:") == ""
+
+
+def test_house_wide_set_state_args_and_resolve() -> None:
+    from brain.mcp.lights import (
+        house_wide_set_state_args_from_user_message,
+        light_set_state_args_from_user_message,
+        lights_for_house_wide,
+        resolve_set_state_device_ids,
+    )
+
+    assert house_wide_set_state_args_from_user_message(
+        "Turn on every light in the house"
+    ) == {"device_id": "all:", "on": True}
+    assert light_set_state_args_from_user_message("doe alle lampen uit") == {
+        "device_id": "all:",
+        "on": False,
+    }
+    # Room plural is still room:, not all:
+    assert light_set_state_args_from_user_message("zet de woonkamer lampen aan") == {
+        "device_id": "room:woonkamer",
+        "on": True,
+    }
+    lights = [
+        {"id": "1", "name": "A", "room": "Kantoor", "reachable": True},
+        {"id": "2", "name": "B", "room": "Woonkamer", "reachable": False},
+        {"id": "3", "name": "C", "room": "Keuken"},  # missing reachable → includable
+    ]
+    ids, err = resolve_set_state_device_ids(lights, "all:")
+    assert err is None
+    assert ids == ["1", "3"]
+    assert [x["id"] for x in lights_for_house_wide(lights)] == ["1", "3"]
 
 
 def test_infer_light_on_from_user_message() -> None:
@@ -343,3 +381,129 @@ def test_present_lights_list_treats_unreachable_as_off() -> None:
     )
     assert MESH_UNREACHABLE_ERROR in mesh_out
     assert "Ballon" in mesh_out
+
+
+def test_t040_appearance_phrase_to_set_state_args() -> None:
+    from brain.mcp.lights import (
+        build_set_state_args_from_user_message,
+        extract_lamp_name_hint,
+        light_set_state_args_from_user_message,
+    )
+
+    assert extract_lamp_name_hint("Zet Ballon op 40%") == "Ballon"
+    assert light_set_state_args_from_user_message("Zet Ballon op 40%") == {
+        "device_id": "Ballon",
+        "on": True,
+        "brightness": 40,
+    }
+    assert light_set_state_args_from_user_message("Dim Ballon to 40%") == {
+        "device_id": "Ballon",
+        "on": True,
+        "brightness": 40,
+    }
+    assert light_set_state_args_from_user_message("Make Ballon warm white") == {
+        "device_id": "Ballon",
+        "on": True,
+        "color_temp_kelvin": 2700,
+    }
+    assert light_set_state_args_from_user_message("Turn Ballon to 2700K") == {
+        "device_id": "Ballon",
+        "on": True,
+        "color_temp_kelvin": 2700,
+    }
+    assert light_set_state_args_from_user_message(
+        "Turn Ballon to 4000 kelvin"
+    ) == {
+        "device_id": "Ballon",
+        "on": True,
+        "color_temp_kelvin": 4000,
+    }
+    assert light_set_state_args_from_user_message("Zet paarse lamp op rood") == {
+        "device_id": "paarse",
+        "on": True,
+        "color_preset": "saturated_red",
+    }
+    assert light_set_state_args_from_user_message("Make paarse lamp red") == {
+        "device_id": "paarse",
+        "on": True,
+        "color_preset": "saturated_red",
+    }
+    assert light_set_state_args_from_user_message("Make purple lamp red") == {
+        "device_id": "purple",
+        "on": True,
+        "color_preset": "saturated_red",
+    }
+    assert light_set_state_args_from_user_message(
+        "zet de woonkamer lampen op rood"
+    ) == {
+        "device_id": "room:woonkamer",
+        "on": True,
+        "color_preset": "saturated_red",
+    }
+    assert light_set_state_args_from_user_message(
+        "maak de woonkamer lampen blauw"
+    ) == {
+        "device_id": "room:woonkamer",
+        "on": True,
+        "color_preset": "blue",
+    }
+    assert light_set_state_args_from_user_message(
+        "make the living room lights blue"
+    ) == {
+        "device_id": "room:living room",
+        "on": True,
+        "color_preset": "blue",
+    }
+    assert light_set_state_args_from_user_message("Maak Ballon warm wit") == {
+        "device_id": "Ballon",
+        "on": True,
+        "color_temp_kelvin": 2700,
+    }
+    assert light_set_state_args_from_user_message("Turn Ballon to cool white") == {
+        "device_id": "Ballon",
+        "on": True,
+        "color_temp_kelvin": 4000,
+    }
+    # Colour-named lamp + on/off must not infer colour.
+    assert light_set_state_args_from_user_message("Turn on purple lamp") == {
+        "device_id": "purple",
+        "on": True,
+    }
+
+    # Off strips appearance.
+    assert light_set_state_args_from_user_message("Turn off Ballon to 40%") == {
+        "device_id": "Ballon",
+        "on": False,
+    }
+
+    # Warmth wins over colour when both present in the message.
+    merged = build_set_state_args_from_user_message(
+        "Make Ballon warm white",
+        {"device_id": "Ballon", "color_preset": "saturated_red"},
+    )
+    assert merged.get("color_temp_kelvin") == 2700
+    assert "color_preset" not in merged
+
+
+def test_capability_error_for_light_explicit_false_only() -> None:
+    from brain.mcp.lights import (
+        DEVICE_NO_COLOUR_ERROR,
+        DEVICE_NO_COLOR_TEMP_ERROR,
+        capability_error_for_light,
+    )
+
+    no_colour = {"name": "Ballon", "supports_color": False, "supports_color_temp": True}
+    assert (
+        capability_error_for_light(no_colour, {"color_preset": "saturated_red"})
+        == DEVICE_NO_COLOUR_ERROR
+    )
+    assert capability_error_for_light(no_colour, {"color_temp_kelvin": 2700}) is None
+    # Missing supports_* → fall through (None).
+    assert (
+        capability_error_for_light({"name": "X"}, {"color_preset": "blue"}) is None
+    )
+    no_ct = {"supports_color_temp": False}
+    assert (
+        capability_error_for_light(no_ct, {"color_temp_kelvin": 2700})
+        == DEVICE_NO_COLOR_TEMP_ERROR
+    )

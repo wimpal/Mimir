@@ -17,6 +17,7 @@ from brain.mcp.tasks import complete_tool_succeeded
 from brain.mcp.lights import (
     build_set_state_args_from_user_message,
     format_set_state_failure_for_model,
+    house_wide_set_state_args_from_user_message,
     light_set_state_args_from_user_message,
     set_state_tool_succeeded,
     user_message_requests_light_write,
@@ -24,14 +25,8 @@ from brain.mcp.lights import (
 from brain.mcp.party_mode import (
     build_party_mode_args_from_user_message,
     party_mode_tool_succeeded,
+    should_reroute_party_to_house_wide,
 )
-
-
-def _turn_requests_light_toggle(user_message: str) -> bool:
-    """True when user message specifies a lamp toggle (incl. STT compound forms)."""
-    if user_message_requests_light_write(user_message):
-        return True
-    return light_set_state_args_from_user_message(user_message) is not None
 from brain.mcp.write_guard import (
     MAX_WRITE_TOOL_NUDGES,
     check_write_allowed,
@@ -63,6 +58,14 @@ from brain.ollama import (
     parse_message,
 )
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
+
+
+def _turn_requests_light_toggle(user_message: str) -> bool:
+    """True when user message specifies a lamp toggle (incl. STT compound forms)."""
+    if user_message_requests_light_write(user_message):
+        return True
+    return light_set_state_args_from_user_message(user_message) is not None
+
 
 AfterToolCallback = Callable[[str, str, list[ChatMessage]], None]
 OnToolStartCallback = Callable[[str, dict[str, Any] | None], None]
@@ -557,8 +560,6 @@ def run_turn(
 
         # Tool-call step
         anomaly = None
-        if any(is_write_tool(name) for name in tool_names):
-            write_tool_called_this_turn = True
         for tc in msg.tool_calls:
             if not isinstance(tc.function.arguments, dict):
                 anomaly = "malformed_args"
@@ -588,11 +589,34 @@ def run_turn(
             if remaining is not None:
                 per_tool = min(per_tool, remaining)
 
+            dispatch_name = tc.function.name
+            dispatch_args: dict[str, Any] = (
+                dict(tc.function.arguments)
+                if isinstance(tc.function.arguments, dict)
+                else {}
+            )
+            result_tc = tc
+            # T-041: misrouted party_mode → house-wide set_state (never call party_mode).
+            if (
+                dispatch_name == "homebase.lights.party_mode"
+                and should_reroute_party_to_house_wide(user_message)
+            ):
+                house_args = house_wide_set_state_args_from_user_message(user_message)
+                if house_args is not None:
+                    dispatch_name = "homebase.lights.set_state"
+                    dispatch_args = house_args
+                    result_tc = ToolCall(
+                        function=ToolCallFunction(
+                            name=dispatch_name,
+                            arguments=dispatch_args,
+                        )
+                    )
+
             if on_tool_start is not None:
-                on_tool_start(tc.function.name, tc.function.arguments)
+                on_tool_start(dispatch_name, dispatch_args)
 
             if (
-                tc.function.name == "homebase.lights.set_state"
+                dispatch_name == "homebase.lights.set_state"
                 and _turn_requests_light_toggle(user_message)
                 and not lights_list_called_this_turn
                 and "homebase.lights.list" in registry
@@ -629,35 +653,37 @@ def run_turn(
                     if anomaly is None:
                         anomaly = "tool_error"
 
-            write_block = check_write_allowed(tc.function.name, user_message)
+            write_block = check_write_allowed(dispatch_name, user_message)
             if write_block is not None:
                 if data_dir is not None:
-                    tool_entry = registry.get(tc.function.name)
+                    tool_entry = registry.get(dispatch_name)
                     log_blocked_write(
                         data_dir,
                         service=tool_entry.service if tool_entry else None,
-                        tool_name=tc.function.name,
-                        args=tc.function.arguments,
+                        tool_name=dispatch_name,
+                        args=dispatch_args,
                     )
                 result = write_block
             else:
-                tool_args = dict(tc.function.arguments)
-                if tc.function.name == "homebase.lights.set_state":
+                tool_args = dict(dispatch_args)
+                if dispatch_name == "homebase.lights.set_state":
                     tool_args = build_set_state_args_from_user_message(
                         user_message, tool_args
                     )
-                elif tc.function.name == "homebase.lights.party_mode":
+                elif dispatch_name == "homebase.lights.party_mode":
                     tool_args = build_party_mode_args_from_user_message(
                         user_message, tool_args
                     )
                 result = _dispatch_with_timeout(
-                    tc.function.name,
+                    dispatch_name,
                     tool_args,
                     tools=registry,
                     timeout_s=per_tool,
                 )
+                if is_write_tool(dispatch_name):
+                    write_tool_called_this_turn = True
             if (
-                tc.function.name == "homebase.tasks.complete"
+                dispatch_name == "homebase.tasks.complete"
                 and not tool_result_is_error(result)
                 and not complete_tool_succeeded(result)
             ):
@@ -666,13 +692,13 @@ def run_turn(
                     "(missing completion_recorded). Pass the chore title as id."
                 )
             if (
-                tc.function.name == "homebase.lights.set_state"
+                dispatch_name == "homebase.lights.set_state"
                 and not tool_result_is_error(result)
                 and not set_state_tool_succeeded(result)
             ):
                 result = format_set_state_failure_for_model(result)
             if (
-                tc.function.name == "homebase.lights.party_mode"
+                dispatch_name == "homebase.lights.party_mode"
                 and not tool_result_is_error(result)
                 and not party_mode_tool_succeeded(result)
             ):
@@ -683,10 +709,10 @@ def run_turn(
             ok = not tool_result_is_error(result)
             if on_tool_end is not None:
                 preview = result if len(result) <= 200 else result[:197] + "..."
-                on_tool_end(tc.function.name, ok, preview)
+                on_tool_end(dispatch_name, ok, preview)
 
             if (
-                tc.function.name == "homebase.shopping_list.list"
+                dispatch_name == "homebase.shopping_list.list"
                 and not tool_result_is_error(result)
             ):
                 result = filter_shopping_list_tool_result(result)
@@ -695,19 +721,21 @@ def run_turn(
                 dispatch_failed = True
                 if anomaly is None:
                     anomaly = "turn_timeout" if "timed out" in result else "tool_error"
-            working.append(_tool_result_message(tc, result))
+            working.append(_tool_result_message(result_tc, result))
             if after_tool is not None:
-                after_tool(tc.function.name, result, working)
-            if tc.function.name == "homebase.lights.list":
+                after_tool(dispatch_name, result, working)
+            if dispatch_name == "homebase.lights.list":
                 lights_list_called_this_turn = True
-            if tc.function.name == "get_calendar" and not tool_result_is_error(result):
+            if dispatch_name != tc.function.name:
+                tool_names.append(dispatch_name)
+            if dispatch_name == "get_calendar" and not tool_result_is_error(result):
                 try:
                     cal_data = json.loads(result)
                     if isinstance(cal_data, dict):
                         calendar_events_this_turn = calendar_events_from_payload(cal_data)
                 except (json.JSONDecodeError, TypeError):
                     pass
-            if tc.function.name == "get_weather" and not tool_result_is_error(result):
+            if dispatch_name == "get_weather" and not tool_result_is_error(result):
                 try:
                     wx_data = json.loads(result)
                     if isinstance(wx_data, dict):
@@ -715,7 +743,7 @@ def run_turn(
                 except (json.JSONDecodeError, TypeError):
                     pass
             if (
-                tc.function.name == "homebase.shopping_list.list"
+                dispatch_name == "homebase.shopping_list.list"
                 and not tool_result_is_error(result)
             ):
                 shopping_list_fetched_this_turn = True
@@ -735,9 +763,14 @@ def run_turn(
             and not write_tool_called_this_turn
         ):
             step_tool_names = [tc.function.name for tc in msg.tool_calls]
+            dispatched_names = list(tool_names)
             if (
-                "homebase.lights.list" in step_tool_names
+                (
+                    "homebase.lights.list" in step_tool_names
+                    or "homebase.lights.list" in dispatched_names
+                )
                 and "homebase.lights.set_state" not in step_tool_names
+                and "homebase.lights.set_state" not in dispatched_names
             ):
                 chain_args = light_set_state_args_from_user_message(user_message)
                 if chain_args is not None:
