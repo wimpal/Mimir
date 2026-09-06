@@ -44,6 +44,14 @@ _PARTY_MODE_NUDGE = (
     "lights.list or set_state. Confirm from tool result success: true."
 )
 
+_RECIPE_SAVE_NUDGE = (
+    "System correction (do not repeat to the user): the user asked to save/import a "
+    "recipe THIS turn. From the web.fetch / paste text, extract title, "
+    "ingredients[{name,quantity}], and steps[] (plain sentences, no leading 1./2.), "
+    "then call homebase.recipes.add once to stage it. Do NOT call recipes.search. "
+    "Do not claim it was saved yet — the brain will ask the user to confirm."
+)
+
 # Read-only questions — checked before mutation patterns.
 _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -55,6 +63,13 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bhoeveel\b.*\b(uitgegeven|betaald|gedaan|besteed)\b",
         r"\bwat\s+hebben\s+we\b.*\b(uitgegeven|betaald|gedaan|besteed)\b",
         r"\bwhat\s+can\s+i\s+cook\b",
+        r"\bwhat\s+can\s+we\s+cook\b",
+        r"\bwat\s+kunnen\s+we\s+koken\b",
+        r"\bwat\s+kunnen\s+we\s+eten\b",
+        r"\brecept\s+met\b",
+        r"\brecipe\s+with\b",
+        r"\bfind\s+a\s+recipe\b",
+        r"\bzoek\s+een\s+recept\b",
         r"\bwhat\s+do\s+we\s+need\s+to\s+buy\b",
         r"\bwhat('s| is)\s+in\s+the\s+pantry\b",
         r"\bwhat\s+needs\s+doing\b",
@@ -154,6 +169,8 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bfeestmodus\b",
         r"\bfeest\b",
         r"\bdisco\b",
+        # Recipe save patterns live in recipe_import.user_message_requests_recipe_save
+        # (checked first) so negation cannot fall through to these.
     )
 )
 
@@ -169,8 +186,22 @@ def user_message_requests_write(text: str) -> bool:
         user_message_requests_house_wide_lights,
         user_message_requests_party_mode,
     )
+    from brain.recipe_import import (
+        recipe_save_negated,
+        user_message_renames_pending_recipe,
+        user_message_requests_recipe_save,
+    )
 
     normalized = message_for_hints(text)
+    # Hard-stop recipe negations before any mutation / meal-plan carve-outs.
+    if recipe_save_negated(normalized):
+        return False
+    # Recipe save before meal-plan read-only carve-outs ("recept met kip"
+    # must not suppress "voeg dit recept met kip toe").
+    if user_message_requests_recipe_save(normalized):
+        return True
+    if user_message_renames_pending_recipe(normalized):
+        return True
     # Lights classifiers before broad lights-in-room read-only patterns
     # ("light in the house" must not suppress house-wide on/off).
     intent = classify_lights_write_intent(normalized)
@@ -206,8 +237,11 @@ def write_retry_nudge(user_message: str) -> str:
         classify_lights_write_intent,
         party_mode_disallowed_this_turn,
     )
+    from brain.recipe_import import user_message_requests_recipe_save
 
     normalized = message_for_hints(user_message)
+    if user_message_requests_recipe_save(normalized):
+        return _RECIPE_SAVE_NUDGE
     if re.search(
         r"\b(markeer|mark|complete|afvinken)\b.*\b(compleet|klaar|af|gedaan|voltooid|done)\b",
         normalized,
@@ -243,7 +277,12 @@ def write_retry_nudge(user_message: str) -> str:
     return _WRITE_NUDGE_GENERIC
 
 
-def check_write_allowed(tool_name: str, user_message: str) -> str | None:
+def check_write_allowed(
+    tool_name: str,
+    user_message: str,
+    *,
+    recipe_pending: bool = False,
+) -> str | None:
     """Return an error string when a write tool must be blocked, else None."""
     if not is_write_tool(tool_name):
         return None
@@ -252,6 +291,7 @@ def check_write_allowed(tool_name: str, user_message: str) -> str | None:
         classify_lights_write_intent,
         party_mode_disallowed_this_turn,
     )
+    from brain.recipe_import import is_bare_confirm
 
     if tool_name == "homebase.lights.party_mode" and party_mode_disallowed_this_turn(
         user_message
@@ -267,6 +307,13 @@ def check_write_allowed(tool_name: str, user_message: str) -> str | None:
                 "error: write blocked — party mode uses homebase.lights.party_mode, "
                 "not set_state"
             )
+    # T-021: bare ja/yes unlocks recipes.add only when a staged candidate exists.
+    if (
+        tool_name == "homebase.recipes.add"
+        and recipe_pending
+        and is_bare_confirm(user_message)
+    ):
+        return None
     if user_message_requests_write(user_message):
         return None
     return (

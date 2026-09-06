@@ -16,9 +16,12 @@
   (e.g. work “filmen” = shoot, not watching a movie)
 - Path: normal chat → model calls `get_weather` and `get_calendar` (prefer both
   in one step) → short reply grounded in tool output
-- Brain guard (`brain/morning_brief.py`): if the model claims an empty schedule
-  while `get_calendar` returned events, **appends** a code-backed schedule sentence
-  to the model reply (preserves greeting + weather; no LLM retry)
+- Brain guard (`brain/morning_brief.py` + `brain/agent.py`):
+  - If the model skips both tools, the brain **force-dispatches** them and
+    rebuilds a code-backed brief (greeting + weather + schedule)
+  - If the model claims an empty schedule while `get_calendar` returned events,
+    **appends** a code-backed schedule sentence (preserves greeting + weather;
+    no LLM retry)
 - Same path later when spoken in Phase 10 (no client special-case)
 - TUI shows one dim tool summary line under the reply (`get_weather · get_calendar`)
 

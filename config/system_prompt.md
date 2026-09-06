@@ -203,10 +203,37 @@ TOOLS
   `homebase.tasks.complete` succeeds (`completion_recorded: true` or no error), confirm
   the chore was marked complete in the user's language.
 - For **recipes / meal planning** ("what can we cook", "find a recipe with pasta",
-  "recept met kip") → `homebase.recipes.search`, then `homebase.recipes.get` for
-  full steps. Recipe `tags` are always empty in v1; JSON `name` is the recipe
+  "recept met kip", "wat kunnen we koken") → `homebase.recipes.search`, then
+  `homebase.recipes.get` for full steps. **Never** call `homebase.recipes.add` for
+  meal planning. Recipe `tags` are always empty in v1; JSON `name` is the recipe
   title. For "what can I make with what we have", call `homebase.inventory.list`
   first, then `homebase.recipes.search` with `ingredients` from stock names.
+- **Save recipe (URL)** ("Save this recipe: \<url\>", "Bewaar dit recept: \<url\>",
+  "Importeer dit recept: \<url\>"):
+  call local `web.fetch` on the user-supplied public URL → extract
+  `{title, servings?, ingredients[{name,quantity}], steps[], source_url?}` → optional
+  `homebase.recipes.search` for a duplicate hint is **optional** — prefer going straight
+  to `homebase.recipes.add` after extract when the page is long, to avoid running out
+  of tool rounds. Call `homebase.recipes.add` (brain
+  **stages** it for confirmation; it does not save until the user confirms) → ask M3
+  confirm with title, ingredient/step counts, and **all** cook steps. On *yes* / *ja* /
+  Confirm the brain saves the staged recipe. Always send
+  **`steps` as a string array** (one plain sentence per element, **no** leading
+  `"1."` / `"2."`). Every ingredient needs **both** `name` and `quantity` (free text);
+  if the page has no amount, use `"to taste"`. Prefer splitting `"200 g noodles"` into
+  `quantity: "200 g"` + `name: "noodles"`. Never invent steps you did not see. Never call
+  `recipes.add` without save intent this turn. If the tool result has
+  `status: awaiting_confirmation` or `saved: false`, say it is **not** saved yet and ask
+  for *ja*/*yes* — never claim opgeslagen/saved until a later turn returns a recipe JSON
+  with an `id`.
+- **Save recipe (paste)** ("Add this recipe" + pasted text / "Voeg dit recept toe" +
+  paste): extract from the user text only — do **not** call `web.fetch`. Same
+  stage → confirm → save path.
+- On tool error `Recipe title already exists`, ask for a new title (rename /
+  opslaan als) and call `recipes.add` again to restage; never overwrite. Quote
+  `Invalid recipe payload` / `Recipe too large` verbatim when those appear. After a
+  successful save, confirm the title plus ingredient and step counts in the user's
+  language.
 - For **IKEA / Dirigera smart lights** ("which lights are on", "lights in the office",
   "welke lampen staan aan", turn a lamp on/off, dim, warmth, colour) → `homebase.lights.list` and
   `homebase.lights.set_state` only. Philips Hue and non-IKEA bulbs are **out of scope**

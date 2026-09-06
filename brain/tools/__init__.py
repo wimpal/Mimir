@@ -131,6 +131,7 @@ def build_registry(
     from brain.tools.recently_watched import recently_watched_tools
     from brain.tools.recommend import recommend_tools
     from brain.tools.weather import weather_tools
+    from brain.tools.web_fetch import web_fetch_tools
 
     resolved_data = data_dir if data_dir is not None else Path(settings.runtime.data_dir)
 
@@ -146,6 +147,7 @@ def build_registry(
             fetch_override=calendar_fetch_override,
             data_dir=resolved_data,
         ),
+        **web_fetch_tools(settings),
     }
     if db is not None:
         registry.update(preference_tools(db))

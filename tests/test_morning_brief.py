@@ -7,15 +7,17 @@ import json
 from brain.agent import StoppedReason, run_turn
 from brain.morning_brief import (
     append_schedule_fallback,
+    build_morning_brief_from_tools,
     calendar_events_from_payload,
     calendar_payload_from_turn,
     fix_morning_brief,
     format_schedule_sentence,
     is_morning_greeting,
     merge_schedule_into_reply,
-    morning_brief_locale,
     morning_brief_lacks_greeting,
     morning_brief_lacks_weather,
+    morning_brief_locale,
+    morning_brief_tools_incomplete,
     needs_calendar_grounding_fix,
     needs_morning_brief_fixup,
     reply_falsely_claims_empty,
@@ -77,6 +79,45 @@ def test_schedule_only_reply_needs_fixup() -> None:
     )
     assert morning_brief_lacks_greeting(schedule_only, "nl")
     assert morning_brief_lacks_weather(schedule_only)
+
+
+def test_tools_incomplete_needs_fixup() -> None:
+    casual = (
+        "Goedemorgen! De zon schijnt al en het is een frisse ochtend. "
+        "Wat zit er op je agenda vandaag?"
+    )
+    assert morning_brief_tools_incomplete(weather=None, calendar_fetched=False)
+    assert needs_morning_brief_fixup(
+        casual, [], "nl", weather=None, calendar_fetched=False
+    )
+    assert not morning_brief_tools_incomplete(
+        weather=WEATHER_PAYLOAD, calendar_fetched=True
+    )
+
+
+def test_build_morning_brief_from_tools_nl() -> None:
+    out = build_morning_brief_from_tools(
+        weather=WEATHER_PAYLOAD,
+        events=[TARA_EVENT],
+        locale="nl",
+        calendar_fetched=True,
+    )
+    assert out.startswith("Goedemorgen")
+    assert "graden" in out.lower() or "bewolkt" in out.lower()
+    assert "Verjaardag tara" in out
+    assert "Vandaag op je agenda" in out
+    assert "Wat zit er op je agenda" not in out
+
+
+def test_build_morning_brief_calendar_fetch_failed() -> None:
+    out = build_morning_brief_from_tools(
+        weather=WEATHER_PAYLOAD,
+        events=[],
+        locale="nl",
+        calendar_fetched=False,
+    )
+    assert "agenda kon ik niet ophalen" in out.lower()
+    assert "niets op de agenda" not in out.lower()
 
 
 def test_fix_morning_brief_from_schedule_only() -> None:
@@ -277,3 +318,107 @@ def test_agent_fixes_schedule_only_model_reply() -> None:
     assert "Verjaardag tara" in content
     assert "degrees" in content.lower() or "overcast" in content.lower()
     assert result.steps[-1].anomaly == "morning_brief_fixup"
+
+
+def test_agent_forces_tools_when_model_skips_morning_brief() -> None:
+    """Regression: casual NL greeting with no tool_calls must still brief."""
+    cal_payload = json.dumps({"events": [TARA_EVENT], "event_count": 1})
+    weather_payload = json.dumps(WEATHER_PAYLOAD)
+    registry = {
+        "get_weather": _read_tool("get_weather", weather_payload),
+        "get_calendar": _read_tool("get_calendar", cal_payload),
+    }
+    casual = (
+        "Goedemorgen! De zon schijnt al en het is een frisse ochtend. "
+        "Wat zit er op je agenda vandaag?"
+    )
+    client = _ScriptedClient(
+        [
+            ChatMessage(role="assistant", content=casual),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="goedemorgen")],
+        tools=registry,
+        max_iterations=3,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    content = result.content or ""
+    assert "Goedemorgen" in content
+    assert "Verjaardag tara" in content
+    assert "graden" in content.lower() or "bewolkt" in content.lower()
+    assert "Wat zit er op je agenda" not in content
+    assert "zon schijnt" not in content.lower()
+    assert "get_weather" in result.tools_used()
+    assert "get_calendar" in result.tools_used()
+    anomalies = [s.anomaly for s in result.steps]
+    assert "morning_brief_tools_skipped" in anomalies
+    assert "morning_brief_tools_forced" in anomalies
+    assert result.steps[-1].anomaly == "morning_brief_fixup"
+    assert len(client._responses) == 0
+
+
+def test_morning_brief_skip_does_not_stream_invented_reply() -> None:
+    """Draft model text must not reach on_assistant_delta before force-fetch."""
+    cal_payload = json.dumps({"events": [TARA_EVENT], "event_count": 1})
+    weather_payload = json.dumps(WEATHER_PAYLOAD)
+    registry = {
+        "get_weather": _read_tool("get_weather", weather_payload),
+        "get_calendar": _read_tool("get_calendar", cal_payload),
+    }
+    casual = (
+        "Goedemorgen! De zon schijnt al en het is een frisse ochtend. "
+        "Wat zit er op je agenda vandaag?"
+    )
+    client = _ScriptedClient([ChatMessage(role="assistant", content=casual)])
+    deltas: list[str] = []
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="goedemorgen")],
+        tools=registry,
+        max_iterations=3,
+        on_assistant_delta=deltas.append,
+    )
+    assert deltas == []
+    assert "zon schijnt" not in (result.content or "").lower()
+    assert "Verjaardag tara" in (result.content or "")
+
+
+def test_format_weather_brief_nl_no_duplicate_rest() -> None:
+    from brain.morning_brief import format_weather_brief
+
+    weather = {
+        "current": {"temperature_c": 16, "conditions": "overcast"},
+        "today": {
+            "temp_max_c": 19,
+            "temp_min_c": 15,
+            "conditions": "light drizzle",
+        },
+    }
+    out = format_weather_brief(weather, "nl")
+    assert out.count("De rest van vandaag") == 1
+    assert "light drizzle" not in out.lower()
+    assert "motregen" in out.lower()
+
+
+def test_agent_forces_tools_on_empty_morning_reply() -> None:
+    cal_payload = json.dumps({"events": [], "event_count": 0})
+    weather_payload = json.dumps(WEATHER_PAYLOAD)
+    registry = {
+        "get_weather": _read_tool("get_weather", weather_payload),
+        "get_calendar": _read_tool("get_calendar", cal_payload),
+    }
+    client = _ScriptedClient([ChatMessage(role="assistant", content="")])
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="goedemorgen")],
+        tools=registry,
+        max_iterations=3,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    content = result.content or ""
+    assert "Goedemorgen" in content
+    assert "get_weather" in result.tools_used()
+    assert "get_calendar" in result.tools_used()
+    assert "niets op de agenda" in content.lower()

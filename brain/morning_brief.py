@@ -285,6 +285,10 @@ _CONDITION_NL: dict[str, str] = {
     "partly cloudy": "deels bewolkt",
     "overcast": "bewolkt",
     "fog": "mistig",
+    "drizzle": "motregen",
+    "light drizzle": "lichte motregen",
+    "moderate drizzle": "matige motregen",
+    "dense drizzle": "dichte motregen",
     "slight rain": "lichte regen",
     "moderate rain": "matige regen",
     "heavy rain": "zware regen",
@@ -334,10 +338,14 @@ def format_weather_brief(weather: dict[str, Any], locale: Locale) -> str:
         now = f"{now}."
         rest_bits: list[str] = []
         if today_conditions and today_conditions != conditions:
-            rest_bits.append(f"de rest van vandaag {today_conditions}")
+            rest_bits.append(today_conditions)
         if tmax is not None and tmin is not None:
             rest_bits.append(f"tussen {tmin} en {tmax} graden")
-        rest = "De rest van vandaag blijft " + ", ".join(rest_bits) + "." if rest_bits else ""
+        rest = (
+            "De rest van vandaag blijft " + ", ".join(rest_bits) + "."
+            if rest_bits
+            else ""
+        )
         return f"{now} {rest}".strip()
 
     now = f"It's {conditions}"
@@ -361,14 +369,60 @@ def morning_brief_lacks_weather(reply: str) -> bool:
     return not _WEATHER_IN_REPLY.search(reply or "")
 
 
+def morning_brief_tools_incomplete(
+    *,
+    weather: dict[str, Any] | None,
+    calendar_fetched: bool,
+) -> bool:
+    """True when get_weather and/or get_calendar did not succeed this turn."""
+    return weather is None or not calendar_fetched
+
+
+def weather_fetch_failed_line(locale: Locale) -> str:
+    if locale == "nl":
+        return "Het weer kon ik niet ophalen."
+    return "I couldn't fetch the weather."
+
+
+def calendar_fetch_failed_line(locale: Locale) -> str:
+    if locale == "nl":
+        return "De agenda kon ik niet ophalen."
+    return "I couldn't fetch the calendar."
+
+
+def build_morning_brief_from_tools(
+    *,
+    weather: dict[str, Any] | None,
+    events: list[dict[str, Any]],
+    locale: Locale,
+    calendar_fetched: bool = True,
+) -> str:
+    """Code-backed morning brief (greeting + weather + schedule). Discards model prose."""
+    parts: list[str] = [format_greeting(locale)]
+    if weather:
+        parts.append(format_weather_brief(weather, locale))
+    else:
+        parts.append(weather_fetch_failed_line(locale))
+    if calendar_fetched:
+        parts.append(format_schedule_sentence(events, locale))
+    else:
+        parts.append(calendar_fetch_failed_line(locale))
+    return " ".join(parts)
+
+
 def needs_morning_brief_fixup(
     reply: str,
     events: list[dict[str, Any]],
     locale: Locale,
     *,
     weather: dict[str, Any] | None,
+    calendar_fetched: bool = True,
 ) -> bool:
-    """True when a morning brief is missing greeting, weather, or calendar facts."""
+    """True when a morning brief is missing greeting, weather, tools, or calendar facts."""
+    if morning_brief_tools_incomplete(
+        weather=weather, calendar_fetched=calendar_fetched
+    ):
+        return True
     if morning_brief_lacks_greeting(reply, locale):
         return True
     if weather and morning_brief_lacks_weather(reply):
@@ -382,8 +436,17 @@ def fix_morning_brief(
     weather: dict[str, Any] | None,
     events: list[dict[str, Any]],
     locale: Locale,
+    calendar_fetched: bool = True,
 ) -> str:
     """Build a complete brief: greeting + weather + schedule (code-backed gaps only)."""
+    if morning_brief_tools_incomplete(
+        weather=weather, calendar_fetched=calendar_fetched
+    ):
+        # Caller should fetch tools first; if still incomplete, rebuild what we can.
+        return build_morning_brief_from_tools(
+            weather=weather, events=events, locale=locale, calendar_fetched=calendar_fetched
+        )
+
     base = strip_false_empty_claims(reply, locale).rstrip()
 
     # Model returned schedule only — rebuild greeting + weather + schedule.

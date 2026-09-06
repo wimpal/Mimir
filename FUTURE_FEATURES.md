@@ -1,21 +1,29 @@
 # Mimir — Future features (durable backlog)
 
-Ideas beyond the current implementation phases. This file is a **durable backlog**: items stay here after they are promoted into [`ROADMAP.md`](./ROADMAP.md) or finished. Status changes; entries are not deleted.
+Ideas beyond the current implementation phases. This file is a **durable backlog**: items stay here after they are promoted into ROADMAP or finished. Status changes; entries are not deleted.
 
 **Supersedes** the earlier workflow (“add to roadmap, then remove from this file”). Promotion now means: copy **tools + context** into the ROADMAP phase notes, set status to `in-roadmap`, and keep the entry.
 
-**Heim** (household mesh) owns cross-project order and hardware gates: [`../ProjectOverview/HEIM.md`](../ProjectOverview/HEIM.md). Use that before promoting sibling-dependent items. Sibling map: [`CONNECTIONS.md` §5](../ProjectOverview/CONNECTIONS.md) / [§8 Heim](../ProjectOverview/CONNECTIONS.md). Project pages: [Homebase](../ProjectOverview/projects/Homebase.md), [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md), [Grimoire](../ProjectOverview/projects/Grimoire.md).
+**Heim** (household mesh) owns cross-project order and hardware gates:
+[`../project-control-heim/board/ROADMAP.md`](../project-control-heim/board/ROADMAP.md)
+(repo path may be `project-control-heim` beside Mimir). Promoted pre-compute-box work is
+**M5b → M5f**; HA / always-on room voice is **M6b** (after **M6** compute box).
+Grimoire is **out of Heim scope** — do not promote Grimoire tie-ins.
 
-| Backlog cluster (this file) | Earliest Heim wave |
-|-----------------------------|--------------------|
-| PC-local tools, meta UX, evening wind-down (calendar + weather) | Wave 0 |
-| BudgetTracker integration | Wave 1 |
-| Notes → Grimoire, reading list | Wave 2 |
-| Homebase shopping / todos / inventory / recipes / packages / people | Wave 3 |
-| Smart home, presence, voice UX, announcements, HA timers | Wave 4 |
-| Voice ID, kid mode, multi-room, smartring, wall tablet | Wave 4+ (far) |
+| Backlog cluster (this file) | Heim milestone |
+|-----------------------------|----------------|
+| Assistant meta, evening wind-down, TTS sticky, currency / wiki / facts | **M5b** |
+| Jellyfin media depth (catalogue, playback, series) | **M5c** |
+| Timers, travel, transit, sun/moon, weather AQ, departure alerts | **M5d** |
+| Homebase deepen (recipes T-021 ✅ URL, T-043 steps, packages, people, house manual, notes→HB) | **M5e** |
+| Proactive notify, defer, Mimir NAS backups, ops dashboard | **M5f** |
+| Compute box | **M6** (blocked on hardware) |
+| Wyoming / HA / presence / multi-room / Voice ID / wall tablet / smartring | **M6b** |
+| BudgetTracker, shopping, inventory, todos, IKEA lights, write confirm, morning brief core | **Done** (Heim M1–M4b / T-028) |
+| Grimoire notes / dual notes SoT | **Excluded** |
 
-Scheduled sequencing inside Mimir lives in ROADMAP (notably [Phase 11 — Future features](./ROADMAP.md)). This file does **not** invent ROADMAP scope; it only tracks candidates and ownership so promotion is mechanical.
+Scheduled sequencing for Heim lives in `project-control-heim/board/ROADMAP.md`.
+This file tracks candidates and ownership; it does not invent Heim order.
 
 ---
 
@@ -57,7 +65,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 |--------------------|-----------------|------------|
 | Inventory, shopping, recipes, packages, household calendar/tasks, people/contacts (as Homebase modules mature) | **Homebase** (Postgres) | Brain tools → Homebase LAN API (future); never duplicate as primary store |
 | Expenses, payday cycles, net worth | **BudgetTracker** (SQLite on NAS) | Read/query tools first; writes only if BudgetTracker exposes safe APIs |
-| Personal/knowledge notes, semantic note search | **Grimoire** (SQLite + LanceDB) | Capture / query tools; do not replace Grimoire’s local-first store |
+| Personal/knowledge notes | **Out of Heim** (Grimoire standalone) | Do not promote Grimoire capture into Heim |
 | Movie catalogue, preference allowlist, conversation history | **Mimir brain** (SQLite) | Owner |
 | Lights, sensors, media players, TTS speakers, presence | **Home Assistant** | Tools via HA after Phase 10; automation authoring = generate + user confirm, not silent write |
 | Homebase budget module vs BudgetTracker | **Ambiguous** (CONNECTIONS §5) | Prefer BudgetTracker for deep money until §5 decides; document open questions |
@@ -70,7 +78,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 
 ### Air quality sensor warnings
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Warn when indoor (or outdoor) air quality crosses a threshold.
 - **User stories:**
@@ -81,12 +89,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** HA exposes sensor state; Mimir reads via HA tool or weather tool. No writes.
 - **Tools + context:** Proposed: `get_air_quality` or HA `get_state`; config thresholds; fail clear if sensor missing.
 - **Open questions:** Indoor HA sensors vs outdoor weather AQ — one tool or two?
-- **ROADMAP overlap:** none (related weather expansion is parked here; Phase 11 lists Buienradar rain nowcast, not AQ)
+- **ROADMAP overlap:** Heim **M5d** (outdoor/weather AQ); indoor HA sensors → **M6b**
 - **Sensitivity:** household environment data; keep out of default turn traces
 
 ### Per-room heating efficiency
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Report or advise on per-room heating efficiency from HA climate/sensor data.
 - **User stories:**
@@ -96,11 +104,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** HA owns device state and history; Mimir is read/advise only unless a confirmed setpoint tool is added later.
 - **Tools + context:** Proposed: HA climate/sensor query tool; prompt: room names from HA areas; fail if entities unmapped.
 - **Open questions:** What metric is “efficiency” (runtime vs setpoint vs energy)?
-- **ROADMAP overlap:** none (broader smart home is Phase 11)
+- **ROADMAP overlap:** Heim **M6b**
 
 ### Home Assistant automation authoring
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Mimir drafts Home Assistant automations (scripts / YAML) from natural language.
 - **User stories:**
@@ -111,12 +119,13 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Mimir **generates**; user (or confirmed tool) **applies** to HA. Never silent write of automations.
 - **Tools + context:** Proposed: `draft_ha_automation` (returns YAML); optional `apply_ha_automation` behind confirmation; prompt: entity/area allowlist from config.
 - **Open questions:** Apply via HA API vs show YAML for manual paste?
-- **ROADMAP overlap:** none (Phase 11 “Smart home control” is control, not authoring)
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** side-effectful; **confirmation on destructive / apply actions** required
 
 ### Smart lighting control and scenes
 
-- **Status:** in-roadmap
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** near
 - **Summary:** Control lights (including IKEA) and trigger scenes such as “movie night.”
 - **User stories:**
@@ -126,12 +135,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Home Assistant light / scene entities
 - **API ownership:** HA owns device control; Mimir calls HA service tools (`light.turn_on`, `scene.turn_on`, etc.).
 - **Tools + context:** Proposed: `ha_call_service` or typed `set_lights` / `activate_scene`; config: scene name map (“movie night” → scene entity_id); timeout + fail clear.
-- **ROADMAP overlap:** [Phase 11 — Smart home control](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M4b** (Homebase + Dirigera) — evidence: T-031/T-033/T-034/T-040
 - **Sensitivity:** side-effectful; prefer confirm for whole-house scenes if desired
 
 ### Presence detection (phone on LAN)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Infer whether someone is home from phone presence on the network; relay a spoken message when they return.
 - **User stories:**
@@ -142,12 +151,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** HA owns presence state and TTS speakers; Mimir enqueues relay text and reads presence. Confirm before storing sensitive relay content if needed.
 - **Tools + context:** Proposed: `get_presence`, `queue_return_message`; config: person ↔ device map; quiet hours; cancel/replace queued message.
 - **Open questions:** Privacy of continuous presence tracking; false negatives when Wi‑Fi is off.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** location/presence PII; retention policy TBD
 
 ### Multi-room voice answer routing
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Ask in one room and receive the answer on the correct room’s speaker.
 - **User stories:**
@@ -156,7 +165,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Home Assistant media_player / assist satellite area mapping
 - **API ownership:** HA owns satellite ↔ room; Mimir returns reply text; HA pipeline routes TTS to originating (or chosen) room.
 - **Tools + context:** Mostly HA pipeline config + optional `announce` target; brain may need request metadata (source room).
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Open questions:** How source room is passed into the brain adapter.
 
 ---
@@ -165,7 +174,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 
 ### Learned media preferences
 
-- **Status:** partial
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Improve recommendations from observed taste beyond today’s small preference allowlist.
 - **User stories:**
@@ -176,11 +185,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Brain owns prefs and derived signals; Jellyfin remains library/watch SoT for playback state.
 - **Tools + context:** Extend `get_preference` / `set_preference` allowlist or add derived-taste injection; re-run tool suite after prompt changes.
 - **Open questions:** Explicit prefs vs implicit learning; avoid opaque profiles without user control.
-- **ROADMAP overlap:** related to Phase 4 prefs + Phase 5/8a; richer learning not a named Phase 11 bullet
+- **ROADMAP overlap:** Heim **M5c** (richer learning beyond Phase 4 allowlist)
 
 ### Jellyfin playback control
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Play, pause, skip, and continue watching via Jellyfin (and/or HA media player).
 - **User stories:**
@@ -191,11 +200,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Jellyfin or HA executes transport controls; Mimir issues tool calls only. Confirm target client/TV.
 - **Tools + context:** Proposed: `media_play`, `media_pause`, `media_next`, `continue_watching`; config: default player; fail if no active session.
 - **Open questions:** Jellyfin API vs HA media_player as the control plane.
-- **ROADMAP overlap:** [Phase 11 — Play music](./ROADMAP.md) (playback adjacent; movies/series control not spelled out)
+- **ROADMAP overlap:** Heim **M5c**
 
 ### Series and continue watching
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Expand catalogue beyond movies so “continue watching” works for series.
 - **User stories:**
@@ -204,12 +213,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Jellyfin library → Mimir catalogue cache (extended)
 - **API ownership:** Brain owns sync + cache; Jellyfin owns library.
 - **Tools + context:** Extend sync + recommend/continue tools; prompt vocabulary for episode vs movie.
-- **ROADMAP overlap:** none (movies locked for v1; series is backlog)
+- **ROADMAP overlap:** Heim **M5c**
 - **Open questions:** Episodes/seasons schema; Next Up vs resume position.
 
 ### Library availability check
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Answer “do we have X in the library?”
 - **User stories:**
@@ -218,7 +227,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Mimir catalogue (movies today); Jellyfin for types not yet cached.
 - **API ownership:** Brain search tool over catalogue; no Jellyfin live search required for movies if sync is fresh.
 - **Tools + context:** Proposed: `library_has_title` / extend recommend search; say when sync is stale.
-- **ROADMAP overlap:** none (builds on Phase 5 catalogue)
+- **ROADMAP overlap:** Heim **M5c**
 
 ### Co-watcher recommendation profiles
 
@@ -232,11 +241,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Mimir recommendation tool takes `with_person`; taste data SoT TBD.
 - **Tools + context:** Extend recommend tools with `with_person`; prompt: intersection of tastes / avoid disliked genres.
 - **Open questions:** Where person taste lives; relation to voice ID / multi-user.
-- **ROADMAP overlap:** none (Phase 11 Voice ID / multi-user related)
+- **ROADMAP overlap:** none (after M5c; may need multi-profile)
 
 ### Mark movie as favorite
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Mark a movie as favorite (brain and/or Jellyfin).
 - **User stories:**
@@ -245,11 +254,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** TBD — Jellyfin UserData Favorite vs brain-side flag
 - **API ownership:** Prefer writing through Jellyfin if API supports it so other clients see it; else brain SQLite + confirm.
 - **Tools + context:** Proposed: `set_movie_favorite`; confirmation optional; fail if title ambiguous.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5c**
 
 ### Runtime filter for recommendations
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Filter picks by runtime, e.g. “something under 100 minutes.”
 - **User stories:**
@@ -258,7 +267,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Mimir catalogue
 - **API ownership:** Brain filter in recommend tool.
 - **Tools + context:** Extend recommend args: `max_runtime_minutes`; prompt examples in system prompt / suite cases.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5c**
 
 ### Music control (Jellyfin / Spotify)
 
@@ -273,11 +282,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** TBD between Jellyfin, Spotify, HA. Mimir should not own playlists as SoT.
 - **Tools + context:** Align with Phase 11 play-music tool; config: default music player; timeouts.
 - **Open questions:** Jellyfin-only vs Spotify; account/secret handling for Spotify.
-- **ROADMAP overlap:** [Phase 11 — Play music](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M5c** (Jellyfin only); Spotify icebox
 
 ### Household media statistics
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Household stats such as how many movies were watched this year.
 - **User stories:**
@@ -286,7 +295,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Mimir catalogue watch fields + sync history; Jellyfin for authoritative playback dates if needed
 - **API ownership:** Brain aggregates for the configured Jellyfin user; multi-person stats need multi-user later.
 - **Tools + context:** Proposed: `media_stats`; prompt: year/period args; degrade if sync incomplete.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5c**
 
 ---
 
@@ -294,7 +303,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 
 ### Timers, reminders, and alarms
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Start a timer, set a reminder, or set an alarm.
 - **User stories:**
@@ -303,7 +312,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** TBD — HA timer helpers vs brain SQLite scheduled jobs
 - **API ownership:** Executor owns fire time; Mimir creates/cancels via tools. Cancel must work with “never mind” / “laat maar.”
 - **Tools + context:** Proposed: `start_timer`, `set_reminder`, `set_alarm`, `cancel_timer`; timezone from config; quiet hours.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5d**
 - **Sensitivity:** side-effectful notifications
 
 ### Calendar write access
@@ -319,12 +328,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Calendar provider or Homebase owns events; Mimir write tool with confirmation. ICS subscribe URLs stay read-only.
 - **Tools + context:** Proposed: `create_calendar_event`, `find_open_slot`; config: writable calendar id; confirm before write.
 - **Open questions:** Proton/ICS-only world vs Homebase calendar as write SoT.
-- **ROADMAP overlap:** [Phase 11 — Calendar deepen](./ROADMAP.md) (“write access only if needed”)
+- **ROADMAP overlap:** Heim **M5d** (only if writable SoT; else icebox write)
 - **Evidence (boundary):** Phase 8d = read-only Calendar feed ICS — see [`docs/phase8d-calendar.md`](./docs/phase8d-calendar.md)
 
 ### Departure alerts and winter ice scrape hint
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** “Leave in X minutes for your appointment,” plus winter likelihood of needing to scrape ice off the car.
 - **User stories:**
@@ -334,12 +343,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Calendar feed / writable calendar; weather tool; travel-time provider TBD
 - **API ownership:** Mimir (or worker) computes leave-by time; HA/Discord notifies. No calendar mutation required for alerts.
 - **Tools + context:** Proposed: worker or proactive hook using `get_calendar` + weather + `travel_time`; config: default commute origin; frost threshold °C.
-- **ROADMAP overlap:** related to [Phase 11 — Proactive notifications](./ROADMAP.md) (not the same as Jellyfin new-episode watch)
+- **ROADMAP overlap:** Heim **M5d**
 - **Sensitivity:** location/schedule
 
 ### Travel time and traffic
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** “How long does it take to get to location X?” — distance, traffic, travel time.
 - **User stories:**
@@ -349,12 +358,12 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Provider owns live traffic; Mimir tool wraps with timeout and clear failure.
 - **Tools + context:** Proposed: `travel_time`; config: default origin; units km; fail offline.
 - **Open questions:** Which provider (local-friendly)? Offline degrade?
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5d**
 - **Sensitivity:** destination queries may be sensitive — minimize logging
 
 ### Public transport departures
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Next departures from Zwolle station, e.g. “next train to Nunspeet.”
 - **User stories:**
@@ -364,11 +373,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **API ownership:** Provider owns schedules; Mimir read-only tool; config default origin station.
 - **Tools + context:** Proposed: `next_departures`; args: destination, origin default Zwolle; timeout; Dutch station names.
 - **Open questions:** Official NS API vs open GTFS.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5d**
 
 ### Sunrise, sunset, and moon phase
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Report sun/moon times; optionally drive lighting automations.
 - **User stories:**
@@ -378,11 +387,11 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Astronomy/weather provider or HA `sun` entity; lighting actions in HA
 - **API ownership:** Read from weather/HA; write lighting only via HA tools with confirm/scene.
 - **Tools + context:** Extend weather tool or `get_sun_moon`; optional link to lighting scenes.
-- **ROADMAP overlap:** none (smart-home tie-in → Phase 11 smart home)
+- **ROADMAP overlap:** Heim **M5d**
 
 ### Photoshoot logistics
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Plan a photoshoot: location, weather at location, travel time.
 - **User stories:**
@@ -391,7 +400,7 @@ Use `none`, `TBD`, or `n/a` rather than filler.
 - **Source of truth:** Composed from weather + routing tools; no new SoT
 - **API ownership:** Mimir orchestrates existing tools; no dedicated photoshoot store.
 - **Tools + context:** Prompt pattern / optional `plan_outing` composite; reuse weather + travel_time.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5d**
 
 ---
 
@@ -401,7 +410,7 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 
 ### Package tracking
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Ask about household package / delivery status via Homebase.
 - **User stories:**
@@ -410,12 +419,13 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Homebase (Delivery module / Postgres)
 - **API ownership:** Homebase serves read/update; Mimir `get_packages` / `update_package` tools. Confirm on status mutations.
 - **Tools + context:** Proposed: `list_deliveries`; config: Homebase base URL + auth; timeout; fail if module disabled.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e**
 - **Sensitivity:** address/tracking numbers — redact in logs
 
 ### Household inventory updates
 
-- **Status:** parked
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** mid
 - **Summary:** Query and update household inventory through Homebase.
 - **User stories:**
@@ -424,12 +434,13 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Homebase Inventory
 - **API ownership:** Homebase mutates stock; Mimir tools with confirmation on decrements/deletes.
 - **Tools + context:** Proposed: `inventory_search`, `inventory_update`; barcode flows may belong to Homebase/mobile later.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M2–M3** — inventory MCP
 - **Sensitivity:** household contents; confirmation on destructive updates
 
 ### Shopping list updates from anywhere
 
-- **Status:** in-roadmap
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** near
 - **Summary:** Add/check shopping list items from chat or voice via Homebase (or HA list — prefer Homebase when mesh exists).
 - **User stories:**
@@ -439,11 +450,11 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **API ownership:** Homebase owns list rows; Mimir append/check tools. If Phase 11 uses HA first, document migration to Homebase.
 - **Tools + context:** Proposed: `shopping_add`, `shopping_list`; config endpoint; idempotent add.
 - **Open questions:** ROADMAP Phase 11 says “HA or similar” — reconcile with Homebase as mesh SoT.
-- **ROADMAP overlap:** [Phase 11 — Shopping lists](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M2–M3** — shopping_list MCP
 
 ### Countdown to holidays or events
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Countdown to holidays or household events.
 - **User stories:**
@@ -452,11 +463,11 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Homebase events and/or Mimir Calendar feed
 - **API ownership:** Read-only compose in Mimir; event SoT elsewhere.
 - **Tools + context:** Proposed: `event_countdown` or prompt over calendar tools.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e**
 
 ### Wake-on-LAN
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Wake PCs and similar devices on the LAN.
 - **User stories:**
@@ -465,12 +476,12 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Device registry in HA (or Homebase network docs) — MAC allowlist in config
 - **API ownership:** HA (or script) sends magic packet; Mimir only calls allowlisted targets with confirmation.
 - **Tools + context:** Proposed: `wake_device`; config allowlist name→MAC; confirm; fail if unknown device.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e**
 - **Sensitivity:** side-effectful; strict allowlist
 
 ### People database (contacts, birthdays)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Addresses, contact details, birthdays, and birthday reminders.
 - **User stories:**
@@ -481,12 +492,12 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **API ownership:** Homebase CRUD; Mimir read + reminder scheduling via shared notify path. Confirm on edits.
 - **Tools + context:** Proposed: `get_person`, `list_birthdays`; worker for reminders; quiet hours.
 - **Open questions:** Homebase module coverage vs thin brain table (avoid dual SoT).
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e**
 - **Sensitivity:** PII (addresses, contacts) — high; never dump full DB into prompts
 
 ### Scheduling (find slot / create appointment)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Find an open spot in the schedule and create appointments.
 - **User stories:**
@@ -496,11 +507,12 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Same as calendar write SoT (TBD)
 - **API ownership:** Calendar SoT writes events; Mimir proposes slots then confirmed create.
 - **Tools + context:** Proposed: `find_open_slot`, `create_calendar_event`; always confirm create.
-- **ROADMAP overlap:** [Phase 11 — Calendar deepen](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M5d** / **M5e** (calendar write SoT)
 
 ### To-do list
 
-- **Status:** parked
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** mid
 - **Summary:** Household to-dos via Homebase tasks.
 - **User stories:**
@@ -509,11 +521,11 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Homebase Tasks
 - **API ownership:** Homebase mutates tasks; Mimir add/complete/list tools; confirm completes/deletes if destructive.
 - **Tools + context:** Proposed: `todo_list`, `todo_add`, `todo_complete`.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **T-018** — Homebase tasks MCP
 
 ### Recurring reminders in morning brief
 
-- **Status:** partial
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Surface recurring reminders as part of the morning brief.
 - **User stories:**
@@ -523,25 +535,40 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** TBD — Homebase routines/tasks vs brain reminders
 - **API ownership:** Read reminders into brief; do not mark complete without ask.
 - **Tools + context:** Extend morning-brief discipline to call reminder/todo tool; keep brief short.
-- **ROADMAP overlap:** Phase 8e done for weather+schedule; expansion not listed in Phase 11
+- **ROADMAP overlap:** Heim **M5e** (morning brief expansion)
 
 ### Recipe lookup and conversational cook-through
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Fetch a recipe from Homebase and walk through it step-by-step in conversation.
 - **User stories:**
   - Recipe lookup.
   - Homebase-related: take recipe from Homebase and work through it; based on the conversation Mimir gives instructions.
-- **Depends on:** Homebase Recipes module + API; optional timers tool.
+- **Depends on:** Homebase Recipes module + API; optional timers tool; **atomic `steps[]` from import (T-043)**.
 - **Source of truth:** Homebase Recipes (inventory-linked ingredients live there)
 - **API ownership:** Homebase owns recipe documents; Mimir reads and paces steps; timers via shared timer tool.
 - **Tools + context:** Proposed: `get_recipe`, `recipe_step`; prompt: one step at a time for voice; link inventory shortages.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e** (T-021 import + T-043 atomic steps + cook-through)
+- **Evidence (partial):** T-021 URL import live 2026-09-05 (stage → confirm → Homebase). Step blobs still too coarse for cook-through until T-043.
+
+### Recipe import — atomic step split (T-043)
+
+- **Status:** in-roadmap
+- **Horizon:** near
+- **Summary:** On URL/paste import, extract **one cook action per** `steps[]` element instead of multi-sentence paragraphs.
+- **User stories:**
+  - After *"importeer dit recept: \<url\>"*, confirm shows many short numbered steps (not 2–4 giant blobs).
+  - Later cook-through can say “next” one action at a time without re-splitting.
+- **Depends on:** T-021 import path (done for URL).
+- **Source of truth:** Homebase Recipes (`steps[]` as stored)
+- **API ownership:** Mimir extraction / optional post-process only; no Homebase schema change.
+- **Tools + context:** Tighten `system_prompt.md` + optional sentence splitter before stage; fixture from recipesbyanne Directions.
+- **ROADMAP overlap:** Heim **M5e** — [T-043](../project-control-heim/board/tasks/T-043-recipe-import-extracts-atomic-cook-steps.md)
 
 ### House manual for guests and sitters
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** “Where can I find X?” / “How do I do X?” for guests and sitters.
 - **User stories:**
@@ -551,12 +578,12 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **Source of truth:** Homebase documents / house manual content
 - **API ownership:** Homebase stores docs; Mimir retrieval tool (RAG) read-only for guests; kid/guest mode may limit tools.
 - **Tools + context:** Proposed: `house_manual_search`; restrict write tools in guest mode.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e**
 - **Sensitivity:** physical security details (lockboxes, codes) — explicit allowlist of publishable docs
 
 ### Notes capture → Homebase pipeline
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** “Mimir, write down X” — possibly file into Homebase.
 - **User stories:**
@@ -567,7 +594,7 @@ See [Homebase](../ProjectOverview/projects/Homebase.md) (`D:\Dev\Projects\Homeba
 - **API ownership:** Destination SoT owns stored note; Mimir capture tool routes by policy.
 - **Tools + context:** Proposed: `capture_note` with `destination=homebase|grimoire|brain`; confirm destination if ambiguous.
 - **Open questions:** Homebase vs Grimoire vs brain scratchpad — see §7.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e** (Homebase only; no Grimoire)
 
 ---
 
@@ -577,7 +604,8 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### BudgetTracker integration
 
-- **Status:** parked
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** mid
 - **Summary:** Ask Mimir about household budget, cashflow, or log an expense via BudgetTracker.
 - **User stories:**
@@ -588,7 +616,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** BudgetTracker (`budget-server`) owns mutations and SQLite; Mimir is NL front door (read tools first; writes with confirmation). Discord may also query the mesh later (§8) — same SoT.
 - **Tools + context:** Proposed: `budget_summary`, `list_expenses`, `add_expense` (confirm); config: base URL; never log amounts in turn traces by default.
 - **Open questions:** Shared household-member/category taxonomy with Homebase; write API surface today vs needed.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M1–M3**
 - **Sensitivity:** financial — high; confirm writes; redact logs
 
 ---
@@ -609,12 +637,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Grimoire owns note records and embeddings; Mimir sends capture requests. No second full notes DB in the brain beyond scratch/long-term facts policy.
 - **Tools + context:** Proposed: `capture_note`; destination policy in config; fail clear if Grimoire unreachable.
 - **Open questions:** Desktop-only Grimoire vs headless sync on NAS; overlap with Homebase.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Excluded from Heim — Grimoire standalone
 - **Sensitivity:** note content may be sensitive
 
 ### Long-term facts, forget, RAG, reviews, decision logs
 
-- **Status:** partial
+- **Status:** parked
 - **Horizon:** mid
 - **Summary:** Durable recallable household facts, selective forget, optional RAG over documents, annual review, decision logs.
 - **User stories:**
@@ -629,12 +657,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Brain tools `remember_fact`, `forget_fact`, `search_household_docs`; document SoT stays external. Forget must be explicit and scoped.
 - **Tools + context:** Fact schema (subject, predicate, timestamp); RAG retrieval caps; annual review = aggregate query; decision log = append-only store TBD.
 - **Open questions:** “Is a proper memory model already on the roadmap?” — Phase 4 memory + Phase 11 history compaction only; full fact/RAG model is backlog here.
-- **ROADMAP overlap:** [Phase 11 — History compaction / summarization](./ROADMAP.md) (related, not equivalent); vector search for Jellyfin catalogue is a separate Phase 11 bullet
+- **ROADMAP overlap:** none (partial: Phase 4 prefs; compaction → Heim **M5b**)
 - **Sensitivity:** high — selective forget + retention policy required
 
 ### Home network documentation
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** List of IPs, devices, what is where.
 - **User stories:**
@@ -643,12 +671,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Curated docs (prefer Homebase or versioned file in NAS) — **not** auto-scraped without review
 - **API ownership:** Doc SoT; Mimir read-only search. Updates via confirmed edit or human PR to docs.
 - **Tools + context:** Reuse `house_manual_search` / RAG with a network-docs corpus tag.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5e** (house-manual corpus tag)
 - **Sensitivity:** infrastructure map — high; restrict guest/kid mode
 
 ### Wikipedia lookup
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Look up a topic on Wikipedia.
 - **User stories:**
@@ -657,11 +685,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Wikipedia (online) or local ZIM (if wired later)
 - **API ownership:** Read-only tool in brain; cite title/URL; timeout.
 - **Tools + context:** Proposed: `wikipedia_lookup`; language prefer NL/EN from prefs; no write.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Web search
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** General web search to support other features.
 - **User stories:**
@@ -671,7 +699,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Provider returns results; Mimir tool with strict timeouts and citation discipline.
 - **Tools + context:** Proposed: `web_search`; config: provider keys in env; disable when offline.
 - **Open questions:** Provider choice; when to force search vs refuse.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** query privacy
 
 ### Local news
@@ -685,11 +713,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** External news feed (TBD)
 - **API ownership:** Read-only ingest tool; do not persist full articles unless user saves a note.
 - **Tools + context:** Proposed: `local_news`; config: region; Phase 8e explicitly excluded news — keep opt-in.
-- **ROADMAP overlap:** none (Phase 8e: weather + today’s schedule **only**, no news)
+- **ROADMAP overlap:** none (opt-in; not morning-brief default)
 
 ### Random facts
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Occasional random fact on request (or tightly gated ambient use).
 - **User stories:**
@@ -698,7 +726,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Local curated list preferred for offline; else Wikipedia tool
 - **API ownership:** Brain serves local list; no external SoT required for v0.
 - **Tools + context:** Proposed: `random_fact` or prompt-only with curated file.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Reading list / bookmark capture
 
@@ -712,11 +740,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Destination SoT; Mimir `add_bookmark` tool.
 - **Tools + context:** URL + title + tags; dedupe by URL.
 - **Open questions:** Same destination policy as notes capture.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** none (SoT TBD; not Grimoire-by-default)
 
 ### Shazam-like music recognition
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Identify playing music from audio.
 - **User stories:**
@@ -726,7 +754,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Provider identifies track; Mimir returns metadata. Audio snippets ephemeral.
 - **Tools + context:** TBD; requires audio pipeline beyond text chat.
 - **Open questions:** Feasible locally? Privacy of audio upload?
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** audio — high
 
 ---
@@ -744,12 +772,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Weather provider for condition; notification sink HA/Discord
 - **API ownership:** Worker evaluates rules; sinks deliver. Mimir may register rules via tools.
 - **Tools + context:** Align with Phase 11 proactive notifications + [Phase 11 — Buienradar / Buienalarm rain nowcast](./ROADMAP.md); config: notify channel allowlist.
-- **ROADMAP overlap:** [Phase 11 — Proactive notifications](./ROADMAP.md); [Phase 11 — Buienradar / Buienalarm](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M5f**
 - **Sensitivity:** side-effectful; rate-limit
 
 ### Evening wind-down
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** “Good night” brief: tomorrow’s first schedule items, weather, todos.
 - **User stories:**
@@ -758,11 +786,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Calendar feed + weather cache + todo SoT
 - **API ownership:** Same as morning brief — phrase-triggered chat, not proactive push (unless user opts into notify).
 - **Tools + context:** Mirror Phase 8e pattern; prompt phrases “good night” / Dutch equivalent; keep short.
-- **ROADMAP overlap:** none (morning brief Phase 8e is the pattern to copy)
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Announcements (TTS to rooms)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Trigger TTS to a specific speaker/room or the whole house.
 - **User stories:**
@@ -771,12 +799,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** HA speakers / areas
 - **API ownership:** HA plays audio; Mimir `announce` tool with room allowlist.
 - **Tools + context:** Proposed: `announce`; args: message, room|all; confirm for all-house; quiet hours.
-- **ROADMAP overlap:** none (enabled by Phase 10)
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** side-effectful
 
 ### Cancel current voice command (“never mind” / “laat maar”)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Cancel the in-flight voice command.
 - **User stories:**
@@ -785,12 +813,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a (control plane)
 - **API ownership:** HA voice pipeline should abort STT/TTS; brain should abort tool loop if mid-turn.
 - **Tools + context:** Pipeline keyword / intent; Dutch **laat maar** and English **never mind**; no new SoT.
-- **ROADMAP overlap:** none (Phase 10 concern)
+- **ROADMAP overlap:** Heim **M5d** (timers) + **M6b** (HA pipeline)
 - **Open questions:** Cancel mid-tool vs mid-TTS only.
 
 ### “Not now” with optional defer
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Dismiss a trigger when it’s a bad moment; optionally redo in X minutes.
 - **User stories:**
@@ -800,11 +828,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Deferred job queue TBD (brain or HA)
 - **API ownership:** Scheduler owns defer; Mimir records snooze.
 - **Tools + context:** Proposed: `snooze_interaction`; quiet hours interaction with presence.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5f**
 
 ### Confirmation on destructive actions
 
-- **Status:** parked
+- **Status:** done
+- **Evidence:** see ROADMAP overlap (Heim)
 - **Horizon:** near
 - **Summary:** Require confirmation before destructive or hard-to-undo actions.
 - **User stories:**
@@ -813,12 +842,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a (policy)
 - **API ownership:** **Brain enforces** confirm-before-execute for destructive tools regardless of model wording; sibling SoTs still perform the delete after confirm.
 - **Tools + context:** Two-phase tools or `confirm_token`; suite cases for refuse-without-confirm.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M3**
 - **Sensitivity:** safety control — applies to Homebase/BudgetTracker/HA writes
 
 ### Ambient monologue
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Occasional unprompted dry observation, strictly rate-limited, only under specific circumstances.
 - **User stories:**
@@ -828,7 +857,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Trigger rules in config; no user data SoT
 - **API ownership:** Worker may emit rare TTS/chat line via HA; default **off**.
 - **Tools + context:** Config: max N/day, allowlisted triggers only; never during quiet hours.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Open questions:** Exact trigger list (must stay narrow).
 
 ---
@@ -837,7 +866,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Per-user profiles and preference memory
 
-- **Status:** partial
+- **Status:** parked
 - **Horizon:** mid
 - **Summary:** Remember preferences per person; summarize what Mimir knows about someone.
 - **User stories:**
@@ -850,7 +879,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Brain owns prefs; expose get/set; “what you know” is a read-only summary tool.
 - **Tools + context:** `summarize_known_profile`; expand allowlist carefully; migrations sticky (AGENTS.md).
 - **Open questions:** Memory model beyond Phase 4 — backlog here; compaction in Phase 11.
-- **ROADMAP overlap:** Phase 0 single-user lock; [Phase 11 — Voice ID / multi-user](./ROADMAP.md)
+- **ROADMAP overlap:** related Heim **M6b** Voice ID / multi-user
 
 ### Voice ID
 
@@ -863,12 +892,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Voiceprint store TBD (brain or HA) — high sensitivity
 - **API ownership:** TBD; Mimir must not treat unverified ID as authorization for destructive tools.
 - **Tools + context:** Research spike doc before implementation; suite for mis-ID failure modes.
-- **ROADMAP overlap:** [Phase 11 — Voice ID / multi-user](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** biometric-like — highest; explicit enrollment; confirm destructive actions regardless
 
 ### Kid mode
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Reduced tool set for kids; probably requires voice ID.
 - **User stories:**
@@ -877,7 +906,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain policy config per profile
 - **API ownership:** Brain enforces allowlist (model cannot bypass by asking).
 - **Tools + context:** Config: `kid` profile tool denylist (HA unlock, budget, WoL, network docs, etc.).
-- **ROADMAP overlap:** related to Phase 11 multi-user
+- **ROADMAP overlap:** Heim **M6b**
 
 ### Email reading
 
@@ -890,7 +919,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Mail provider
 - **API ownership:** Provider owns mailboxes; Mimir read-only tools first; no send unless separately approved.
 - **Tools + context:** Per Phase 11 email read; timeout; summarize not dump full inbox into context.
-- **ROADMAP overlap:** [Phase 11 — Email read](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** high — PII
 
 ### Conversation summarisation
@@ -904,7 +933,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain SQLite Messages; summary artifact TBD in SQLite
 - **API ownership:** Brain compaction job/tool; Messages remain canonical.
 - **Tools + context:** Per Phase 11 history compaction; prompt: summary injection replaces oldest pairs.
-- **ROADMAP overlap:** [Phase 11 — History compaction / summarization](./ROADMAP.md)
+- **ROADMAP overlap:** Heim **M5b**
 
 ---
 
@@ -912,7 +941,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Smartring connection
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Use ring data for evening step count and morning sleep summary; sync at wake.
 - **User stories:**
@@ -926,7 +955,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **API ownership:** Companion syncs; Mimir reads daily summaries via adapter. No clinical claims.
 - **Tools + context:** Proposed: `get_sleep_summary`, `get_steps`; config: enable flag default off.
 - **Open questions:** Which ring/vendor; local bridge vs cloud.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** health — highest; minimize retention
 
 ---
@@ -935,7 +964,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Mobile companion app (camera)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Mobile companion giving Mimir camera capabilities (note scanning, receipt scanning).
 - **User stories:**
@@ -945,12 +974,12 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Scanned text → destination SoT (BudgetTracker for receipts, Grimoire/Homebase for notes)
 - **API ownership:** Companion captures; brain OCR/tool routes; destination APIs mutate. Confirm before expense create.
 - **Tools + context:** Upload + `import_receipt` / `import_note_image`; auth token; size limits.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 - **Sensitivity:** camera + receipts (financial) — high
 
 ### Wall-mounted tablet (Mimir + Homebase)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** far
 - **Summary:** Wall tablet UI combining Mimir and Homebase.
 - **User stories:**
@@ -959,11 +988,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a (presentation); data remains in brain + Homebase
 - **API ownership:** Homebase PWA + Mimir HTTP API; tablet is a client only (AGENTS: clients are front doors).
 - **Tools + context:** Deploy notes only; no brain logic on tablet.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M6b**
 
 ### Web dashboard (logs, history, system state)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Dashboard for logs, history, and system state.
 - **User stories:**
@@ -972,11 +1001,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain logs + SQLite + `/health`
 - **API ownership:** Brain serves read-only ops UI or JSON; do not expose publicly.
 - **Tools + context:** Optional static ops UI; reuse turn JSONL; auth required on LAN.
-- **ROADMAP overlap:** none (Phase 9 packaging adjacent)
+- **ROADMAP overlap:** Heim **M5f**
 
 ### Auto backups to NAS
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Automatic backups of Mimir data to the NAS.
 - **User stories:**
@@ -985,11 +1014,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Backup copies on NAS; live SoT remains brain data dir
 - **API ownership:** Ops scripts / compose sidecar; not an LLM tool.
 - **Tools + context:** Document in Phase 9 backup note; cron/rsync; test restore.
-- **ROADMAP overlap:** related to [Phase 9 — Deployment packaging](./ROADMAP.md) backup note
+- **ROADMAP overlap:** Heim **M5f**
 
 ### Weather air-quality expansion
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Expand weather tooling with air quality (and related).
 - **User stories:**
@@ -998,11 +1027,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Weather provider; Forecast cache pattern may extend
 - **API ownership:** Brain weather tool read-only (already owns weather integration).
 - **Tools + context:** Extend `get_weather` or add `get_air_quality`; degrade offline via cache if applicable.
-- **ROADMAP overlap:** none (Phase 11 rain nowcast is separate)
+- **ROADMAP overlap:** Heim **M5d**
 
 ### Currency conversion
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Convert between currencies.
 - **User stories:**
@@ -1011,7 +1040,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Rates provider (TBD)
 - **API ownership:** Read-only tool; display EUR with `nl-NL` awareness (BudgetTracker convention) when relevant.
 - **Tools + context:** Proposed: `convert_currency`; timeout; show rate date.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ---
 
@@ -1019,7 +1048,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Capability discovery (“what can you do”)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Explain available capabilities and how a tool works.
 - **User stories:**
@@ -1029,11 +1058,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain tool registry + this backlog / ROADMAP for “coming later”
 - **API ownership:** Brain `list_capabilities` or prompt section generated from enabled tools only (don’t advertise parked features as live).
 - **Tools + context:** Auto-generate from tool schemas; distinguish live vs planned.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Usage stats, milestones, and Mimir’s birthday
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** mid
 - **Summary:** Usage statistics, congratulatory milestones, and remembering Mimir’s own birthday.
 - **User stories:**
@@ -1044,11 +1073,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain observability DB/JSONL; birthday constant in config or prompt
 - **API ownership:** Brain owns counters; no sibling.
 - **Tools + context:** Proposed: `usage_stats`; inject birthday **2026-08-26** into prompt on that date.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Repeat last response
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Repeat the last assistant response (useful for voice).
 - **User stories:**
@@ -1057,11 +1086,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain Messages / in-memory last TTS text
 - **API ownership:** Brain returns last final assistant Message; HA may re-TTS.
 - **Tools + context:** Intent routing without new model call when possible.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Simplified language (ELI5)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Explain in simplified language / ELI5 on request.
 - **User stories:**
@@ -1070,11 +1099,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a
 - **API ownership:** Prompt / tone preference; optional pref key later.
 - **Tools + context:** System prompt instruction; no tool required.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Explain yourself (rationale / tool use)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Short rationale for a response or tool call — not hidden chain-of-thought dump.
 - **User stories:**
@@ -1083,7 +1112,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Last turn’s tool names/args (not full chain-of-thought)
 - **API ownership:** Brain summarizes tool trace to user; `think: false` remains default.
 - **Tools + context:** Prefer structured “I called X because Y”; do not expose raw hidden reasoning channels.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ### Confidence signaling
 
@@ -1096,7 +1125,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a
 - **API ownership:** Prompt-level; tools should return explicit uncertainty (stale sync, missing entity).
 - **Tools + context:** Tool results include `confidence`/`stale` flags where relevant.
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** none (prompt policy; mid)
 
 ### Conversation export and search
 
@@ -1109,7 +1138,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain SQLite Conversations/Messages
 - **API ownership:** Brain search/export API; client displays. Host-only or auth.
 - **Tools + context:** Proposed: `search_conversations` + export endpoint; privacy filters.
-- **ROADMAP overlap:** none (Phase 8b is resume, not search)
+- **ROADMAP overlap:** none (mid; after M5b compaction)
 - **Sensitivity:** conversation content
 
 ### A/B model comparison and regression suite
@@ -1124,11 +1153,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Suite results docs; Ollama model tags
 - **API ownership:** Ops/scripts; not a user-facing chat feature first.
 - **Tools + context:** Run suite per model; document viability ≥80% bar (AGENTS.md).
-- **ROADMAP overlap:** standing suite already required on model changes; A/B UX is extra
+- **ROADMAP overlap:** none (ops; standing suite exists)
 
 ### TTS speed settings
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Talk faster or slower.
 - **User stories:**
@@ -1137,11 +1166,11 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** HA TTS voice configuration / preference
 - **API ownership:** HA owns TTS rate; Mimir may store a preference and pass to HA if API allows.
 - **Tools + context:** Pref `tts_rate` or HA automation; voice-only.
-- **ROADMAP overlap:** none (Phase 10)
+- **ROADMAP overlap:** Heim **M6b** (HA TTS) / partial M5b if brain Piper exposes rate
 
 ### Discussions (two-sided framing)
 
-- **Status:** parked
+- **Status:** in-roadmap
 - **Horizon:** near
 - **Summary:** Lay out two sides of a problem on request.
 - **User stories:**
@@ -1150,7 +1179,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** n/a
 - **API ownership:** Prompt; no tool.
 - **Tools + context:** System prompt example for “steelman both sides.”
-- **ROADMAP overlap:** none
+- **ROADMAP overlap:** Heim **M5b**
 
 ---
 

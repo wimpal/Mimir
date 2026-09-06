@@ -28,6 +28,7 @@ from brain.prefs import (
     build_system_prompt,
     normalize_preference_value,
 )
+from brain.recipe_import import PendingRecipeStore
 from brain.tools import Tool, build_registry
 from brain.turn_log import append_turn_trace
 from brain.voice.sentences import SentenceBuffer
@@ -145,6 +146,7 @@ class BrainService:
         self.data_dir = data_dir
         self.db = db
         self.unavailable_services = list(unavailable_services or [])
+        self.pending_recipes = PendingRecipeStore()
         if tools is not None:
             self.tools = tools
         else:
@@ -254,6 +256,8 @@ class BrainService:
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
             data_dir=self.data_dir,
+            conversation_id=conversation_id,
+            pending_recipes=self.pending_recipes,
         )
 
         reply = _user_facing_reply(result)
@@ -317,6 +321,8 @@ class BrainService:
             on_tool_start=on_tool_start,
             on_tool_end=on_tool_end,
             data_dir=self.data_dir,
+            conversation_id=conversation_id,
+            pending_recipes=self.pending_recipes,
         )
 
         reply = _user_facing_reply(result)
@@ -340,6 +346,7 @@ class BrainService:
         self,
         chat_messages: list[ChatMessage],
         *,
+        conversation_id: str | None = None,
         on_tool_start: Any = None,
         on_tool_end: Any = None,
         on_assistant_delta: Any = None,
@@ -358,6 +365,8 @@ class BrainService:
             on_tool_end=on_tool_end,
             on_assistant_delta=on_assistant_delta,
             data_dir=self.data_dir,
+            conversation_id=conversation_id,
+            pending_recipes=self.pending_recipes,
         )
 
     def _outcome_from_turn(
@@ -443,6 +452,7 @@ class BrainService:
             try:
                 result = self._execute_turn(
                     chat_messages,
+                    conversation_id=conversation_id,
                     on_tool_start=on_tool_start,
                     on_tool_end=on_tool_end,
                     on_assistant_delta=on_assistant_delta,

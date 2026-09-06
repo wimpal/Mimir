@@ -16,6 +16,30 @@ from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
 from brain.tools import Tool
 
 
+def test_recipe_save_phrases_request_write() -> None:
+    assert user_message_requests_write("Save this recipe: https://example.com/r")
+    assert user_message_requests_write("Bewaar dit recept")
+    assert user_message_requests_write("Voeg dit recept toe")
+    assert check_write_allowed(
+        "homebase.recipes.add",
+        "Save this recipe please",
+    ) is None
+    assert check_write_allowed(
+        "homebase.recipes.add",
+        "recept met kip",
+    ) is not None
+    assert check_write_allowed(
+        "homebase.recipes.add",
+        "yes",
+        recipe_pending=True,
+    ) is None
+    assert check_write_allowed(
+        "homebase.recipes.add",
+        "yes",
+        recipe_pending=False,
+    ) is not None
+
+
 def test_read_only_questions_do_not_request_write() -> None:
     assert not user_message_requests_write("what's low on stock?")
     assert not user_message_requests_write("What's on the shopping list?")
