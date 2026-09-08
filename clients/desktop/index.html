@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mimir</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app" class="app">
+      <header class="topbar">
+        <div id="meta" class="meta">connecting…</div>
+      </header>
+
+      <main class="main">
+        <div id="splash" class="splash">
+          <pre id="tree" class="tree" aria-hidden="true"></pre>
+          <div class="splash-copy">
+            <div class="welcome">Welcome to Mimir</div>
+            <div class="tip">Ask anything  ·  /help  ·  /history  ·  /settings  ·  /new</div>
+            <div class="flavor">Wisdom drawn from the well beneath the world tree.</div>
+          </div>
+        </div>
+        <div id="transcript" class="transcript hidden" aria-live="polite"></div>
+        <div id="work-status" class="work-status hidden"></div>
+        <div id="confirm-bar" class="confirm-bar hidden">
+          <button type="button" id="btn-confirm" class="btn primary">Confirm</button>
+          <button type="button" id="btn-cancel-write" class="btn">Cancel</button>
+        </div>
+        <div id="input-wrap" class="input-wrap">
+          <div class="input-row">
+            <textarea
+              id="composer"
+              class="composer"
+              rows="3"
+              placeholder="Message Mimir…"
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+            <button type="button" id="mic-btn" class="mic-btn" title="Voice (click to record)" aria-label="Microphone">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 19v3"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <rect x="9" y="2" width="6" height="13" rx="3"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="hints" class="hints">
+          /new  /history  /settings  /connect  /copy  /help  /quit  ·  Enter send  ·  Shift+Enter newline  ·  mic voice  ·  Esc interrupt
+        </div>
+      </main>
+
+      <dialog id="history-dialog" class="panel-dialog">
+        <div class="panel">
+          <div class="panel-head">
+            <strong>Conversations</strong>
+            <button type="button" id="btn-history-close" class="btn ghost">Esc</button>
+          </div>
+          <ul id="history-list" class="history-list"></ul>
+        </div>
+      </dialog>
+
+      <dialog id="prefs-dialog" class="panel-dialog">
+        <div class="panel">
+          <div class="panel-head">
+            <strong>Preferences</strong>
+            <button type="button" id="btn-prefs-close" class="btn ghost">Esc</button>
+          </div>
+          <ul id="prefs-list" class="prefs-list"></ul>
+          <label class="prefs-edit hidden" id="prefs-edit-wrap">
+            <span id="prefs-edit-label">Value</span>
+            <input id="prefs-edit" type="text" autocomplete="off" />
+          </label>
+          <p class="panel-hint">Click a key to edit · Enter save · Esc cancel</p>
+        </div>
+      </dialog>
+
+      <dialog id="connect-dialog" class="panel-dialog">
+        <form method="dialog" id="connect-form" class="panel connect-form">
+          <h2>Connect</h2>
+          <label>
+            Brain URL
+            <input id="connect-url" type="url" required placeholder="http://127.0.0.1:8000" />
+          </label>
+          <label>
+            Bearer token
+            <input id="connect-token" type="password" autocomplete="off" placeholder="MIMIR_CLIENT_TOKEN" />
+          </label>
+          <p class="panel-hint">Token is stored in Windows Credential Manager — not in the project tree.</p>
+          <div class="panel-actions">
+            <button type="submit" class="btn primary" value="save">Save</button>
+            <button type="button" id="connect-cancel" class="btn" value="cancel">Cancel</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+  </body>
+</html>

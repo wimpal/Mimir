@@ -124,6 +124,31 @@ def test_normalize_fills_missing_ingredient_quantity() -> None:
     assert len(payload["ingredients"]) == 4
 
 
+def test_normalize_strips_amount_already_in_quantity() -> None:
+    """Model often puts the amount in both fields — UI would double it."""
+    from brain.recipe_import import normalize_ingredient
+
+    assert normalize_ingredient(
+        {"name": "300 gr kipgehakt", "quantity": "300 gr"}
+    ) == {"name": "kipgehakt", "quantity": "300 gr"}
+    assert normalize_ingredient(
+        {"name": "4-6 wraps (Santa Maria)", "quantity": "4-6"}
+    ) == {"name": "wraps (Santa Maria)", "quantity": "4-6"}
+    assert normalize_ingredient(
+        {"name": "1 tl gedroogde oregano", "quantity": "1 tl"}
+    ) == {"name": "gedroogde oregano", "quantity": "1 tl"}
+    assert normalize_ingredient(
+        {"name": "snufje peper en zout", "quantity": "snufje"}
+    ) == {"name": "peper en zout", "quantity": "snufje"}
+    assert normalize_ingredient(
+        {"name": "1 tomaat", "quantity": "1"}
+    ) == {"name": "tomaat", "quantity": "1"}
+    # Empty quantity + Dutch "gr" unit
+    assert normalize_ingredient(
+        {"name": "300 gr kipgehakt", "quantity": ""}
+    ) == {"name": "kipgehakt", "quantity": "300 gr"}
+
+
 class _ScriptedClient:
     def __init__(self, responses: list[ChatMessage]) -> None:
         self._responses = list(responses)
@@ -290,7 +315,14 @@ def test_meal_plan_never_stages_add() -> None:
     assert any("write blocked" in (m.content or "") for m in result.messages)
 
 
-def test_duplicate_title_invalidates_confirm_allows_rename() -> None:
+def test_suggest_duplicate_title_suffixes() -> None:
+    from brain.recipe_import import suggest_duplicate_title
+
+    assert suggest_duplicate_title("Pannenkoeken") == "Pannenkoeken (2)"
+    assert suggest_duplicate_title("Pannenkoeken (2)") == "Pannenkoeken (3)"
+
+
+def test_duplicate_title_restages_confirmable_suffix() -> None:
     calls: list[dict] = []
 
     def execute(**kwargs: object) -> str:
@@ -332,17 +364,11 @@ def test_duplicate_title_invalidates_confirm_allows_rename() -> None:
             "steps": ["Mix."],
         },
     )
-    client = _ScriptedClient(
-        [
-            ChatMessage(
-                role="assistant",
-                content="That title already exists — pick another name?",
-            ),
-        ]
-    )
+    # No Ollama round — conflict forces rename confirm and returns.
+    client = _ScriptedClient([])
     result = run_turn(
         client,
-        [ChatMessage(role="user", content="yes")],
+        [ChatMessage(role="user", content="ja")],
         tools={"homebase.recipes.add": tool},
         conversation_id=cid,
         pending_recipes=store,
@@ -350,11 +376,17 @@ def test_duplicate_title_invalidates_confirm_allows_rename() -> None:
     )
     assert len(calls) == 1
     assert store.has(cid)
-    assert not store.is_confirmable(cid)
+    assert store.is_confirmable(cid)
+    assert store.get(cid)["title"] == "Pannenkoeken (2)"
+    assert "Pannenkoeken (2)" in (result.content or "")
+    assert "bestaat al" in (result.content or "").lower() or "already exists" in (
+        result.content or ""
+    ).lower()
+    assert any(s.anomaly == "recipe_duplicate_rename_forced" for s in result.steps)
 
-    # Bare yes again must not re-dispatch.
+    # Bare ja again saves under the proposed suffix.
     client2 = _ScriptedClient(
-        [ChatMessage(role="assistant", content="Please pick a new title.")]
+        [ChatMessage(role="assistant", content="Saved as Pannenkoeken (2).")]
     )
     run_turn(
         client2,
@@ -364,59 +396,9 @@ def test_duplicate_title_invalidates_confirm_allows_rename() -> None:
         pending_recipes=store,
         max_iterations=4,
     )
-    assert len(calls) == 1
-
-    # Rename restages then confirm saves.
-    client3 = _ScriptedClient(
-        [
-            ChatMessage(
-                role="assistant",
-                content="",
-                tool_calls=[
-                    ToolCall(
-                        function=ToolCallFunction(
-                            name="homebase.recipes.add",
-                            arguments={
-                                "title": "Pannenkoeken (2026-09-05)",
-                                "ingredients": [
-                                    {"name": "bloem", "quantity": "250 g"}
-                                ],
-                                "steps": ["Mix."],
-                            },
-                        )
-                    )
-                ],
-            ),
-            ChatMessage(
-                role="assistant",
-                content="Save Pannenkoeken (2026-09-05)?",
-            ),
-        ]
-    )
-    run_turn(
-        client3,
-        [ChatMessage(role="user", content="rename it to Pannenkoeken (2026-09-05)")],
-        tools={"homebase.recipes.add": tool},
-        conversation_id=cid,
-        pending_recipes=store,
-        max_iterations=4,
-    )
-    assert store.is_confirmable(cid)
-    client4 = _ScriptedClient(
-        [ChatMessage(role="assistant", content="Saved under the new title.")]
-    )
-    run_turn(
-        client4,
-        [ChatMessage(role="user", content="yes")],
-        tools={"homebase.recipes.add": tool},
-        conversation_id=cid,
-        pending_recipes=store,
-        max_iterations=4,
-    )
     assert len(calls) == 2
-    assert calls[1]["title"] == "Pannenkoeken (2026-09-05)"
+    assert calls[1]["title"] == "Pannenkoeken (2)"
     assert not store.has(cid)
-    assert result.stopped_reason == StoppedReason.FINAL
 
 
 def test_stale_pending_cleared_on_unrelated_turn() -> None:

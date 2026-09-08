@@ -200,7 +200,7 @@ _QTY_IN_NAME_RE = re.compile(
     r"\d+(?:[.,]\d+)?"
     r")"
     r"(?:\s*(?P<unit>"
-    r"g|kg|ml|l|oz|lb|lbs|tsp|tbsp|el|tl|"
+    r"gr|g|kg|ml|l|oz|lb|lbs|tsp|tbsp|el|tl|"
     r"teaspoons?|tablespoons?|cups?|grams?|kilograms?|ounces?|pounds?|"
     r"eetlepels?|theelepels?|gram|snufje"
     r"))?"
@@ -208,7 +208,23 @@ _QTY_IN_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Bare quantity words the model puts in both quantity and name (no leading number).
+_BARE_QTY_WORD_RE = re.compile(
+    r"^(?P<qty>snufje|pinch|to\s+taste)\s+(?P<name>.+)$",
+    re.IGNORECASE,
+)
+
 _DEFAULT_QUANTITY = "to taste"
+
+
+def _strip_qty_prefix_from_name(name: str, quantity: str) -> str:
+    """Remove a leading amount from name when it duplicates quantity."""
+    if not name or not quantity:
+        return name
+    prefix = re.match(re.escape(quantity) + r"\s+", name, re.IGNORECASE)
+    if prefix:
+        return name[prefix.end() :].strip()
+    return name
 
 
 def normalize_ingredient(item: Any) -> dict[str, str] | None:
@@ -226,13 +242,25 @@ def normalize_ingredient(item: Any) -> dict[str, str] | None:
     else:
         return None
 
-    if not quantity and name:
-        match = _QTY_IN_NAME_RE.match(name)
-        if match:
-            qty = match.group("qty").strip()
-            unit = (match.group("unit") or "").strip()
-            quantity = f"{qty} {unit}".strip() if unit else qty
-            name = match.group("name").strip()
+    # Always strip leading amount from name when present. Keep an existing
+    # quantity field; only fill quantity when it was empty (avoids
+    # "300 gr" + name "300 gr kipgehakt" → doubled UI display).
+    match = _QTY_IN_NAME_RE.match(name) if name else None
+    if match:
+        qty = match.group("qty").strip()
+        unit = (match.group("unit") or "").strip()
+        parsed = f"{qty} {unit}".strip() if unit else qty
+        if not quantity:
+            quantity = parsed
+        name = match.group("name").strip()
+    else:
+        bare = _BARE_QTY_WORD_RE.match(name) if name else None
+        if bare:
+            if not quantity:
+                quantity = bare.group("qty").strip()
+            name = bare.group("name").strip()
+
+    name = _strip_qty_prefix_from_name(name, quantity)
 
     if not name:
         return None
@@ -370,3 +398,66 @@ def build_recipe_confirm_reply(
 
 def duplicate_title_error(text: str) -> bool:
     return "Recipe title already exists" in (text or "")
+
+
+def suggest_duplicate_title(title: str) -> str:
+    """Next free disambiguated title: ``Name (2)``, ``Name (3)``, …"""
+    base = (title or "").strip() or "Recipe"
+    # If already ends with (N), bump N; otherwise start at 2.
+    suffix_m = re.match(r"^(.*)\s+\((\d+)\)\s*$", base)
+    if suffix_m:
+        stem = suffix_m.group(1).strip() or base
+        n = int(suffix_m.group(2)) + 1
+    else:
+        stem = base
+        n = 2
+    while True:
+        candidate = f"{stem} ({n})"
+        if len(candidate) <= MAX_TITLE_LEN:
+            return candidate
+        # Shrink stem to fit suffix.
+        room = MAX_TITLE_LEN - len(f" ({n})")
+        if room < 1:
+            return candidate[:MAX_TITLE_LEN]
+        stem = stem[:room].rstrip()
+        n += 1
+
+
+def restage_after_duplicate_title(
+    store: PendingRecipeStore,
+    conversation_id: str,
+) -> tuple[str, dict[str, Any]]:
+    """Bump pending title and re-enable confirm. Returns (original_title, new_payload)."""
+    payload = store.get(conversation_id)
+    if payload is None:
+        raise KeyError(conversation_id)
+    original = str(payload.get("title") or "")
+    updated = dict(payload)
+    updated["title"] = suggest_duplicate_title(original)
+    store.set(conversation_id, updated)
+    return original, updated
+
+
+def build_duplicate_rename_confirm_reply(
+    *,
+    original_title: str,
+    proposed_title: str,
+    user_message: str = "",
+) -> str:
+    """Forced copy after a title conflict — invites ja to save under proposed title."""
+    dutch = bool(
+        re.search(
+            r"\b(importeer|bewaar|recept|voeg|opslaan|alsjeblieft|jeblieft|ja)\b",
+            user_message or "",
+            re.IGNORECASE,
+        )
+    )
+    if dutch:
+        return (
+            f"De titel **{original_title}** bestaat al. "
+            f"Opslaan als **{proposed_title}**? Zeg *ja* of tik Confirm."
+        )
+    return (
+        f"The title **{original_title}** already exists. "
+        f"Save as **{proposed_title}**? Say *yes* or tap Confirm."
+    )

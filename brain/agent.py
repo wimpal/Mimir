@@ -58,12 +58,14 @@ from brain.recipe_import import (
     RECIPE_ADD_TOOL,
     PendingRecipeStore,
     awaiting_confirmation_result,
+    build_duplicate_rename_confirm_reply,
     build_recipe_confirm_reply,
     duplicate_title_error,
     is_bare_cancel,
     is_bare_confirm,
     may_stage_recipe_add,
     normalize_recipe_payload,
+    restage_after_duplicate_title,
     should_keep_pending_recipe,
     user_message_requests_recipe_save,
 )
@@ -487,11 +489,20 @@ def run_turn(
             tools=registry,
             timeout_s=per_tool,
         )
-        # Clear pending on success; keep (but invalidate confirm) on duplicate.
+        # Clear pending on success; on duplicate, restage with Title (N) and
+        # force a rename confirm (bare ja must work next).
+        duplicate_rename_reply: str | None = None
         if not tool_result_is_error(result):
             pending_recipes.clear(conversation_id)
         elif duplicate_title_error(result):
-            pending_recipes.invalidate_confirm(conversation_id)
+            original_title, restaged = restage_after_duplicate_title(
+                pending_recipes, conversation_id
+            )
+            duplicate_rename_reply = build_duplicate_rename_confirm_reply(
+                original_title=original_title,
+                proposed_title=str(restaged.get("title") or ""),
+                user_message=user_message,
+            )
         else:
             pending_recipes.clear(conversation_id)
         ok = not tool_result_is_error(result)
@@ -512,6 +523,25 @@ def run_turn(
                 content_preview=(result[:120] if result else ""),
             )
         )
+        if duplicate_rename_reply is not None:
+            working.append(
+                ChatMessage(role="assistant", content=duplicate_rename_reply)
+            )
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="recipe_duplicate_rename_forced",
+                    content_preview=duplicate_rename_reply[:120],
+                )
+            )
+            return TurnResult(
+                content=duplicate_rename_reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
 
     for _ in range(iteration_budget):
         if _deadline_exceeded(deadline_monotonic):

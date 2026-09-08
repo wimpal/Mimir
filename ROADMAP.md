@@ -308,11 +308,18 @@ schema add.
 **Status: done** — Textual TUI Chat client (ADR 0004 supersedes web UI / ADR 0003).
 See `[docs/phase6-chat.md](./docs/phase6-chat.md)`, `[docs/api-streaming.md](./docs/api-streaming.md)`.
 
-Thin **Textual TUI** Chat client only — no business logic in the UI.
-Telegram/Matrix bots are out of scope (not a deferred option).
-The Phase 6 web static UI was replaced by the TUI.
+**Follow-on (T-045 / M5g): done** — Tauri 2 desktop GUI in `clients/desktop/` is
+the **Windows daily driver** (pin `dist/mimir-desktop.exe`). Textual TUI remains
+for SSH/headless. Same brain HTTP/SSE; native Enter/Shift+Enter; fresh chat each
+launch. Prefer the GUI on Windows when terminal keyboard limits block UX
+(e.g. recipe paste).
 
-**Locked**
+Thin **client** front doors only — no business logic in the UI.
+Telegram/Matrix bots are out of scope (not a deferred option).
+The Phase 6 web static UI was replaced by the TUI; the Tauri GUI is a native
+shell with an embedded webview, not a browser Chat product as the front door.
+
+**Locked (Phase 6 TUI)**
 
 - Full-screen Textual TUI (`uv run mimir` / `dist/mimir.exe`)
 - On launch: health-check brain; if down, start `uv run uvicorn` from the repo (does not stop brain on exit)
@@ -335,7 +342,7 @@ The Phase 6 web static UI was replaced by the TUI.
 - No direct Ollama/Jellyfin calls from the client
 - No Open WebUI as the long-term path (fine for temporary debugging)
 - No Telegram/Matrix chat front door
-- No browser Chat UI as the product front door
+- No **browser** Chat UI as the product front door (Tauri embedded webview GUI is allowed)
 
 **Exit criteria:** Full user journey works from TUI: chat → weather → movie recs; brain auto-starts if down; new Conversation each launch.
 

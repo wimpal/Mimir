@@ -13,7 +13,7 @@ A persisted user utterance or final assistant reply in a Conversation. Tool-call
 _Avoid_: Turn (reserved for observability traces), history entry
 
 **Preference**:
-A durable key/value fact about the user, drawn from a small allowlist. The brain injects known Preferences into model context and exposes get/set via tools and `GET/PUT /v1/preferences` (TUI `/settings`).
+A durable key/value fact about the user, drawn from a small allowlist. The brain injects known Preferences into model context and exposes get/set via tools and `GET/PUT /v1/preferences` (desktop/TUI `/settings`).
 _Avoid_: Setting, config, memory (as a synonym for prefs)
 
 **History window**:
@@ -45,7 +45,7 @@ A Movie the configured Jellyfin user has marked played/completed. Partial progre
 _Avoid_: Seen, started
 
 **Chat client**:
-The thin Textual TUI (`uv run mimir` / `dist/mimir.exe`) that talks only to the brain over HTTP. It may start the brain if `/health` fails, but holds no business logic and never calls Ollama, Jellyfin, or weather APIs directly. Each launch opens a new Conversation; `/history` resumes a past one; `/settings` edits allowlisted Preferences.
+A thin front door that talks only to the brain over HTTP — **Windows daily driver** Tauri GUI (`clients/desktop/` / `dist/mimir-desktop.exe`), secondary Textual TUI (`uv run mimir` / `dist/mimir.exe`), or Android (`clients/mobile/`). May start the brain if `/health` fails; holds no business logic and never calls Ollama, Jellyfin, or weather APIs directly. Desktop and TUI each launch open a new Conversation; `/history` resumes a past one; `/settings` edits allowlisted Preferences.
 _Avoid_: Open WebUI (as the product UI), web UI (superseded), bot, frontend with tools/prompts
 
 **Auth token**:

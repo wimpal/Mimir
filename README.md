@@ -1,26 +1,31 @@
 # Mimir — Offline Personal Assistant
 
 Self-hosted, offline-first chat assistant: a FastAPI **brain** running
-**Qwen3 8B via Ollama** with tools (weather, Jellyfin), plus a Textual **TUI**
-Chat client. Voice (Home Assistant) is v2 and plugs into the same brain.
+**Qwen3 8B via Ollama** with tools (weather, Jellyfin), plus thin chat
+clients. **Windows daily driver:** Tauri 2 GUI (`clients/desktop/`). Textual
+TUI is secondary (SSH / headless). Voice (Home Assistant) is v2 and plugs into
+the same brain.
 
 Read [`Concept.md`](./Concept.md) for intent and [`ROADMAP.md`](./ROADMAP.md)
-for phases. Chat UI: Phase 6 done (TUI — ADR 0004).
+for phases. Chat UI: Phase 6 TUI (ADR 0004); desktop GUI **T-045 / M5g done**.
 
 ## Layout
 
 ```
-brain/           # FastAPI brain: chat, OpenAI adapter, agent loop, tools
-clients/tui/     # Textual Chat client — uv run mimir
-config/          # config.example.yaml (copy to config.yaml), system_prompt.md
-scripts/         # try_prompt.py, tool_call_suite.py
-docs/            # Phase notes (tool-calling, HA spike, streaming contract)
-tests/           # pytest
+brain/              # FastAPI brain: chat, OpenAI adapter, agent loop, tools
+clients/desktop/    # Tauri 2 Windows daily driver — pin dist/mimir-desktop.exe
+clients/tui/        # Textual TUI — uv run mimir / dist/mimir.exe (SSH / headless)
+clients/mobile/     # Android chat + push-to-talk
+config/             # config.example.yaml (copy to config.yaml), system_prompt.md
+scripts/            # restart_mimir, build_*_exe, tool_call_suite, …
+docs/               # Phase notes (tool-calling, HA spike, streaming contract)
+tests/              # pytest
 ```
 
 ## Quickstart
 
 Prerequisites: [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com).
+Desktop GUI also needs [Node.js](https://nodejs.org/) + [Rust](https://rustup.rs/) for builds.
 
 ```powershell
 # 1. Dependencies
@@ -37,12 +42,20 @@ uv run python -m brain.config
 # 4. Standing tool-call suite (>=80%)
 uv run python scripts/tool_call_suite.py
 
-# 5. Run the brain (host/port must match config runtime.host / runtime.port)
-uv run uvicorn brain.main:app --host 127.0.0.1 --port 8000 --reload
+# 5. Brain + Windows daily-driver GUI
+powershell -File scripts/restart_mimir.ps1
+# pinable exe (once): powershell -File scripts/build_mimir_desktop_exe.ps1
+#   → pin dist\mimir-desktop.exe
 
-# 6. Chat TUI (auto-starts brain if needed; sends MIMIR_CLIENT_TOKEN when set)
-uv run mimir
-# optional: uv run mimir --url http://127.0.0.1:8000
+# Secondary: Textual TUI (SSH / headless)
+#   uv run mimir
+#   powershell -File scripts/restart_mimir.ps1 -NoGui -WithTui
+```
+
+Or run the brain alone:
+
+```powershell
+uv run uvicorn brain.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Health stays open. With `auth.mode: token` (default via `MIMIR_AUTH_MODE=token` in `.env`),
@@ -134,14 +147,15 @@ Start-ScheduledTask -TaskPath '\Heim\' -TaskName 'Heim Mimir brain'
 
 Uninstall: `powershell -File scripts/install_login_tasks.ps1 -Uninstall`
 
-### After reboot + login (before opening TUI)
+### After reboot + login (before opening a chat client)
 
 ```powershell
 curl http://127.0.0.1:8000/health
 curl http://127.0.0.1:11434/api/tags
 ```
 
-Then `uv run mimir` or `dist\mimir.exe` — chat should work with no manual brain start.
+Then open `dist\mimir-desktop.exe` (or `scripts/restart_mimir.ps1`) — chat should work
+with no manual brain start. TUI: `uv run mimir` / `dist\mimir.exe`.
 
 ### Manual restart vs login start
 
@@ -221,9 +235,9 @@ curl.exe -X POST http://127.0.0.1:8000/v1/chat `
   -d "{\"message\":\"hi\"}"
 ```
 
-The TUI (`uv run mimir` / `dist\mimir.exe`) keeps using loopback (`http://127.0.0.1:8000`)
-or `MIMIR_BRAIN_URL` — both work when the brain binds `0.0.0.0`. **Verified 2026-08-29:**
-desktop TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
+Desktop GUI and TUI keep using loopback (`http://127.0.0.1:8000`) or
+`MIMIR_BRAIN_URL` — both work when the brain binds `0.0.0.0`. **Verified 2026-08-29:**
+TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
 
 ### Verified (operator household, 2026-08-29)
 
@@ -231,7 +245,7 @@ desktop TUI chats normally with `runtime.host: 0.0.0.0` + token auth unchanged.
 |-------|--------|
 | Firewall rule | Installed (`Heim Mimir brain`, Private + LocalSubnet) |
 | Phone `GET /health` on LAN | 200, full JSON |
-| TUI on PC (`dist\mimir.exe` / `uv run mimir`) | Chat works on loopback |
+| Desktop GUI / TUI on PC | Chat works on loopback (GUI is daily driver as of T-045) |
 | Phone `POST /v1/chat` → 401 / bearer chat | Verified 2026-08-29 (Termux) |
 | Reboot → LAN without manual steps | Verified 2026-08-29 |
 

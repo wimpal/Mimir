@@ -127,18 +127,30 @@ optional tool logs.
 | Retention | Keep full history for single-user v1; no auto-prune unless disk hurts |
 | Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`. Token-budget window and summarization/compaction are backlog until long threads actually break |
 | Chat memory path | Mimir `/v1/chat` owns SQLite Conversations; OpenAI-compat stays client `messages` only until Assist needs shared threads (ADR 0001) |
-| Preferences | Allowlisted keys via tools + TUI `/settings` + system-prompt inject; HTTP `GET/PUT /v1/preferences`; Jellyfin watch/likes are media state, not Preference rows |
+| Preferences | Allowlisted keys via tools + client `/settings` + system-prompt inject; HTTP `GET/PUT /v1/preferences`; Jellyfin watch/likes are media state, not Preference rows |
 
 ---
 
 ## Chat Frontend (v1)
 
-Full-screen Textual TUI Chat client (`uv run mimir` / `dist/mimir.exe`) — thin
-HTTP client only (ADR 0004). Health-checks the brain and starts it if needed
-(`uv run uvicorn` from the repo); does not stop it on exit. Each launch opens a
-new Conversation; `/history` resumes a past one; `/settings` edits allowlisted Preferences. Telegram/Matrix bots are not a v1 path.
-Discord is a send tool with a Channel allowlist (ADR 0006), not a chat front door.
-The Phase 6 web UI was superseded.
+**Windows daily driver:** Tauri 2 desktop GUI in `clients/desktop/` — thin front
+door with native Enter / Shift+Enter, Confirm/Cancel on writes, Rust-side
+HTTP/SSE to the brain (**T-045 / M5g done**). Pin `dist/mimir-desktop.exe`
+(build: `scripts/build_mimir_desktop_exe.ps1`). Settings store URL locally and
+the bearer token in Windows Credential Manager. May auto-start the brain on
+localhost (`uv run uvicorn`). Each launch starts a **fresh** Conversation;
+`/history` resumes (same policy as the TUI).
+
+**Secondary / SSH / headless:** Textual TUI in `clients/tui/` (`uv run mimir` /
+`dist/mimir.exe`) — same brain API; each launch opens a new Conversation;
+`/history` resumes; `/settings` edits Preferences. Prefer the GUI on Windows when
+keyboard control matters (terminal Enter/Shift+Enter are not independently
+controllable).
+
+Telegram/Matrix bots are not a v1 path. Discord is a send tool with a Channel
+allowlist (ADR 0006), not a chat front door. The Phase 6 same-origin web UI was
+superseded by the TUI (ADR 0004); the Tauri GUI is the documented desktop product
+UI (webview shell, not a browser Chat product).
 
 **Network / auth:** Default bind is loopback with no Auth token. Opening
 `runtime.host` past loopback requires `auth.mode: token` and `MIMIR_CLIENT_TOKEN`

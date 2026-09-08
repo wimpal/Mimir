@@ -14,7 +14,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from clients.tui.audio_capture import (
     AudioCapture,
@@ -28,9 +28,10 @@ from clients.tui.brain_client import (
     BrainClientError,
     normalize_brain_url,
 )
-from clients.tui.mic_button import MicButton
 from clients.tui.brain_launcher import ensure_brain_running
+from clients.tui.composer import ChatComposer
 from clients.tui.history import HistoryScreen
+from clients.tui.mic_button import MicButton
 from clients.tui.settings import SettingsScreen
 from clients.tui.splash import Splash
 from clients.tui.state import ChatState, default_state_path, save_state
@@ -46,6 +47,8 @@ HELP_TEXT = """Commands:
   Esc       — interrupt the current turn while working
   Ctrl+Shift+C — copy the last reply
   Drag to select, then Ctrl+C — copy selection (does not quit)
+  Enter     — send message
+  Shift+Enter / Ctrl+J — new line (paste keeps all lines)
 
 Chat normally by typing a message and pressing Enter.
 Click the mic icon beside the input to record; click again (or Esc) when done.
@@ -255,11 +258,17 @@ class MimirApp(App[None]):
     }
     #input {
         width: 1fr;
+        height: 5;
+        min-height: 3;
+        max-height: 12;
         background: transparent;
         border: none;
         padding: 0;
     }
     #input:focus {
+        background: transparent;
+    }
+    #input .text-area--cursor-line {
         background: transparent;
     }
 
@@ -320,10 +329,11 @@ class MimirApp(App[None]):
         yield Static("", id="work-status", classes="hidden")
         with Vertical(id="input-wrap"):
             with Horizontal(id="input-row"):
-                yield Input(placeholder="Message Mimir…", id="input")
+                yield ChatComposer(placeholder="Message Mimir…", id="input")
                 yield MicButton(id="mic-btn")
         yield Static(
             "/new  /history  /settings  /copy  /help  /quit  ·  "
+            "Enter send  ·  Shift+Enter newline  ·  "
             "mic voice  ·  Ctrl+Shift+C copy  ·  Esc interrupt",
             id="hints",
         )
@@ -467,7 +477,7 @@ class MimirApp(App[None]):
     def _focus_input(self) -> None:
         if self._capture is not None and self._capture.is_recording:
             return
-        self.query_one("#input", Input).focus()
+        self.query_one("#input", ChatComposer).focus()
 
     def _mic_button(self) -> MicButton:
         return self.query_one("#mic-btn", MicButton)
@@ -499,7 +509,7 @@ class MimirApp(App[None]):
     ) -> None:
         self._busy = busy
         self._busy_kind = kind if busy else None
-        inp = self.query_one("#input", Input)
+        inp = self.query_one("#input", ChatComposer)
         # Keep the field usable during connect so typing works on open.
         inp.disabled = busy and kind not in ("startup", "record")
         if kind == "record":
@@ -668,17 +678,17 @@ class MimirApp(App[None]):
         self._set_busy(False)
         self._refresh_meta("ready")
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Ignore nested Inputs (e.g. /settings modal owns its own field).
-        if event.input.id != "input":
-            return
-        text = (event.value or "").strip()
+    async def on_chat_composer_submitted(
+        self, event: ChatComposer.Submitted
+    ) -> None:
+        composer = self.query_one("#input", ChatComposer)
+        text = (event.text or "").strip()
         if not text:
             return
         # Don't wipe typed text if Enter lands during connect / another busy state.
         if self._busy:
             return
-        event.input.value = ""
+        composer.clear_draft()
 
         if text.startswith("/"):
             await self._handle_command(text)

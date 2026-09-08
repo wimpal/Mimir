@@ -3,6 +3,9 @@
 Full-screen Textual TUI (ADR 0004): Claude/Amp-style blend chrome with a
 green Yggdrasil splash on empty Conversations.
 
+**Windows daily driver is now** [`clients/desktop/`](../desktop/) (Tauri 2).
+Keep this TUI for SSH / headless / terminal use.
+
 ## Run (dev)
 
 ```powershell
@@ -15,16 +18,17 @@ python -m clients.tui
 Quick “new window” shortcut (still uses uv): double-click
 [`scripts/launch_mimir.bat`](../../scripts/launch_mimir.bat).
 
-Full restart (stop brain + TUI, rebuild `dist\mimir.exe`, start both):
+Full restart (stop brain + clients, start brain + **desktop GUI**):
 
 ```powershell
 powershell -File scripts/restart_mimir.ps1
 # brain only: powershell -File scripts/restart_mimir.ps1 -BrainOnly
-# skip PyInstaller (faster dev): powershell -File scripts/restart_mimir.ps1 -SkipExeBuild
+# also Textual TUI: powershell -File scripts/restart_mimir.ps1 -WithTui
+# TUI only (no GUI): powershell -File scripts/restart_mimir.ps1 -NoGui -WithTui -SkipExeBuild
 ```
 
 Or double-click [`scripts/restart_mimir.bat`](../../scripts/restart_mimir.bat).
-Default full restart rebuilds `dist\mimir.exe` then launches it (pinned taskbar shortcut stays current).
+Default opens the Tauri GUI (`clients/desktop`). `-WithTui` also rebuilds/launches `dist\mimir.exe`.
 
 ## Windows .exe (double-click → terminal + TUI)
 
@@ -106,6 +110,7 @@ Or add `MIMIR_TUI_ICON_MODE=text` to `.env`.
 | Input | Action |
 |---|---|
 | text + Enter | Send chat turn (SSE) |
+| Shift+Enter / Ctrl+J | Insert a newline (multiline paste keeps all lines) |
 | mic icon | Start / stop voice recording → STT → send |
 | `/new` | New Conversation |
 | `/history` | Browse and resume a past Conversation |

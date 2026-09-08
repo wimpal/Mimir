@@ -45,9 +45,13 @@ reads another's storage, ever.
 
 ## This repo
 
-### Current task — T-019 (T-018 Mimir acceptance done 2026-08-29)
+### Current task — T-046 (desktop mic/prefs Acceptance)
 
-**Next:** M4 daily driver week — see `project-control-heim/board/tasks/T-019-m4-daily-driver-week.md`.
+**T-045 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
+`dist\mimir-desktop.exe` (`scripts/build_mimir_desktop_exe.ps1`). Restart:
+`scripts/restart_mimir.ps1`. Textual TUI is secondary / SSH (`-WithTui`).
+
+**Open:** T-046 Acceptance (mic + `/settings` live smoke); T-019; T-021/T-044.
 
 Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
 `MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.
@@ -102,7 +106,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 | Memory | **SQLite** (history, prefs, Jellyfin cache); hand-rolled migrations (`schema_version`, Phase 4+) |
 | Weather | **Open-Meteo** (no API key) → **KNMI HARMONIE** for NL; lat/long + timezone in config |
 | Media | **Jellyfin REST** → SQLite cache (paginated sync); LLM reasons over a **filtered subset** |
-| Chat UI (desktop) | Thin Textual TUI in `clients/tui/` (`uv run mimir` / `dist/mimir.exe`); may auto-start brain; no direct Ollama/Jellyfin/MCP calls |
+| Chat UI (desktop) | **Tauri 2** GUI in `clients/desktop/` (Windows daily driver); Textual TUI in `clients/tui/` secondary / SSH; may auto-start brain; no direct Ollama/Jellyfin/MCP calls |
 | Chat UI (mobile) | `clients/mobile/` — **Android**, **Kotlin + Jetpack Compose**; TUI-equivalent UX + push-to-talk; brain-side STT/TTS (M5); bearer auth via `MIMIR_CLIENT_TOKEN` |
 | Deploy target | Linux compute box later; keep code **OS-agnostic** now (Windows + AMD 9070 XT 16 GB) |
 | Language/tooling | **Python 3.12+** · **uv** · **ruff**; profiles: **single-user v1** (locked Phase 0) |
@@ -110,7 +114,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ## Architecture invariants
 
 - The **brain** owns tools, prompts, history, timeouts, and Jellyfin sync. **Clients** under `clients/` are front doors only. Ollama never calls external APIs; clients never call MCP services.
-- **`clients/tui/`** (desktop) and **`clients/mobile/`** (phone, M5) are sibling packages. Share the chat API and UX language; do not share platform UI code. See `project-control-heim/ARCHITECTURE.md` — *Mimir: brain and clients*.
+- **`clients/desktop/`** (Windows GUI), **`clients/tui/`** (SSH/headless), and **`clients/mobile/`** are sibling packages. Share the chat API and UX language; do not share platform UI code. See `project-control-heim/ARCHITECTURE.md` — *Mimir: brain and clients*.
 - Prefer an **OpenAI-compatible** chat endpoint (or thin adapter) so Home Assistant can call the same brain in v2 — **after** the Phase 2 HA spike confirms the path. Never point HA at native Ollama for Mimir (bypasses tools).
 - Tool loop: user message → Ollama (+ tool schemas) → execute tool → feed result → final reply. Cap iterations. Time out every external call.
 - Fail loud and short: if Ollama/Jellyfin/weather is down, return a clear message — never hang.
@@ -124,8 +128,9 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ```
 brain/           # FastAPI service, tools, agent loop, SQLite — only layer that calls MCP
 clients/
-  tui/           # Desktop Textual chat (`uv run mimir`) — today
-  mobile/        # Android (Kotlin + Jetpack Compose): TUI-equivalent UX + push-to-talk (M5)
+  desktop/       # Tauri 2 Windows daily-driver GUI (`npm run tauri dev`)
+  tui/           # Textual chat (`uv run mimir`) — SSH / headless secondary
+  mobile/        # Android (Kotlin + Jetpack Compose): typed chat + push-to-talk (M5)
 config/          # Examples + system prompt — real config.yaml gitignored
 scripts/         # try_prompt.py, tool_call_suite.py (standing regression)
 docs/            # Phase notes (tool-calling, HA spike, …)
@@ -145,7 +150,7 @@ Configurable data dir for SQLite/logs (env or config). Use `pathlib`; no hardcod
 - **Small slices:** dummy tool → weather → memory → Jellyfin → chat UI → harden → compose → voice last.
 - **Standing tool suite:** re-run `uv run python scripts/tool_call_suite.py` on model, system-prompt, tool-schema, or `num_ctx`/`think` changes. Viability bar ≥80%; track right-tool / valid-args / result-used separately when extending cases.
 - If the model drops/malforms calls after prompt/`num_ctx` fixes, **swap model** (named fallbacks in ROADMAP) — do not bury it under a framework.
-- Keep the brain **frontend-agnostic**. All chat UX lives under `clients/` (`tui/` today, `mobile/` at M5). Never put MCP or tool-loop logic in a client.
+- Keep the brain **frontend-agnostic**. All chat UX lives under `clients/` (`desktop/` daily driver, `tui/` secondary, `mobile/`). Never put MCP or tool-loop logic in a client.
 - Log prompt id, tool name, latency, success/fail (file or SQLite) once the loop exists.
 - Secrets (Jellyfin key, auth tokens) only via env / local config gitignored; ship `.env.example`.
 - Prefer `docker-compose.yml` as the Linux deploy unit even if you run Ollama natively on Windows during GPU bring-up.
