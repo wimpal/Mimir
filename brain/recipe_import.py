@@ -80,6 +80,18 @@ class PendingRecipe:
     created_monotonic: float = field(default_factory=time.monotonic)
     # Only the immediate next confirm may commit; cleared/invalidated otherwise.
     confirmable: bool = True
+    # Locale of the original save/import turn — bare yes/ja must not flip EN/NL.
+    dutch: bool = False
+
+
+@dataclass
+class PostSaveRecipeState:
+    """TTL-limited state after a successful recipes.add (T-048)."""
+
+    title: str
+    soft_followup_offered: bool = False
+    dutch: bool = False
+    created_monotonic: float = field(default_factory=time.monotonic)
 
 
 class PendingRecipeStore:
@@ -88,6 +100,7 @@ class PendingRecipeStore:
     def __init__(self, *, ttl_s: float = PENDING_TTL_S) -> None:
         self._ttl_s = ttl_s
         self._by_conversation: dict[str, PendingRecipe] = {}
+        self._post_save: dict[str, PostSaveRecipeState] = {}
 
     def _purge_expired(self) -> None:
         now = time.monotonic()
@@ -98,12 +111,33 @@ class PendingRecipeStore:
         ]
         for key in expired:
             del self._by_conversation[key]
+        expired_post = [
+            key
+            for key, item in self._post_save.items()
+            if now - item.created_monotonic > self._ttl_s
+        ]
+        for key in expired_post:
+            del self._post_save[key]
 
-    def set(self, conversation_id: str, payload: dict[str, Any]) -> None:
+    def set(
+        self,
+        conversation_id: str,
+        payload: dict[str, Any],
+        *,
+        dutch: bool | None = None,
+    ) -> None:
         self._purge_expired()
+        prior = self._by_conversation.get(conversation_id)
+        if dutch is not None:
+            locale = dutch
+        elif prior is not None:
+            locale = prior.dutch
+        else:
+            locale = False
         self._by_conversation[conversation_id] = PendingRecipe(
             payload=dict(payload),
             confirmable=True,
+            dutch=locale,
         )
 
     def get(self, conversation_id: str | None) -> dict[str, Any] | None:
@@ -112,6 +146,13 @@ class PendingRecipeStore:
         self._purge_expired()
         item = self._by_conversation.get(conversation_id)
         return dict(item.payload) if item is not None else None
+
+    def is_dutch(self, conversation_id: str | None) -> bool:
+        if not conversation_id:
+            return False
+        self._purge_expired()
+        item = self._by_conversation.get(conversation_id)
+        return bool(item is not None and item.dutch)
 
     def is_confirmable(self, conversation_id: str | None) -> bool:
         if not conversation_id:
@@ -135,6 +176,44 @@ class PendingRecipeStore:
 
     def has(self, conversation_id: str | None) -> bool:
         return self.get(conversation_id) is not None
+
+    def set_post_save(
+        self,
+        conversation_id: str,
+        *,
+        title: str,
+        soft_followup_offered: bool = False,
+        dutch: bool = False,
+    ) -> None:
+        self._purge_expired()
+        self._post_save[conversation_id] = PostSaveRecipeState(
+            title=(title or "").strip() or "recept",
+            soft_followup_offered=soft_followup_offered,
+            dutch=dutch,
+        )
+
+    def get_post_save(self, conversation_id: str | None) -> PostSaveRecipeState | None:
+        if not conversation_id:
+            return None
+        self._purge_expired()
+        return self._post_save.get(conversation_id)
+
+    def mark_soft_followup_offered(self, conversation_id: str | None) -> None:
+        if not conversation_id:
+            return
+        self._purge_expired()
+        item = self._post_save.get(conversation_id)
+        if item is not None:
+            item.soft_followup_offered = True
+
+    def clear_post_save(self, conversation_id: str | None) -> None:
+        if not conversation_id:
+            return
+        self._post_save.pop(conversation_id, None)
+
+    def has_soft_followup(self, conversation_id: str | None) -> bool:
+        item = self.get_post_save(conversation_id)
+        return bool(item is not None and item.soft_followup_offered)
 
 
 def is_bare_confirm(text: str) -> bool:
@@ -183,6 +262,123 @@ def should_keep_pending_recipe(text: str) -> bool:
     if user_message_renames_pending_recipe(text):
         return True
     return False
+
+
+def should_keep_post_save(text: str) -> bool:
+    """True when bare ja/nee may still answer a post-save soft follow-up."""
+    return is_bare_confirm(text) or is_bare_cancel(text)
+
+
+def recipe_locale_dutch(user_message: str = "", *, prefer_dutch: bool | None = None) -> bool:
+    if prefer_dutch is not None:
+        return prefer_dutch
+    return bool(
+        re.search(
+            r"\b(importeer|bewaar|recept|voeg|opslaan|alsjeblieft|jeblieft|ja|nee)\b",
+            user_message or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+_SOFT_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"nog\s+iets\b.*\b(?:aanpassen|toevoegen|wijzigen)\b|"
+    r"\b(?:aanpassen|toevoegen|wijzigen)\b.*\?|"
+    r"anything\s+else\b|"
+    r"\b(?:change|add|adjust|modify)\b.*\?|"
+    r"would\s+you\s+like\s+to\s+(?:change|add|adjust)|"
+    r"wilt\s+u\s+nog\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_soft_followup_offer(text: str) -> bool:
+    """True when assistant copy offers a rhetorical post-save follow-up."""
+    normalized = (text or "").strip()
+    if not normalized or "?" not in normalized:
+        return False
+    return _SOFT_FOLLOWUP_RE.search(normalized) is not None
+
+
+def parse_recipe_add_success(result: str) -> dict[str, Any] | None:
+    """Parse a successful recipes.add tool JSON; require a non-empty id."""
+    raw = (result or "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    recipe_id = data.get("id")
+    if recipe_id is None or str(recipe_id).strip() == "":
+        return None
+    return data
+
+
+def build_recipe_saved_reply(
+    payload: dict[str, Any],
+    *,
+    user_message: str = "",
+    dutch: bool | None = None,
+) -> str:
+    """Deterministic post-save confirm — no rhetorical soft follow-up (T-048)."""
+    title = str(
+        payload.get("title") or payload.get("name") or "recept"
+    ).strip() or "recept"
+    servings = payload.get("servings")
+    ingredients = payload.get("ingredients") or []
+    steps = payload.get("steps") or []
+    n_ing = len(ingredients) if isinstance(ingredients, list) else 0
+    if isinstance(steps, list):
+        n_steps = len(steps)
+    elif isinstance(payload.get("instructions"), str) and payload["instructions"].strip():
+        n_steps = len([ln for ln in str(payload["instructions"]).splitlines() if ln.strip()])
+    else:
+        n_steps = 0
+    use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+    if use_dutch:
+        serving_bit = f", {servings} personen" if isinstance(servings, int) else ""
+        return (
+            f"**{title}** is opgeslagen in Homebase "
+            f"({n_ing} ingrediënten, {n_steps} stappen{serving_bit})."
+        )
+    serving_bit = f", {servings} servings" if isinstance(servings, int) else ""
+    return (
+        f"**{title}** is saved to Homebase "
+        f"({n_ing} ingredients, {n_steps} steps{serving_bit})."
+    )
+
+
+def build_post_save_clarify_reply(
+    *,
+    title: str = "",
+    user_message: str = "",
+    dutch: bool | None = None,
+) -> str:
+    use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+    label = (title or "").strip()
+    if use_dutch:
+        if label:
+            return f"Wat wilt u aanpassen aan **{label}**?"
+        return "Wat wilt u aanpassen aan het recept?"
+    if label:
+        return f"What would you like to change about **{label}**?"
+    return "What would you like to change about the recipe?"
+
+
+def build_post_save_close_reply(
+    *,
+    user_message: str = "",
+    dutch: bool | None = None,
+) -> str:
+    use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+    if use_dutch:
+        return "Oké, dan laten we het zo."
+    return "Okay, we'll leave it as is."
 
 
 def normalize_step(step: str) -> str:
@@ -355,6 +551,7 @@ def build_recipe_confirm_reply(
     payload: dict[str, Any],
     *,
     user_message: str = "",
+    dutch: bool | None = None,
 ) -> str:
     """Deterministic M3 confirm copy — never claim the recipe was saved yet."""
     title = str(payload.get("title") or "recept")
@@ -364,14 +561,8 @@ def build_recipe_confirm_reply(
     n_steps = len(steps)
     shown = steps[:_CONFIRM_STEPS_CAP]
     omitted = n_steps - len(shown)
-    dutch = bool(
-        re.search(
-            r"\b(importeer|bewaar|recept|voeg|opslaan|alsjeblieft|jeblieft)\b",
-            user_message or "",
-            re.IGNORECASE,
-        )
-    )
-    if dutch:
+    use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+    if use_dutch:
         serving_bit = f", {servings} personen" if isinstance(servings, int) else ""
         lines = [
             f"Ik heb **{title}** klaargezet ({n_ing} ingrediënten, {n_steps} stappen"
@@ -443,16 +634,11 @@ def build_duplicate_rename_confirm_reply(
     original_title: str,
     proposed_title: str,
     user_message: str = "",
+    dutch: bool | None = None,
 ) -> str:
     """Forced copy after a title conflict — invites ja to save under proposed title."""
-    dutch = bool(
-        re.search(
-            r"\b(importeer|bewaar|recept|voeg|opslaan|alsjeblieft|jeblieft|ja)\b",
-            user_message or "",
-            re.IGNORECASE,
-        )
-    )
-    if dutch:
+    use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+    if use_dutch:
         return (
             f"De titel **{original_title}** bestaat al. "
             f"Opslaan als **{proposed_title}**? Zeg *ja* of tik Confirm."

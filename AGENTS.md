@@ -45,13 +45,13 @@ reads another's storage, ever.
 
 ## This repo
 
-### Current task — T-046 (desktop mic/prefs Acceptance)
+### Current task — T-047 (recipe import polish)
 
-**T-045 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
+**T-045/T-046/T-048 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
 `dist\mimir-desktop.exe` (`scripts/build_mimir_desktop_exe.ps1`). Restart:
 `scripts/restart_mimir.ps1`. Textual TUI is secondary / SSH (`-WithTui`).
 
-**Open:** T-046 Acceptance (mic + `/settings` live smoke); T-019; T-021/T-044.
+**Open:** T-047 ingredient extraction; T-043; T-019; optional T-048 live re-smoke.
 
 Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
 `MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.

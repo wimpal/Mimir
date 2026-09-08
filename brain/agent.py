@@ -59,14 +59,21 @@ from brain.recipe_import import (
     PendingRecipeStore,
     awaiting_confirmation_result,
     build_duplicate_rename_confirm_reply,
+    build_post_save_clarify_reply,
+    build_post_save_close_reply,
     build_recipe_confirm_reply,
+    build_recipe_saved_reply,
     duplicate_title_error,
     is_bare_cancel,
     is_bare_confirm,
+    is_soft_followup_offer,
     may_stage_recipe_add,
     normalize_recipe_payload,
+    parse_recipe_add_success,
+    recipe_locale_dutch,
     restage_after_duplicate_title,
     should_keep_pending_recipe,
+    should_keep_post_save,
     user_message_requests_recipe_save,
 )
 from brain.shopping_list import filter_shopping_list_tool_result
@@ -437,6 +444,15 @@ def run_turn(
     ):
         pending_recipes.clear(conversation_id)
 
+    # T-048: drop post-save soft-followup state when the user moves on.
+    if (
+        pending_recipes is not None
+        and conversation_id
+        and pending_recipes.get_post_save(conversation_id) is not None
+        and not should_keep_post_save(user_message)
+    ):
+        pending_recipes.clear_post_save(conversation_id)
+
     # T-021: cancel pending recipe import on bare no/nee.
     if (
         pending_recipes is not None
@@ -453,6 +469,70 @@ def run_turn(
             steps=steps,
             stopped_reason=StoppedReason.FINAL,
         )
+
+    # T-048: post-save soft follow-up — bare ja/nee before Ollama (after pending cancel).
+    # Pending confirmable dispatch below still wins when staged recipe remains.
+    if (
+        pending_recipes is not None
+        and conversation_id
+        and not pending_recipes.is_confirmable(conversation_id)
+        and pending_recipes.get_post_save(conversation_id) is not None
+    ):
+        post = pending_recipes.get_post_save(conversation_id)
+        assert post is not None
+        last_assistant = ""
+        for msg in reversed(working):
+            if msg.role == "assistant" and (msg.content or "").strip():
+                last_assistant = msg.content or ""
+                break
+        soft_active = post.soft_followup_offered or is_soft_followup_offer(
+            last_assistant
+        )
+        if soft_active and is_bare_confirm(user_message):
+            clarify = build_post_save_clarify_reply(
+                title=post.title,
+                user_message=user_message,
+                dutch=post.dutch,
+            )
+            pending_recipes.clear_post_save(conversation_id)
+            working.append(ChatMessage(role="assistant", content=clarify))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="recipe_post_save_clarify",
+                    content_preview=clarify[:120],
+                )
+            )
+            return TurnResult(
+                content=clarify,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        if soft_active and is_bare_cancel(user_message):
+            close = build_post_save_close_reply(
+                user_message=user_message,
+                dutch=post.dutch,
+            )
+            pending_recipes.clear_post_save(conversation_id)
+            working.append(ChatMessage(role="assistant", content=close))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="recipe_post_save_close",
+                    content_preview=close[:120],
+                )
+            )
+            return TurnResult(
+                content=close,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
 
     # T-021: bare yes/ja with confirmable staged candidate → auto-dispatch.
     if (
@@ -489,6 +569,8 @@ def run_turn(
             tools=registry,
             timeout_s=per_tool,
         )
+        # Capture locale before clear — bare yes/ja must not flip EN/NL.
+        dialog_dutch = pending_recipes.is_dutch(conversation_id)
         # Clear pending on success; on duplicate, restage with Title (N) and
         # force a rename confirm (bare ja must work next).
         duplicate_rename_reply: str | None = None
@@ -502,6 +584,7 @@ def run_turn(
                 original_title=original_title,
                 proposed_title=str(restaged.get("title") or ""),
                 user_message=user_message,
+                dutch=dialog_dutch,
             )
         else:
             pending_recipes.clear(conversation_id)
@@ -543,6 +626,46 @@ def run_turn(
                 stopped_reason=StoppedReason.FINAL,
             )
 
+        # T-048: successful save — forced confirm, no Ollama soft "nog iets?".
+        saved = parse_recipe_add_success(result) if ok else None
+        if saved is not None:
+            saved_payload = {
+                "title": str(saved.get("name") or saved.get("title") or payload.get("title") or ""),
+                "servings": saved.get("servings", payload.get("servings")),
+                "ingredients": saved.get("ingredients") or payload.get("ingredients") or [],
+                "steps": saved.get("steps") or payload.get("steps") or [],
+            }
+            pending_recipes.set_post_save(
+                conversation_id,
+                title=str(saved_payload["title"] or "recept"),
+                soft_followup_offered=False,
+                dutch=dialog_dutch,
+            )
+            saved_reply = build_recipe_saved_reply(
+                saved_payload,
+                user_message=user_message,
+                dutch=dialog_dutch,
+            )
+            working.append(ChatMessage(role="assistant", content=saved_reply))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="recipe_saved_forced",
+                    content_preview=saved_reply[:120],
+                )
+            )
+            return TurnResult(
+                content=saved_reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
+    recipe_saved_payload_this_turn: dict[str, Any] | None = None
+    recipe_dialog_dutch_this_turn: bool | None = None
+
     for _ in range(iteration_budget):
         if _deadline_exceeded(deadline_monotonic):
             steps.append(
@@ -579,7 +702,12 @@ def run_turn(
                 ollama_schemas,
                 think=think,
                 # Avoid streaming a hallucinated "saved" draft before we force confirm copy.
-                stream_final=stream_final and not recipe_staged_this_turn,
+                # T-048: also skip streaming after recipes.add success (forced saved reply).
+                stream_final=(
+                    stream_final
+                    and not recipe_staged_this_turn
+                    and recipe_saved_payload_this_turn is None
+                ),
                 on_assistant_delta=on_assistant_delta,
                 user_message=user_message,
                 write_tool_called_this_turn=write_tool_called_this_turn,
@@ -677,7 +805,9 @@ def run_turn(
                         payload = pending_recipes.get(conversation_id)
                         assert payload is not None
                         confirm = build_recipe_confirm_reply(
-                            payload, user_message=user_message
+                            payload,
+                            user_message=user_message,
+                            dutch=pending_recipes.is_dutch(conversation_id),
                         )
                         steps.append(
                             _step(
@@ -1004,7 +1134,9 @@ def run_turn(
                 payload = pending_recipes.get(conversation_id)
                 assert payload is not None
                 confirm = build_recipe_confirm_reply(
-                    payload, user_message=user_message
+                    payload,
+                    user_message=user_message,
+                    dutch=pending_recipes.is_dutch(conversation_id),
                 )
                 steps.append(
                     _step(
@@ -1017,6 +1149,43 @@ def run_turn(
                 working.append(ChatMessage(role="assistant", content=confirm))
                 return TurnResult(
                     content=confirm,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
+            # T-048: after successful recipes.add, force short saved copy (no soft Q).
+            if (
+                recipe_saved_payload_this_turn is not None
+                and pending_recipes is not None
+                and conversation_id
+            ):
+                dutch = (
+                    recipe_dialog_dutch_this_turn
+                    if recipe_dialog_dutch_this_turn is not None
+                    else recipe_locale_dutch(user_message)
+                )
+                saved_reply = build_recipe_saved_reply(
+                    recipe_saved_payload_this_turn,
+                    user_message=user_message,
+                    dutch=dutch,
+                )
+                pending_recipes.set_post_save(
+                    conversation_id,
+                    title=str(recipe_saved_payload_this_turn.get("title") or "recept"),
+                    soft_followup_offered=False,
+                    dutch=dutch,
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="recipe_saved_forced",
+                        content_preview=saved_reply[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=saved_reply))
+                return TurnResult(
+                    content=saved_reply,
                     messages=working,
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
@@ -1194,7 +1363,11 @@ def run_turn(
                         recipe_gate_handled_this_turn = True
                     else:
                         assert normalized is not None
-                        pending_recipes.set(conversation_id, normalized)
+                        pending_recipes.set(
+                            conversation_id,
+                            normalized,
+                            dutch=recipe_locale_dutch(user_message),
+                        )
                         result = awaiting_confirmation_result(normalized)
                         recipe_staged_this_turn = True
                         recipe_gate_handled_this_turn = True
@@ -1227,7 +1400,35 @@ def run_turn(
                     and conversation_id
                     and not tool_result_is_error(result)
                 ):
+                    dialog_dutch = pending_recipes.is_dutch(conversation_id)
                     pending_recipes.clear(conversation_id)
+                    saved = parse_recipe_add_success(result)
+                    if saved is not None:
+                        title = str(
+                            saved.get("name")
+                            or saved.get("title")
+                            or tool_args.get("title")
+                            or "recept"
+                        )
+                        recipe_saved_payload_this_turn = {
+                            "title": title,
+                            "servings": saved.get(
+                                "servings", tool_args.get("servings")
+                            ),
+                            "ingredients": saved.get("ingredients")
+                            or tool_args.get("ingredients")
+                            or [],
+                            "steps": saved.get("steps")
+                            or tool_args.get("steps")
+                            or [],
+                        }
+                        recipe_dialog_dutch_this_turn = dialog_dutch
+                        pending_recipes.set_post_save(
+                            conversation_id,
+                            title=title,
+                            soft_followup_offered=False,
+                            dutch=dialog_dutch,
+                        )
             tools_used_this_turn.append(dispatch_name)
             if (
                 dispatch_name == "homebase.tasks.complete"
@@ -1381,7 +1582,9 @@ def run_turn(
             payload = pending_recipes.get(conversation_id)
             assert payload is not None
             confirm = build_recipe_confirm_reply(
-                payload, user_message=user_message
+                payload,
+                user_message=user_message,
+                dutch=pending_recipes.is_dutch(conversation_id),
             )
             working.append(ChatMessage(role="assistant", content=confirm))
             steps.append(
@@ -1409,7 +1612,11 @@ def run_turn(
     ):
         payload = pending_recipes.get(conversation_id)
         assert payload is not None
-        confirm = build_recipe_confirm_reply(payload, user_message=user_message)
+        confirm = build_recipe_confirm_reply(
+            payload,
+            user_message=user_message,
+            dutch=pending_recipes.is_dutch(conversation_id),
+        )
         working.append(ChatMessage(role="assistant", content=confirm))
         return TurnResult(
             content=confirm,

@@ -233,7 +233,9 @@ TOOLS
   opslaan als) and call `recipes.add` again to restage; never overwrite. Quote
   `Invalid recipe payload` / `Recipe too large` verbatim when those appear. After a
   successful save, confirm the title plus ingredient and step counts in the user's
-  language.
+  language in **one short sentence**. Do **not** ask rhetorical follow-ups such as
+  "anything else?", "nog iets aanpassen?", or "is there anything you want to change?"
+  — the brain may replace freestyle post-save copy with a forced confirm.
 - For **IKEA / Dirigera smart lights** ("which lights are on", "lights in the office",
   "welke lampen staan aan", turn a lamp on/off, dim, warmth, colour) → `homebase.lights.list` and
   `homebase.lights.set_state` only. Philips Hue and non-IKEA bulbs are **out of scope**

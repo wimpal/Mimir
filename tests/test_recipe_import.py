@@ -254,12 +254,12 @@ def test_stage_then_confirm_dispatches_steps_list() -> None:
     assert isinstance(pending["steps"], list)
     assert pending["steps"][0] == "Mix flour, milk and eggs."
 
-    # Turn 2: bare yes → auto-dispatch
+    # Turn 2: bare yes → auto-dispatch + forced saved reply (no Ollama soft Q)
     client2 = _ScriptedClient(
         [
             ChatMessage(
                 role="assistant",
-                content="Saved Pannenkoeken with 3 ingredients and 3 steps.",
+                content="Goedemorgen! Wat kan ik voor je doen?",
             ),
         ]
     )
@@ -276,6 +276,15 @@ def test_stage_then_confirm_dispatches_steps_list() -> None:
     assert isinstance(calls[0]["steps"], list)
     assert calls[0]["steps"][0] == "Mix flour, milk and eggs."
     assert not store.has(cid)
+    content2 = result2.content or ""
+    assert "Pannenkoeken" in content2
+    assert "opgeslagen" in content2.lower() or "saved" in content2.lower()
+    assert "nog iets" not in content2.lower()
+    assert "anything else" not in content2.lower()
+    assert "goedemorgen" not in content2.lower()
+    assert "good morning" not in content2.lower()
+    assert store.get_post_save(cid) is not None
+    assert any(s.anomaly == "recipe_saved_forced" for s in result2.steps)
 
 
 def test_meal_plan_never_stages_add() -> None:
@@ -712,3 +721,212 @@ def test_stateless_recipe_add_blocked() -> None:
     )
     assert calls == []
     assert any("conversation" in (m.content or "") for m in result.messages)
+
+
+def test_post_save_ja_clarifies_without_morning_greeting() -> None:
+    """T-048: soft follow-up + ja must not become Goedemorgen."""
+    store = PendingRecipeStore()
+    cid = "post-save-ja"
+    store.set_post_save(
+        cid,
+        title="Kip kerrie pastasalade (2)",
+        soft_followup_offered=True,
+        dutch=True,
+    )
+    deltas: list[str] = []
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="Goedemorgen! Wat kan ik voor je doen?",
+            ),
+        ]
+    )
+    result = run_turn(
+        client,
+        [
+            ChatMessage(
+                role="assistant",
+                content=(
+                    "Kip kerrie pastasalade (2) is opgeslagen. "
+                    "Is er nog iets dat u wilt aanpassen of toevoegen?"
+                ),
+            ),
+            ChatMessage(role="user", content="ja"),
+        ],
+        tools={},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=2,
+        on_assistant_delta=deltas.append,
+        stream_final=True,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    content = (result.content or "").lower()
+    assert "goedemorgen" not in content
+    assert "good morning" not in content
+    assert "aanpassen" in content
+    assert "kip kerrie" in content
+    assert store.get_post_save(cid) is None
+    assert not any("Goedemorgen" in d or "Good morning" in d for d in deltas)
+    assert any(s.anomaly == "recipe_post_save_clarify" for s in result.steps)
+
+
+def test_post_save_nee_closes_without_write() -> None:
+    store = PendingRecipeStore()
+    cid = "post-save-nee"
+    store.set_post_save(
+        cid,
+        title="Soup",
+        soft_followup_offered=True,
+        dutch=True,
+    )
+    calls: list[dict] = []
+    client = _ScriptedClient(
+        [ChatMessage(role="assistant", content="Goedemorgen!")]
+    )
+    result = run_turn(
+        client,
+        [
+            ChatMessage(
+                role="assistant",
+                content="Is er nog iets dat u wilt aanpassen of toevoegen?",
+            ),
+            ChatMessage(role="user", content="nee"),
+        ],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=2,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert calls == []
+    assert "oké" in (result.content or "").lower() or "oke" in (
+        result.content or ""
+    ).lower()
+    assert "goedemorgen" not in (result.content or "").lower()
+    assert store.get_post_save(cid) is None
+    assert any(s.anomaly == "recipe_post_save_close" for s in result.steps)
+
+
+def test_pending_confirm_wins_over_post_save_soft_followup() -> None:
+    """Rename confirm still dispatches; post-save soft state must not steal ja."""
+    store = PendingRecipeStore()
+    cid = "pending-wins"
+    recipe_args = {
+        "title": "Soup (2)",
+        "ingredients": [{"name": "water", "quantity": "1 l"}],
+        "steps": ["Boil."],
+    }
+    store.set(cid, recipe_args)
+    store.set_post_save(
+        cid,
+        title="Old Soup",
+        soft_followup_offered=True,
+        dutch=False,
+    )
+    calls: list[dict] = []
+    client = _ScriptedClient([])
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="yes")],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=2,
+    )
+    assert len(calls) == 1
+    assert calls[0]["title"] == "Soup (2)"
+    assert "saved" in (result.content or "").lower()
+    assert "goedemorgen" not in (result.content or "").lower()
+    assert not store.has(cid)
+
+
+def test_is_soft_followup_offer_heuristic() -> None:
+    from brain.recipe_import import is_soft_followup_offer
+
+    assert is_soft_followup_offer(
+        "Is er nog iets dat u wilt aanpassen of toevoegen?"
+    )
+    assert is_soft_followup_offer("Anything else you'd like to change?")
+    assert not is_soft_followup_offer("Soup is opgeslagen (3 ingrediënten, 2 stappen).")
+    assert not is_soft_followup_offer("Ik kan de stappen aanpassen later.")
+
+
+def test_dutch_import_bare_yes_keeps_dutch_forced_replies() -> None:
+    """T-048 follow-up: bare English yes must not flip NL dialog to EN."""
+    calls: list[dict] = []
+
+    def execute(**kwargs: object) -> str:
+        calls.append(dict(kwargs))
+        title = str(kwargs.get("title") or "")
+        if title == "Kip kerrie pastasalade":
+            return json.dumps(
+                {
+                    "error": {
+                        "code": "conflict",
+                        "message": "Recipe title already exists",
+                    }
+                }
+            )
+        return json.dumps(
+            {
+                "id": "r-nl",
+                "name": title,
+                "servings": 4,
+                "ingredients": kwargs.get("ingredients"),
+                "steps": kwargs.get("steps"),
+                "tags": [],
+            }
+        )
+
+    tool = Tool(
+        name="homebase.recipes.add",
+        description="add",
+        parameters={"type": "object", "properties": {}, "additionalProperties": True},
+        execute=execute,
+        service="homebase",
+    )
+    store = PendingRecipeStore()
+    cid = "nl-locale-1"
+    store.set(
+        cid,
+        {
+            "title": "Kip kerrie pastasalade",
+            "servings": 4,
+            "ingredients": [{"name": "pasta", "quantity": "300 gr"}],
+            "steps": ["Kook de pasta."],
+        },
+        dutch=True,
+    )
+
+    result_dup = run_turn(
+        _ScriptedClient([]),
+        [ChatMessage(role="user", content="yes")],
+        tools={"homebase.recipes.add": tool},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=2,
+    )
+    assert "bestaat al" in (result_dup.content or "").lower()
+    assert "already exists" not in (result_dup.content or "").lower()
+    assert "Kip kerrie pastasalade (2)" in (result_dup.content or "")
+    assert store.is_dutch(cid)
+
+    result_save = run_turn(
+        _ScriptedClient([]),
+        [ChatMessage(role="user", content="yes")],
+        tools={"homebase.recipes.add": tool},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=2,
+    )
+    content = result_save.content or ""
+    assert "opgeslagen" in content.lower()
+    assert "personen" in content.lower()
+    assert "saved to homebase" not in content.lower()
+    assert "servings" not in content.lower()
+    assert calls[-1]["title"] == "Kip kerrie pastasalade (2)"
+    post = store.get_post_save(cid)
+    assert post is not None
+    assert post.dutch is True
