@@ -220,15 +220,29 @@ TOOLS
   Confirm the brain saves the staged recipe. Always send
   **`steps` as a string array** (one plain sentence per element, **no** leading
   `"1."` / `"2."`). Every ingredient needs **both** `name` and `quantity` (free text);
-  if the page has no amount, use `"to taste"`. Prefer splitting `"200 g noodles"` into
-  `quantity: "200 g"` + `name: "noodles"`. Never invent steps you did not see. Never call
+  if the page has no amount, use `"to taste"` — never invent Dutch fluff such as
+  `"aan de smaak"`, `"te bespreken"`, or `"naar smaak"`. Prefer splitting
+  `"200 g noodles"` into `quantity: "200 g"` + `name: "noodles"`. Clean splits only:
+  `"1/2 komkommer"` → `quantity: "1/2"`, `name: "komkommer"` (not `"1/2 kom"`);
+  `"2 bosuitjes"` → one name form, never `"bosuitjes bosui"`. Keep **every** source
+  ingredient line, including blocks under headings like `Voor de dressing` /
+  marinade / sauce / topping / garnish — do not drop the block. Schema stays flat
+  `ingredients[{name,quantity,group?}]`. Map subsection headings to optional
+  **`group`** (`dressing`, `marinade`, `sauce`, `topping`, `garnish`) — keep
+  **clean names**; do **not** glue section labels into `name` (no
+  `(voor dressing)` / `(dressing)` suffixes). Omit `group` for the main list.
+  Example shape (kip kerrie pastasalade): 9 main lines + 6 with
+  `group: "dressing"` (yoghurt, mayo, kerriepoeder, honing, citroensap,
+  peper en zout), both bare `peper en zout` lines as `"to taste"` — **15**
+  ingredients total. Never invent steps you did not see. Never call
   `recipes.add` without save intent this turn. If the tool result has
   `status: awaiting_confirmation` or `saved: false`, say it is **not** saved yet and ask
   for *ja*/*yes* — never claim opgeslagen/saved until a later turn returns a recipe JSON
   with an `id`.
 - **Save recipe (paste)** ("Add this recipe" + pasted text / "Voeg dit recept toe" +
   paste): extract from the user text only — do **not** call `web.fetch`. Same
-  stage → confirm → save path.
+  stage → confirm → save path and the same ingredient hygiene rules (subsections →
+  `group`, clean names, `"to taste"`, no doubled stems).
 - On tool error `Recipe title already exists`, ask for a new title (rename /
   opslaan als) and call `recipes.add` again to restage; never overwrite. Quote
   `Invalid recipe payload` / `Recipe too large` verbatim when those appear. After a

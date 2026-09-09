@@ -68,7 +68,9 @@ from brain.recipe_import import (
     is_bare_confirm,
     is_soft_followup_offer,
     may_stage_recipe_add,
+    merge_subsection_ingredients_from_source,
     normalize_recipe_payload,
+    RecipeNormalizeError,
     parse_recipe_add_success,
     recipe_locale_dutch,
     restage_after_duplicate_title,
@@ -742,10 +744,10 @@ def run_turn(
         if not msg.tool_calls:
             anomaly = None
             if not (msg.content or "").strip():
-                # T-021: empty after web.fetch — nudge extract+stage instead of dying.
+                # T-021/T-047: empty with recipe-save intent — nudge extract+stage
+                # (paste or after web.fetch) instead of dying on empty_response.
                 if (
                     user_message_requests_recipe_save(user_message)
-                    and "web.fetch" in tools_used_this_turn
                     and not recipe_staged_this_turn
                     and not recipe_gate_handled_this_turn
                     and write_nudge_count < MAX_WRITE_TOOL_NUDGES
@@ -1357,20 +1359,35 @@ def run_turn(
                     recipe_gate_handled_this_turn = True
                 else:
                     # Stage for M3 confirm — do not call Homebase yet.
-                    normalized, norm_err = normalize_recipe_payload(dispatch_args)
-                    if norm_err is not None:
-                        result = norm_err
+                    # T-047: merge dressing/marinade lines from the paste if the
+                    # model dropped the subsection block.
+                    stage_args = dict(dispatch_args)
+                    raw_ings = stage_args.get("ingredients")
+                    try:
+                        if isinstance(raw_ings, list):
+                            stage_args["ingredients"] = (
+                                merge_subsection_ingredients_from_source(
+                                    user_message, raw_ings
+                                )
+                            )
+                        normalized, norm_err = normalize_recipe_payload(stage_args)
+                    except RecipeNormalizeError as exc:
+                        result = exc.message
                         recipe_gate_handled_this_turn = True
                     else:
-                        assert normalized is not None
-                        pending_recipes.set(
-                            conversation_id,
-                            normalized,
-                            dutch=recipe_locale_dutch(user_message),
-                        )
-                        result = awaiting_confirmation_result(normalized)
-                        recipe_staged_this_turn = True
-                        recipe_gate_handled_this_turn = True
+                        if norm_err is not None:
+                            result = norm_err
+                            recipe_gate_handled_this_turn = True
+                        else:
+                            assert normalized is not None
+                            pending_recipes.set(
+                                conversation_id,
+                                normalized,
+                                dutch=recipe_locale_dutch(user_message),
+                            )
+                            result = awaiting_confirmation_result(normalized)
+                            recipe_staged_this_turn = True
+                            recipe_gate_handled_this_turn = True
             else:
                 tool_args = dict(dispatch_args)
                 if dispatch_name == RECIPE_ADD_TOOL and is_bare_confirm(user_message):

@@ -14,7 +14,16 @@ MAX_TITLE_LEN = 200
 MAX_INGREDIENTS = 50
 MAX_STEPS = 100
 MAX_STEP_CHARS = 2000
+MAX_GROUP_LEN = 40
 PENDING_TTL_S = 600.0
+
+
+class RecipeNormalizeError(Exception):
+    """Raised when an ingredient/field fails hard limits (e.g. oversized group)."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
 
 _STEP_NUMBER_RE = re.compile(r"^\s*\d+[\.\)]\s*")
 
@@ -388,6 +397,11 @@ def normalize_step(step: str) -> str:
 
 
 # Leading amount(+unit) stuck in name — common when the model dumps the whole line.
+_QTY_UNIT_ALTS = (
+    r"gr|g|kg|ml|l|oz|lb|lbs|tsp|tbsp|el|tl|bos|"
+    r"teaspoons?|tablespoons?|cups?|grams?|kilograms?|ounces?|pounds?|"
+    r"eetlepels?|theelepels?|gram|snufje"
+)
 _QTY_IN_NAME_RE = re.compile(
     r"^(?P<qty>"
     r"\d+\s+\d/\d|"  # 1 1/2
@@ -396,10 +410,8 @@ _QTY_IN_NAME_RE = re.compile(
     r"\d+(?:[.,]\d+)?"
     r")"
     r"(?:\s*(?P<unit>"
-    r"gr|g|kg|ml|l|oz|lb|lbs|tsp|tbsp|el|tl|"
-    r"teaspoons?|tablespoons?|cups?|grams?|kilograms?|ounces?|pounds?|"
-    r"eetlepels?|theelepels?|gram|snufje"
-    r"))?"
+    + _QTY_UNIT_ALTS
+    + r"))?"
     r"\s+(?P<name>.+)$",
     re.IGNORECASE,
 )
@@ -412,6 +424,60 @@ _BARE_QTY_WORD_RE = re.compile(
 
 _DEFAULT_QUANTITY = "to taste"
 
+# LLM sometimes invents Dutch "to taste" phrasing instead of leaving qty empty.
+_INVENTED_QTY_FLUFF_RE = re.compile(
+    r"^(aan\s+de\s+smaak|te\s+bespreken|teugen|naar\s+(?:eigen\s+)?smaak)$",
+    re.IGNORECASE,
+)
+
+_KNOWN_UNITS = frozenset(
+    u.lower()
+    for u in (
+        "gr",
+        "g",
+        "kg",
+        "ml",
+        "l",
+        "oz",
+        "lb",
+        "lbs",
+        "tsp",
+        "tbsp",
+        "el",
+        "tl",
+        "bos",
+        "teaspoon",
+        "teaspoons",
+        "tablespoon",
+        "tablespoons",
+        "cup",
+        "cups",
+        "gram",
+        "grams",
+        "kilogram",
+        "kilograms",
+        "ounce",
+        "ounces",
+        "pound",
+        "pounds",
+        "eetlepel",
+        "eetlepels",
+        "theelepel",
+        "theelepels",
+        "snufje",
+    )
+)
+
+_STEM_MIN_LEN = 3
+
+# Only collapse known LLM double-stem artifacts (avoid paprika/paprikapoeder).
+_KNOWN_NAME_STEM_PAIRS = frozenset(
+    {
+        frozenset({"kom", "komkommer"}),
+        frozenset({"bosui", "bosuitjes"}),
+    }
+)
+
 
 def _strip_qty_prefix_from_name(name: str, quantity: str) -> str:
     """Remove a leading amount from name when it duplicates quantity."""
@@ -423,14 +489,103 @@ def _strip_qty_prefix_from_name(name: str, quantity: str) -> str:
     return name
 
 
+def _is_stem_of(short: str, long: str) -> bool:
+    """True when short is a proper prefix of long (min length, case-insensitive)."""
+    s = short.lower()
+    l = long.lower()
+    return len(s) >= _STEM_MIN_LEN and len(l) > len(s) and l.startswith(s)
+
+
+def _is_known_unit_token(token: str) -> bool:
+    return token.lower() in _KNOWN_UNITS
+
+
+def _collapse_doubled_name_stems(name: str) -> str:
+    """Collapse adjacent known doubles like ``bosuitjes bosui`` → ``bosuitjes``."""
+    tokens = name.split()
+    if len(tokens) < 2:
+        return name
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if i + 1 < len(tokens):
+            a, b = tokens[i], tokens[i + 1]
+            pair = frozenset({a.lower(), b.lower()})
+            if pair in _KNOWN_NAME_STEM_PAIRS:
+                # Prefer the longer surface form.
+                out.append(a if len(a) >= len(b) else b)
+                i += 2
+                continue
+        out.append(tokens[i])
+        i += 1
+    return " ".join(out)
+
+
+def _strip_redundant_qty_name_stem(name: str, quantity: str) -> tuple[str, str]:
+    """Fix mirrored LLM mistakes between quantity and name stems.
+
+    - ``1/2 kom`` + ``komkommer`` → ``1/2`` + ``komkommer`` (non-unit prefix)
+    - ``2 bosuitjes`` + ``bosui`` → ``2`` + ``bosuitjes`` (prefer longer form)
+    - ``1 bos`` + ``bosui`` stays unchanged (``bos`` is a known unit)
+    - ``2 theelepels`` + ``thee`` stays unchanged (unit, not ingredient stem)
+    """
+    if not name or not quantity:
+        return name, quantity
+    qty_parts = quantity.split()
+    name_parts = name.split()
+    if not qty_parts or not name_parts:
+        return name, quantity
+    last_qty = qty_parts[-1]
+    first_name = name_parts[0]
+
+    # Quantity ends with longer form; name is a short stem of that form.
+    # Skip when the longer token is a measurement unit.
+    if (
+        not _is_known_unit_token(last_qty)
+        and frozenset({first_name.lower(), last_qty.lower()}) in _KNOWN_NAME_STEM_PAIRS
+        and _is_stem_of(first_name, last_qty)
+    ):
+        name = last_qty + (" " + " ".join(name_parts[1:]) if len(name_parts) > 1 else "")
+        quantity = " ".join(qty_parts[:-1]).strip()
+        return name, quantity
+
+    # Quantity's last word is a non-unit stem prefix of the name (known pairs only).
+    if (
+        not _is_known_unit_token(last_qty)
+        and frozenset({last_qty.lower(), first_name.lower()}) in _KNOWN_NAME_STEM_PAIRS
+        and _is_stem_of(last_qty, first_name)
+    ):
+        quantity = " ".join(qty_parts[:-1]).strip()
+        return name, quantity
+
+    return name, quantity
+
+
+def _strip_fluff_from_name(name: str) -> str:
+    """Remove leading invented Dutch qty fluff stuck in the name field."""
+    stripped = re.sub(
+        r"^(aan\s+de\s+smaak|te\s+bespreken|teugen|naar\s+(?:eigen\s+)?smaak)\s+",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip()
+    return stripped or name
+
+
 def normalize_ingredient(item: Any) -> dict[str, str] | None:
-    """Coerce one ingredient to ``{name, quantity}``; return None if unusable."""
+    """Coerce one ingredient to ``{name, quantity, group?}``; return None if unusable.
+
+    Raises ``RecipeNormalizeError`` when ``group`` exceeds ``MAX_GROUP_LEN``.
+    """
+    group_raw: str | None = None
     if isinstance(item, str):
         name = item.strip()
         quantity = ""
     elif isinstance(item, dict):
         name = str(item.get("name") or "").strip()
         quantity = str(item.get("quantity") or "").strip()
+        if item.get("group") is not None:
+            group_raw = str(item.get("group") or "")
         # Model sometimes puts the amount only in name and leaves quantity blank,
         # or swaps fields.
         if not name and quantity:
@@ -457,12 +612,304 @@ def normalize_ingredient(item: Any) -> dict[str, str] | None:
             name = bare.group("name").strip()
 
     name = _strip_qty_prefix_from_name(name, quantity)
+    name = _strip_fluff_from_name(name)
+    name = _collapse_doubled_name_stems(name)
+    name, quantity = _strip_redundant_qty_name_stem(name, quantity)
+    name = _collapse_doubled_name_stems(name)
+
+    # Legacy T-047 name suffixes → group (never keep both).
+    suffix_group = _group_from_name_suffix(name)
+    if suffix_group:
+        name = _strip_subsection_suffix(name)
 
     if not name:
         return None
+    if quantity and _INVENTED_QTY_FLUFF_RE.match(quantity.strip()):
+        quantity = _DEFAULT_QUANTITY
     if not quantity:
         quantity = _DEFAULT_QUANTITY
-    return {"name": name, "quantity": quantity}
+
+    group = _canonical_group(group_raw) if group_raw is not None else None
+    if group is None and suffix_group:
+        group = suffix_group
+
+    out: dict[str, str] = {"name": name, "quantity": quantity}
+    if group:
+        out["group"] = group
+    return out
+
+
+# Paste subsection headers the LLM often drops (T-047 / T-049).
+_SUBSECTION_HEADER_RE = re.compile(
+    r"^(?:voor\s+de\s+|for\s+the\s+)?"
+    r"(?P<label>dressing|marinade|sauce|saus|topping|garnish|garnering)\s*:?\s*$",
+    re.IGNORECASE,
+)
+_SUBSECTION_STOP_RE = re.compile(
+    r"^(bereidingswijze|instructions?|method|methode|directions|steps?|"
+    r"benodigdheden|ingredients?)\b",
+    re.IGNORECASE,
+)
+
+_GROUP_ALIASES = {
+    "dressing": "dressing",
+    "marinade": "marinade",
+    "sauce": "sauce",
+    "saus": "sauce",
+    "topping": "topping",
+    "garnish": "garnish",
+    "garnering": "garnish",
+}
+
+_SUBSECTION_SUFFIX_STRIP_RE = re.compile(
+    r"\s*\((?:voor\s+)?"
+    r"(?P<label>dressing|marinade|sauce|saus|topping|garnish|garnering)\)\s*$",
+    re.IGNORECASE,
+)
+
+_QTY_UNIT_CANON = {
+    "gr": "g",
+    "g": "g",
+    "gram": "g",
+    "grams": "g",
+    "kg": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "ml": "ml",
+    "l": "l",
+    "el": "el",
+    "tl": "tl",
+    "tbsp": "tbsp",
+    "tsp": "tsp",
+}
+
+
+def _canonical_group(raw: str | None) -> str | None:
+    """Return a canonical group key, or None when empty. Raises if too long."""
+    if raw is None:
+        return None
+    trimmed = str(raw).strip()
+    if not trimmed:
+        return None
+    if len(trimmed) > MAX_GROUP_LEN:
+        raise RecipeNormalizeError(
+            "error: Recipe too large — ingredient group exceeds 40 characters"
+        )
+    key = trimmed.casefold()
+    return _GROUP_ALIASES.get(key, trimmed.casefold())
+
+
+def _group_from_name_suffix(name: str) -> str | None:
+    match = _SUBSECTION_SUFFIX_STRIP_RE.search(name or "")
+    if not match:
+        return None
+    return _canonical_group(match.group("label"))
+
+
+def _strip_subsection_suffix(name: str) -> str:
+    return _SUBSECTION_SUFFIX_STRIP_RE.sub("", name).strip()
+
+
+def _normalize_qty_key(quantity: str) -> str:
+    """Casefold quantity and collapse g/gr/gram(s) for merge/dedupe keys."""
+    parts = (quantity or "").strip().casefold().split()
+    if not parts:
+        return ""
+    out: list[str] = []
+    for part in parts:
+        out.append(_QTY_UNIT_CANON.get(part, part))
+    return " ".join(out)
+
+
+_PAREN_NOTE_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _name_match_key(name: str) -> str:
+    """Casefold name with trailing ``(brand/note)`` stripped for twin matching."""
+    return _PAREN_NOTE_RE.sub("", name or "").strip().casefold()
+
+
+def _ingredient_key(norm: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        _name_match_key(norm["name"]),
+        _normalize_qty_key(norm["quantity"]),
+        (norm.get("group") or "").casefold(),
+    )
+
+
+def _base_qty_key(norm: dict[str, str]) -> tuple[str, str]:
+    return (_name_match_key(norm["name"]), _normalize_qty_key(norm["quantity"]))
+
+
+_MAIN_INGREDIENTS_START_RE = re.compile(
+    r"^(benodigdheden|ingredi[eë]nten|ingredients?)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_subsection_ingredients_from_text(
+    source_text: str,
+) -> list[dict[str, str]]:
+    """Pull ingredient lines under dressing/marinade/… headers from a paste."""
+    if not (source_text or "").strip():
+        return []
+    lines = source_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    found: list[dict[str, str]] = []
+    i = 0
+    while i < len(lines):
+        header = _SUBSECTION_HEADER_RE.match(lines[i].strip())
+        if not header:
+            i += 1
+            continue
+        group = _canonical_group(header.group("label"))
+        i += 1
+        while i < len(lines):
+            raw = lines[i].strip()
+            if not raw:
+                i += 1
+                # Blank line inside a block is fine; stop only on next header/section.
+                if i < len(lines) and (
+                    _SUBSECTION_HEADER_RE.match(lines[i].strip())
+                    or _SUBSECTION_STOP_RE.match(lines[i].strip())
+                ):
+                    break
+                continue
+            if _SUBSECTION_HEADER_RE.match(raw) or _SUBSECTION_STOP_RE.match(raw):
+                break
+            parsed = normalize_ingredient(raw)
+            i += 1
+            if parsed is None:
+                continue
+            row = {"name": parsed["name"], "quantity": parsed["quantity"]}
+            if group:
+                row["group"] = group
+            found.append(row)
+    return found
+
+
+def parse_main_ingredient_keys_from_text(source_text: str) -> set[tuple[str, str]]:
+    """``(base_name, qty_key)`` keys from the main list before any subsection."""
+    if not (source_text or "").strip():
+        return set()
+    lines = source_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    keys: set[tuple[str, str]] = set()
+    started = False
+    for line in lines:
+        raw = line.strip()
+        if not raw:
+            continue
+        if _MAIN_INGREDIENTS_START_RE.match(raw):
+            started = True
+            continue
+        if _SUBSECTION_HEADER_RE.match(raw):
+            break
+        if started and re.match(
+            r"^(bereidingswijze|instructions?|method|methode|directions|steps?)\b",
+            raw,
+            re.IGNORECASE,
+        ):
+            break
+        if not started:
+            continue
+        parsed = normalize_ingredient(raw)
+        if parsed is None:
+            continue
+        keys.add(_base_qty_key(parsed))
+    return keys
+
+
+def merge_subsection_ingredients_from_source(
+    source_text: str,
+    ingredients: list[Any],
+) -> list[Any]:
+    """Fold paste subsection lines into the LLM list without duplicating.
+
+    - Identical ``(name, qty, group)`` → skip.
+    - Ungrouped twin of a subsection row: upgrade to ``group`` unless that
+      base+qty is in the paste *main* list (then append the grouped twin).
+    - Qty match uses ``g``/``gr`` normalization.
+    - Final pass drops duplicate ``(name, qty, group)`` rows.
+    """
+    extras = parse_subsection_ingredients_from_text(source_text)
+    if not extras:
+        return list(ingredients)
+
+    main_keys = parse_main_ingredient_keys_from_text(source_text)
+    merged: list[Any] = list(ingredients)
+
+    def _norm_at(idx: int) -> dict[str, str] | None:
+        return normalize_ingredient(merged[idx])
+
+    for extra in extras:
+        extra_norm = normalize_ingredient(extra)
+        if extra_norm is None:
+            continue
+        extra_full = _ingredient_key(extra_norm)
+        extra_base = _base_qty_key(extra_norm)
+        extra_group = extra_norm.get("group") or ""
+
+        already = False
+        ungrouped_matches: list[int] = []
+        for idx in range(len(merged)):
+            norm = _norm_at(idx)
+            if norm is None:
+                continue
+            if _ingredient_key(norm) == extra_full:
+                already = True
+                continue
+            if _base_qty_key(norm) != extra_base:
+                continue
+            if (norm.get("group") or "").casefold() == extra_group.casefold():
+                already = True
+                continue
+            if not (norm.get("group") or "").strip():
+                ungrouped_matches.append(idx)
+
+        if already:
+            # Drop ungrouped twins that are not in the paste main list
+            # (plain + grouped duplicate from LLM suffix leftovers).
+            for idx in reversed(ungrouped_matches):
+                if extra_base not in main_keys:
+                    del merged[idx]
+            continue
+        if len(ungrouped_matches) >= 2:
+            # Prefer upgrading the last twin (dressing usually listed after main).
+            idx = ungrouped_matches[-1]
+            upgraded = dict(normalize_ingredient(merged[idx]) or {})
+            # Prefer paste/extra name (often includes brand note).
+            upgraded["name"] = extra_norm["name"]
+            upgraded["quantity"] = extra_norm["quantity"]
+            if extra_group:
+                upgraded["group"] = extra_group
+            merged[idx] = upgraded
+            continue
+        if len(ungrouped_matches) == 1:
+            if extra_base in main_keys:
+                merged.append(extra_norm)
+            else:
+                idx = ungrouped_matches[0]
+                upgraded = dict(normalize_ingredient(merged[idx]) or {})
+                upgraded["name"] = extra_norm["name"]
+                upgraded["quantity"] = extra_norm["quantity"]
+                if extra_group:
+                    upgraded["group"] = extra_group
+                merged[idx] = upgraded
+            continue
+        merged.append(extra_norm)
+
+    # Dedupe identical (name, qty, group); keep first occurrence.
+    deduped: list[Any] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in merged:
+        norm = normalize_ingredient(item)
+        if norm is None:
+            continue
+        key = _ingredient_key(norm)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(norm)
+    return deduped
 
 
 def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -490,11 +937,14 @@ def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None
         return None, "error: Recipe too large — too many ingredients"
 
     ingredients: list[dict[str, str]] = []
-    for item in ingredients_in:
-        normalized = normalize_ingredient(item)
-        if normalized is None:
-            continue
-        ingredients.append(normalized)
+    try:
+        for item in ingredients_in:
+            normalized = normalize_ingredient(item)
+            if normalized is None:
+                continue
+            ingredients.append(normalized)
+    except RecipeNormalizeError as exc:
+        return None, exc.message
     if not ingredients:
         return None, "error: Invalid recipe payload — ingredients required"
 
@@ -531,6 +981,27 @@ def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None
 # Show every step in the confirm UI; cap only for pathological recipes (voice length).
 _CONFIRM_STEPS_CAP = 40
 
+_GROUP_HEADING_NL = {
+    "dressing": "Voor de dressing",
+    "marinade": "Voor de marinade",
+    "sauce": "Voor de saus",
+    "topping": "Voor de topping",
+    "garnish": "Voor de garnering",
+}
+_GROUP_HEADING_EN = {
+    "dressing": "Dressing",
+    "marinade": "Marinade",
+    "sauce": "Sauce",
+    "topping": "Topping",
+    "garnish": "Garnish",
+}
+
+
+def _group_heading(group: str, *, dutch: bool) -> str:
+    key = (group or "").casefold()
+    table = _GROUP_HEADING_NL if dutch else _GROUP_HEADING_EN
+    return table.get(key, group)
+
 
 def awaiting_confirmation_result(payload: dict[str, Any]) -> str:
     steps = list(payload.get("steps") or [])
@@ -556,18 +1027,32 @@ def build_recipe_confirm_reply(
     """Deterministic M3 confirm copy — never claim the recipe was saved yet."""
     title = str(payload.get("title") or "recept")
     servings = payload.get("servings")
-    n_ing = len(payload.get("ingredients") or [])
+    ingredients = list(payload.get("ingredients") or [])
+    n_ing = len(ingredients)
     steps = list(payload.get("steps") or [])
     n_steps = len(steps)
     shown = steps[:_CONFIRM_STEPS_CAP]
     omitted = n_steps - len(shown)
     use_dutch = recipe_locale_dutch(user_message, prefer_dutch=dutch)
+
+    def _append_ingredients(lines: list[str]) -> None:
+        prev_group: str | None = None
+        for item in ingredients:
+            group = str(item.get("group") or "").strip()
+            if group and group.casefold() != (prev_group or "").casefold():
+                lines.append(_group_heading(group, dutch=use_dutch))
+            prev_group = group or None
+            qty = str(item.get("quantity") or "").strip()
+            name = str(item.get("name") or "").strip()
+            lines.append(f"- {qty} {name}".strip())
+
     if use_dutch:
         serving_bit = f", {servings} personen" if isinstance(servings, int) else ""
         lines = [
             f"Ik heb **{title}** klaargezet ({n_ing} ingrediënten, {n_steps} stappen"
             f"{serving_bit}) — nog niet opgeslagen.",
         ]
+        _append_ingredients(lines)
         for i, step in enumerate(shown, start=1):
             lines.append(f"{i}. {step}")
         if omitted > 0:
@@ -579,6 +1064,7 @@ def build_recipe_confirm_reply(
         f"Ready to save **{title}** ({n_ing} ingredients, {n_steps} steps"
         f"{serving_bit}) — not saved yet.",
     ]
+    _append_ingredients(lines)
     for i, step in enumerate(shown, start=1):
         lines.append(f"{i}. {step}")
     if omitted > 0:

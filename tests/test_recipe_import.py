@@ -149,6 +149,504 @@ def test_normalize_strips_amount_already_in_quantity() -> None:
     ) == {"name": "kipgehakt", "quantity": "300 gr"}
 
 
+def test_normalize_t047_doubled_stems_and_qty_fluff() -> None:
+    """T-047: collapse doubled stems; map invented Dutch qty fluff → to taste."""
+    from brain.recipe_import import normalize_ingredient
+
+    assert normalize_ingredient(
+        {"name": "1/2 komkommer", "quantity": ""}
+    ) == {"name": "komkommer", "quantity": "1/2"}
+    assert normalize_ingredient(
+        {"name": "kom komkommer", "quantity": "1/2"}
+    ) == {"name": "komkommer", "quantity": "1/2"}
+    assert normalize_ingredient(
+        {"name": "komkommer", "quantity": "1/2 kom"}
+    ) == {"name": "komkommer", "quantity": "1/2"}
+    assert normalize_ingredient(
+        {"name": "bosuitjes bosui", "quantity": "2"}
+    ) == {"name": "bosuitjes", "quantity": "2"}
+    assert normalize_ingredient(
+        {"name": "bosui", "quantity": "2 bosuitjes"}
+    ) == {"name": "bosuitjes", "quantity": "2"}
+    # Protected Dutch bunch unit — do not strip ``bos`` from quantity.
+    assert normalize_ingredient(
+        {"name": "bosui", "quantity": "1 bos"}
+    ) == {"name": "bosui", "quantity": "1 bos"}
+    assert normalize_ingredient(
+        {"name": "peper en zout", "quantity": "aan de smaak"}
+    ) == {"name": "peper en zout", "quantity": "to taste"}
+    assert normalize_ingredient(
+        {"name": "peper en zout (voor dressing)", "quantity": "te bespreken"}
+    ) == {"name": "peper en zout", "quantity": "to taste", "group": "dressing"}
+    assert normalize_ingredient(
+        {"name": "peper en zout", "quantity": "teugen"}
+    ) == {"name": "peper en zout", "quantity": "to taste"}
+    assert normalize_ingredient(
+        {"name": "kerriepoeder (voor dressing)", "quantity": "1 tl"}
+    ) == {"name": "kerriepoeder", "quantity": "1 tl", "group": "dressing"}
+    assert normalize_ingredient(
+        {"name": "yoghurt", "quantity": "100 gr", "group": "dressing"}
+    ) == {"name": "yoghurt", "quantity": "100 gr", "group": "dressing"}
+    assert normalize_ingredient(
+        {"name": "saus base", "quantity": "1 el", "group": "saus"}
+    ) == {"name": "saus base", "quantity": "1 el", "group": "sauce"}
+    # Do not collapse distinct ingredients that share a prefix.
+    assert normalize_ingredient(
+        {"name": "paprika paprikapoeder", "quantity": "1 tl"}
+    ) == {"name": "paprika paprikapoeder", "quantity": "1 tl"}
+    # Do not rewrite measurement units into the name.
+    assert normalize_ingredient(
+        {"name": "thee", "quantity": "2 theelepels"}
+    ) == {"name": "thee", "quantity": "2 theelepels"}
+    assert normalize_ingredient(
+        {"name": "aan de smaak peper en zout", "quantity": ""}
+    ) == {"name": "peper en zout", "quantity": "to taste"}
+    # Stem strip leaving empty qty still defaults to to taste.
+    assert normalize_ingredient(
+        {"name": "komkommer", "quantity": "kom"}
+    ) == {"name": "komkommer", "quantity": "to taste"}
+
+
+def test_normalize_oversized_group_fails_payload() -> None:
+    from brain.recipe_import import RecipeNormalizeError, normalize_ingredient
+
+    try:
+        normalize_ingredient(
+            {"name": "x", "quantity": "1", "group": "g" * 41}
+        )
+        raise AssertionError("expected RecipeNormalizeError")
+    except RecipeNormalizeError as exc:
+        assert "group exceeds 40" in exc.message
+
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "T",
+            "ingredients": [{"name": "x", "quantity": "1", "group": "g" * 41}],
+            "steps": ["Do."],
+        }
+    )
+    assert payload is None
+    assert err is not None
+    assert "group exceeds 40" in err
+
+
+_KIP_KERRIE_PASTE = """\
+Importeer dit recept:
+Een lekkere kip kerrie pastasalade met gerookte kip, frisse groenten en een romige kerriedressing.
+Bereidingstijd: 25minuten min
+Recept voor: 4 personen
+Benodigdheden:
+300 gr pasta bijvoorbeeld fusilli
+300 gr gerookte kipreepjes
+150 gr mais (Bonduelle)
+1/2 komkommer
+2 bosuitjes
+150 gr doperwten diepvries
+2 tl kerriepoeder
+1 tl paprikapoeder
+peper en zout
+
+Voor de dressing
+100 gr Griekse yoghurt
+2 el mayonaise (Thomy)
+1 tl kerriepoeder
+1 tl honing
+1 tl citroensap
+peper en zout
+
+Bereidingswijze:
+Kook de pasta volgens de aanwijzingen op de verpakking.
+"""
+
+
+def test_merge_subsection_ingredients_recovers_dropped_dressing() -> None:
+    """T-049: paste subsection lines are merged with group when the model omits them."""
+    from brain.recipe_import import (
+        merge_subsection_ingredients_from_source,
+        normalize_recipe_payload,
+        parse_subsection_ingredients_from_text,
+    )
+
+    extras = parse_subsection_ingredients_from_text(_KIP_KERRIE_PASTE)
+    assert len(extras) == 6
+    assert extras[0]["name"] == "Griekse yoghurt"
+    assert extras[0]["quantity"] == "100 gr"
+    assert extras[0]["group"] == "dressing"
+    assert extras[-1]["name"] == "peper en zout"
+    assert extras[-1]["group"] == "dressing"
+
+    main_only = [
+        {"name": "pasta bijvoorbeeld fusilli", "quantity": "300 gr"},
+        {"name": "gerookte kipreepjes", "quantity": "300 gr"},
+        {"name": "mais (Bonduelle)", "quantity": "150 gr"},
+        {"name": "komkommer", "quantity": "1/2"},
+        {"name": "bosuitjes", "quantity": "2"},
+        {"name": "doperwten diepvries", "quantity": "150 gr"},
+        {"name": "kerriepoeder", "quantity": "2 tl"},
+        {"name": "paprikapoeder", "quantity": "1 tl"},
+        {"name": "peper en zout", "quantity": "to taste"},
+    ]
+    merged = merge_subsection_ingredients_from_source(_KIP_KERRIE_PASTE, main_only)
+    assert len(merged) == 15
+    from brain.recipe_import import normalize_ingredient
+
+    norms = [normalize_ingredient(i) for i in merged]
+    assert all(n is not None for n in norms)
+    dressing = [n for n in norms if n and n.get("group") == "dressing"]
+    assert len(dressing) == 6
+    names = [n["name"] for n in norms if n]
+    assert "Griekse yoghurt" in names
+    assert "mayonaise (Thomy)" in names
+    assert "honing" in names
+    assert "citroensap" in names
+    assert all("(voor dressing)" not in n for n in names)
+    assert sum(1 for n in norms if n and n["name"] == "peper en zout") == 2
+
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Kip kerrie pastasalade",
+            "servings": 4,
+            "ingredients": merged,
+            "steps": ["Kook de pasta.", "Serve."],
+        }
+    )
+    assert err is None
+    assert payload is not None
+    assert len(payload["ingredients"]) == 15
+
+
+def test_merge_subsection_skips_already_grouped() -> None:
+    from brain.recipe_import import merge_subsection_ingredients_from_source
+
+    already = [
+        {"name": "pasta", "quantity": "300 gr"},
+        {"name": "Griekse yoghurt", "quantity": "100 gr", "group": "dressing"},
+        {"name": "mayonaise (Thomy)", "quantity": "2 el", "group": "dressing"},
+        {"name": "kerriepoeder", "quantity": "1 tl", "group": "dressing"},
+        {"name": "honing", "quantity": "1 tl", "group": "dressing"},
+        {"name": "citroensap", "quantity": "1 tl", "group": "dressing"},
+        {"name": "peper en zout", "quantity": "to taste", "group": "dressing"},
+    ]
+    merged = merge_subsection_ingredients_from_source(_KIP_KERRIE_PASTE, already)
+    assert len(merged) == 7
+
+
+def test_merge_subsection_upgrades_ungrouped_dressing_no_dupes() -> None:
+    """Model kept dressing without group — merge upgrades, does not append again."""
+    from brain.recipe_import import (
+        merge_subsection_ingredients_from_source,
+        normalize_ingredient,
+    )
+
+    fifteen_ungrouped = [
+        {"name": "pasta (bijvoorbeeld fusilli)", "quantity": "300 gr"},
+        {"name": "gerookte kipreepjes", "quantity": "300 gr"},
+        {"name": "mais (Bonduelle)", "quantity": "150 gr"},
+        {"name": "komkommer", "quantity": "1/2"},
+        {"name": "bosuitjes", "quantity": "2"},
+        {"name": "doperwten diepvries", "quantity": "150 gr"},
+        {"name": "kerriepoeder", "quantity": "2 tl"},
+        {"name": "paprikapoeder", "quantity": "1 tl"},
+        {"name": "peper en zout", "quantity": "to taste"},
+        {"name": "Griekse yoghurt", "quantity": "100 gr"},
+        {"name": "mayonaise (Thomy)", "quantity": "2 el"},
+        {"name": "kerriepoeder", "quantity": "1 tl"},
+        {"name": "honing", "quantity": "1 tl"},
+        {"name": "citroensap", "quantity": "1 tl"},
+        {"name": "peper en zout", "quantity": "to taste"},
+    ]
+    merged = merge_subsection_ingredients_from_source(
+        _KIP_KERRIE_PASTE, fifteen_ungrouped
+    )
+    assert len(merged) == 15
+    norms = [normalize_ingredient(i) for i in merged]
+    assert norms[8] is not None and "group" not in norms[8]
+    assert norms[8]["name"] == "peper en zout"
+    assert norms[9] is not None
+    assert norms[9]["name"] == "Griekse yoghurt"
+    assert norms[9].get("group") == "dressing"
+    assert norms[11] is not None and norms[11].get("group") == "dressing"
+    assert norms[14] is not None and norms[14].get("group") == "dressing"
+    assert sum(1 for n in norms if n and "yoghurt" in n["name"].lower()) == 1
+    assert sum(1 for n in norms if n and n["name"] == "peper en zout") == 2
+
+
+def test_merge_plain_plus_group_twin_with_g_vs_gr() -> None:
+    """Live failure: plain yoghurt 100 g + paste extra 100 gr must not double."""
+    from brain.recipe_import import merge_subsection_ingredients_from_source
+
+    messy = [
+        {"name": "pasta", "quantity": "300 g"},
+        {"name": "peper en zout", "quantity": "to taste"},
+        {"name": "Griekse yoghurt", "quantity": "100 g"},
+        {"name": "mayonaise (Thomy)", "quantity": "2 el"},
+        {"name": "Griekse yoghurt (voor dressing)", "quantity": "100 gr"},
+        {"name": "mayonaise (Thomy) (voor dressing)", "quantity": "2 el"},
+    ]
+    merged = merge_subsection_ingredients_from_source(_KIP_KERRIE_PASTE, messy)
+    yoghurt = [
+        i for i in merged if "yoghurt" in str(i.get("name", "")).lower()
+    ]
+    assert len(yoghurt) == 1
+    assert yoghurt[0].get("group") == "dressing"
+    assert "(voor dressing)" not in yoghurt[0]["name"]
+    mayo = [i for i in merged if "mayonaise" in str(i.get("name", "")).lower()]
+    assert len(mayo) == 1
+    assert mayo[0].get("group") == "dressing"
+    # Full dressing block recovered; main peper stays + dressing peper.
+    assert len([i for i in merged if i.get("group") == "dressing"]) == 6
+    assert sum(1 for i in merged if i.get("name") == "peper en zout") == 2
+    assert len(merged) == 8  # pasta + main peper + 6 dressing
+
+
+_KIP_KERRIE_LLM_INGREDIENTS = [
+    {"name": "pasta bijvoorbeeld fusilli", "quantity": "300 gr"},
+    {"name": "gerookte kipreepjes", "quantity": "300 gr"},
+    {"name": "mais (Bonduelle)", "quantity": "150 gr"},
+    {"name": "komkommer", "quantity": "1/2"},
+    {"name": "bosuitjes", "quantity": "2"},
+    {"name": "doperwten diepvries", "quantity": "150 gr"},
+    {"name": "kerriepoeder", "quantity": "2 tl"},
+    {"name": "paprikapoeder", "quantity": "1 tl"},
+    {"name": "peper en zout", "quantity": ""},
+    {"name": "Griekse yoghurt", "quantity": "100 gr", "group": "dressing"},
+    {"name": "mayonaise (Thomy)", "quantity": "2 el", "group": "dressing"},
+    {"name": "kerriepoeder", "quantity": "1 tl", "group": "dressing"},
+    {"name": "honing", "quantity": "1 tl", "group": "dressing"},
+    {"name": "citroensap", "quantity": "1 tl", "group": "dressing"},
+    {"name": "peper en zout", "quantity": "", "group": "dressing"},
+]
+
+
+def test_normalize_t049_fixture_payload_keeps_15_and_dressing_group() -> None:
+    """T-049 fixture shape: 15 ingredients, group=dressing, confirm headings."""
+    from brain.recipe_import import build_recipe_confirm_reply
+
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Kip kerrie pastasalade",
+            "servings": 4,
+            "ingredients": list(_KIP_KERRIE_LLM_INGREDIENTS),
+            "steps": [
+                "Kook de pasta.",
+                "Spoel af.",
+                "Snijd groenten.",
+                "Meng dressing.",
+                "Meng salade.",
+                "Voeg dressing toe.",
+                "Koel desgewenst.",
+            ],
+        }
+    )
+    assert err is None
+    assert payload is not None
+    ings = payload["ingredients"]
+    assert len(ings) == 15
+    names = [i["name"] for i in ings]
+    assert names[8] == "peper en zout"
+    assert "group" not in ings[8]
+    assert names[9] == "Griekse yoghurt"
+    assert ings[9]["group"] == "dressing"
+    assert "mayonaise (Thomy)" in names
+    assert all("(voor dressing)" not in n for n in names)
+    assert sum(1 for i in ings if i.get("group") == "dressing") == 6
+    assert ings[8]["quantity"] == "to taste"
+    assert ings[14]["quantity"] == "to taste"
+    assert ings[14]["group"] == "dressing"
+    assert all("kom komkommer" not in i["name"] for i in ings)
+    assert all("bosuitjes bosui" not in i["name"] for i in ings)
+
+    confirm = build_recipe_confirm_reply(
+        payload, user_message="Importeer dit recept: pasta"
+    )
+    assert "15 ingrediënten" in confirm
+    assert "7 stappen" in confirm
+    assert "Voor de dressing" in confirm
+    assert "- 100 gr Griekse yoghurt" in confirm
+
+
+def test_stage_then_confirm_dispatches_t049_dressing_groups() -> None:
+    """Staged fixture list (incl. group) is what recipes.add receives on ja."""
+    calls: list[dict] = []
+    store = PendingRecipeStore()
+    cid = "conv-recipe-t049"
+    recipe_args = {
+        "title": "Kip kerrie pastasalade",
+        "servings": 4,
+        "ingredients": list(_KIP_KERRIE_LLM_INGREDIENTS),
+        "steps": [
+            "Kook de pasta.",
+            "Spoel af.",
+            "Snijd groenten.",
+            "Meng dressing.",
+            "Meng salade.",
+            "Voeg dressing toe.",
+            "Koel desgewenst.",
+        ],
+    }
+
+    client1 = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.recipes.add",
+                            arguments=recipe_args,
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="Klaar om op te slaan?"),
+        ]
+    )
+    result1 = run_turn(
+        client1,
+        [ChatMessage(role="user", content="Importeer dit recept: Benodigdheden...")],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=4,
+    )
+    assert result1.stopped_reason == StoppedReason.FINAL
+    assert calls == []
+    assert "15 ingrediënten" in (result1.content or "")
+    assert "Voor de dressing" in (result1.content or "")
+    pending = store.get(cid)
+    assert pending is not None
+    assert len(pending["ingredients"]) == 15
+    dressing = [i for i in pending["ingredients"] if i.get("group") == "dressing"]
+    assert len(dressing) == 6
+    assert any(i["name"] == "Griekse yoghurt" for i in dressing)
+    assert any(i["name"] == "honing" for i in dressing)
+
+    client2 = _ScriptedClient(
+        [ChatMessage(role="assistant", content="ignored")],
+    )
+    result2 = run_turn(
+        client2,
+        [ChatMessage(role="user", content="ja")],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=4,
+    )
+    assert result2.stopped_reason == StoppedReason.FINAL
+    assert len(calls) == 1
+    dispatched = calls[0]["ingredients"]
+    assert len(dispatched) == 15
+    assert [i["name"] for i in dispatched] == [
+        i["name"] for i in pending["ingredients"]
+    ]
+    assert any(
+        i.get("group") == "dressing" and "citroensap" in i["name"].lower()
+        for i in dispatched
+    )
+
+
+def test_stage_merges_dressing_when_model_omits_subsection() -> None:
+    """Live failure mode: model stages 9 main lines; paste still has Voor de dressing."""
+    calls: list[dict] = []
+    store = PendingRecipeStore()
+    cid = "conv-recipe-t049-merge"
+    main_only = [
+        {"name": "pasta bijvoorbeeld fusilli", "quantity": "300 g"},
+        {"name": "gerookte kipreepjes", "quantity": "300 g"},
+        {"name": "mais (Bonduelle)", "quantity": "150 g"},
+        {"name": "komkommer", "quantity": "1/2"},
+        {"name": "bosuitjes", "quantity": "2"},
+        {"name": "doperwten diepvries", "quantity": "150 g"},
+        {"name": "kerriepoeder", "quantity": "2 tl"},
+        {"name": "paprikapoeder", "quantity": "1 tl"},
+        {"name": "peper en zout", "quantity": "to taste"},
+    ]
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.recipes.add",
+                            arguments={
+                                "title": "Kip kerrie pastasalade",
+                                "servings": 4,
+                                "ingredients": main_only,
+                                "steps": ["Kook de pasta.", "Serveer."],
+                            },
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="ignored"),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content=_KIP_KERRIE_PASTE)],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=4,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "15 ingrediënten" in (result.content or "")
+    assert "Voor de dressing" in (result.content or "")
+    pending = store.get(cid)
+    assert pending is not None
+    assert len(pending["ingredients"]) == 15
+    dressing = [i for i in pending["ingredients"] if i.get("group") == "dressing"]
+    assert len(dressing) == 6
+    assert any("yoghurt" in i["name"].lower() for i in dressing)
+    assert any("honing" in i["name"].lower() for i in dressing)
+    assert all("(voor dressing)" not in i["name"] for i in pending["ingredients"])
+
+
+def test_paste_recipe_empty_response_nudges_extract() -> None:
+    """First smoke failure: empty Ollama turn must nudge, not die empty_response."""
+    calls: list[dict] = []
+    store = PendingRecipeStore()
+    cid = "conv-recipe-t047-empty"
+    client = _ScriptedClient(
+        [
+            ChatMessage(role="assistant", content=""),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.recipes.add",
+                            arguments={
+                                "title": "Kip kerrie pastasalade",
+                                "servings": 4,
+                                "ingredients": list(_KIP_KERRIE_LLM_INGREDIENTS),
+                                "steps": ["Kook.", "Serve."],
+                            },
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="ignored"),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content=_KIP_KERRIE_PASTE)],
+        tools={"homebase.recipes.add": _recipe_add_tool(calls)},
+        conversation_id=cid,
+        pending_recipes=store,
+        max_iterations=4,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert any(s.anomaly == "recipe_extract_empty" for s in result.steps)
+    assert store.has(cid)
+    assert "15 ingrediënten" in (result.content or "")
+
+
 class _ScriptedClient:
     def __init__(self, responses: list[ChatMessage]) -> None:
         self._responses = list(responses)
