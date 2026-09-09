@@ -45,13 +45,13 @@ reads another's storage, ever.
 
 ## This repo
 
-### Current task — T-043 / T-019
+### Current task — T-019
 
-**T-045/T-046/T-047/T-048/T-049 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
+**T-043/T-045/T-046/T-047/T-048/T-049 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
 `dist\mimir-desktop.exe` (`scripts/build_mimir_desktop_exe.ps1`). Restart:
 `scripts/restart_mimir.ps1`. Textual TUI is secondary / SSH (`-WithTui`).
 
-**Open:** T-043 atomic cook steps; T-019 daily-driver week.
+**Open:** T-019 daily-driver week.
 
 Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
 `MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.

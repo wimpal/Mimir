@@ -12,6 +12,7 @@ from brain.recipe_import import (
     PendingRecipeStore,
     normalize_recipe_payload,
     normalize_step,
+    split_atomic_steps,
     user_message_requests_recipe_save,
 )
 from brain.tools import Tool
@@ -98,6 +99,156 @@ def test_normalize_strips_step_numbers() -> None:
     assert payload is not None
     assert payload["steps"] == ["Mix flour, milk and eggs.", "Cook."]
     assert not any(s.startswith("1.") for s in payload["steps"])
+
+
+_CHOW_MEIN_STEP_BLOB = (
+    "Heat a wok over high heat; add the oil then stir fry the chicken until browned. "
+    "Add the vegetables and toss. Pour in the sauce and then cook until glossy! Serve hot."
+)
+
+
+def test_split_atomic_steps_expands_blob() -> None:
+    """T-043: multi-sentence / ; / then blobs become many short steps."""
+    parts = split_atomic_steps([_CHOW_MEIN_STEP_BLOB])
+    assert len(parts) >= 6
+    assert all(len(p) < len(_CHOW_MEIN_STEP_BLOB) for p in parts)
+    # Bare "and" must not split (salt and pepper / milk and eggs).
+    assert split_atomic_steps(["Season with salt and pepper."]) == [
+        "Season with salt and pepper."
+    ]
+    assert split_atomic_steps(["Mix flour, milk and eggs."]) == [
+        "Mix flour, milk and eggs."
+    ]
+
+
+def test_split_atomic_steps_dutch_connectors() -> None:
+    parts = split_atomic_steps(
+        [
+            "Verhit de wok. Voeg olie toe en dan bak de kip. "
+            "Voeg groenten toe dan roer. Serveer vervolgens warm."
+        ]
+    )
+    assert len(parts) >= 5
+    assert any("Verhit" in p for p in parts)
+    assert any("Serveer" in p or "warm" in p.lower() for p in parts)
+
+
+def test_split_atomic_steps_keeps_abbrev_and_splits_picnic_blob() -> None:
+    """T-043 smoke: Picnic-style paragraphs; do not split on ca. 1."""
+    picnic = [
+        "Breng een pan met water aan de kook. "
+        "Kook 300 g rijst volgens de aanwijzingen op de verpakking gaar.",
+        "Breng een pan met ruim gezouten water aan de kook. "
+        "Snijd 2 broccoli's in roosjes. Snijd 1 bosje bosui in dunne ringetjes. "
+        "Houd de witte en groene ringetjes apart. Snijd 2 teentjes knoflook fijn. "
+        "Kook de broccoli voor 4 tot 5 minuten.",
+        "Verhit in de tussentijd 1 el zonnebloemolie in een koekenpan. "
+        "Bak 4 stukken zalm voor 2 tot 3 minuten per kant. "
+        "Bak de knoflook en witte gedeelte van de bosui mee. "
+        "Blus af met 2 el sojasaus en 4 el ketjap manis. "
+        "Laat ca. 1 minuut indikken.",
+        "Serveer de rijst met de broccoli en ketjap-zalm. "
+        "Garneer met de overgebleven groene bosui ringetjes.",
+    ]
+    parts = split_atomic_steps(picnic)
+    assert len(parts) >= 6
+    assert any("Laat ca. 1 minuut indikken" in p for p in parts)
+    assert not any(p == "Laat ca." for p in parts)
+    # Bare en must not split garnish / salt-and-pepper style phrases.
+    assert any("broccoli en ketjap-zalm" in p for p in parts)
+
+
+def test_normalize_splits_atomic_steps_and_keeps_atomic_list() -> None:
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Easy Chicken Chow Mein",
+            "ingredients": [{"name": "noodles", "quantity": "200 g"}],
+            "steps": [_CHOW_MEIN_STEP_BLOB],
+        }
+    )
+    assert err is None
+    assert payload is not None
+    assert len(payload["steps"]) >= 6
+
+    atomic, err2 = normalize_recipe_payload(
+        {
+            "title": "Pannenkoeken",
+            "ingredients": [{"name": "bloem", "quantity": "250 g"}],
+            "steps": [
+                "Mix flour, milk and eggs.",
+                "Heat a lightly oiled pan.",
+                "Pour a ladle of batter.",
+            ],
+        }
+    )
+    assert err2 is None
+    assert atomic is not None
+    assert atomic["steps"] == [
+        "Mix flour, milk and eggs.",
+        "Heat a lightly oiled pan.",
+        "Pour a ladle of batter.",
+    ]
+
+
+def test_normalize_too_many_steps_after_split() -> None:
+    # One blob that expands past MAX_STEPS via many sentence fragments.
+    from brain.recipe_import import MAX_STEPS
+
+    blob = " ".join(f"Do action number {i}." for i in range(MAX_STEPS + 5))
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Too many",
+            "ingredients": [{"name": "x", "quantity": "1"}],
+            "steps": [blob],
+        }
+    )
+    assert payload is None
+    assert err is not None
+    assert "too many steps" in err
+
+
+def test_confirm_reply_reflects_expanded_step_count() -> None:
+    from brain.recipe_import import build_recipe_confirm_reply
+
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Chow Mein",
+            "ingredients": [{"name": "noodles", "quantity": "200 g"}],
+            "steps": [_CHOW_MEIN_STEP_BLOB],
+        }
+    )
+    assert err is None and payload is not None
+    reply = build_recipe_confirm_reply(payload, user_message="Save this recipe")
+    n = len(payload["steps"])
+    assert f"{n} steps" in reply
+    # Preview should include at least the first expanded fragment.
+    assert payload["steps"][0] in reply
+
+
+def test_normalize_preserves_ingredient_groups_when_splitting_steps() -> None:
+    """T-049 regression: group/clean names survive T-043 step expansion."""
+    payload, err = normalize_recipe_payload(
+        {
+            "title": "Kip kerrie pastasalade",
+            "ingredients": [
+                {"name": "pasta", "quantity": "250 g"},
+                {"name": "yoghurt", "quantity": "100 gr", "group": "dressing"},
+                {"name": "kerriepoeder", "quantity": "1 tl", "group": "dressing"},
+                {"name": "peper en zout", "quantity": "to taste", "group": "dressing"},
+            ],
+            "steps": [_CHOW_MEIN_STEP_BLOB],
+        }
+    )
+    assert err is None
+    assert payload is not None
+    assert len(payload["steps"]) >= 6
+    by_name = {i["name"]: i for i in payload["ingredients"]}
+    assert by_name["pasta"].get("group") is None or "group" not in by_name["pasta"]
+    assert by_name["yoghurt"]["group"] == "dressing"
+    assert by_name["kerriepoeder"]["group"] == "dressing"
+    assert by_name["peper en zout"]["group"] == "dressing"
+    assert by_name["peper en zout"]["name"] == "peper en zout"
+    assert "(voor dressing)" not in by_name["peper en zout"]["name"]
 
 
 def test_normalize_fills_missing_ingredient_quantity() -> None:

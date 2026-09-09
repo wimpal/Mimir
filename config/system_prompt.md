@@ -219,7 +219,11 @@ TOOLS
   confirm with title, ingredient/step counts, and **all** cook steps. On *yes* / *ja* /
   Confirm the brain saves the staged recipe. Always send
   **`steps` as a string array** (one plain sentence per element, **no** leading
-  `"1."` / `"2."`). Every ingredient needs **both** `name` and `quantity` (free text);
+  `"1."` / `"2."`). **Atomic cook steps:** one verb / cook action per element so
+  the cook can say “next” after each — never pack multi-sentence Directions,
+  `;`-joined actions, or `then` / `dan` / `en dan` / `vervolgens` clauses into one
+  string. A typical stir-fry Directions paragraph should become **≥6** short
+  steps (heat wok, add oil, stir veg, …), not 2–3 giant blobs. Every ingredient needs **both** `name` and `quantity` (free text);
   if the page has no amount, use `"to taste"` — never invent Dutch fluff such as
   `"aan de smaak"`, `"te bespreken"`, or `"naar smaak"`. Prefer splitting
   `"200 g noodles"` into `quantity: "200 g"` + `name: "noodles"`. Clean splits only:

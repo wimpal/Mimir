@@ -396,6 +396,42 @@ def normalize_step(step: str) -> str:
     return text
 
 
+# Split multi-action blobs into one cook beat per element (T-043).
+# Require a following capital so "ca. 1 minuut" / "el. zonnebloemolie" stay intact.
+_STEP_SENTENCE_RE = re.compile(
+    r"(?<=[.!?])\s+(?=[A-ZÀ-ÖØ-Þ])"
+)
+_STEP_CONNECTOR_RE = re.compile(
+    r"\s*(?:\band\s+then\b|\ben\s+dan\b|\bthen\b|\bdan\b|\bvervolgens\b)\s+",
+    re.IGNORECASE,
+)
+
+
+def split_atomic_steps(steps: list[str]) -> list[str]:
+    """Expand step blobs on ``;``, sentence ends, and then/dan connectors.
+
+    Operates on cook-step strings only — never touches ingredients or ``group``.
+    """
+    out: list[str] = []
+    for raw in steps:
+        text = normalize_step(str(raw))
+        if not text:
+            continue
+        for semi in text.split(";"):
+            semi = semi.strip()
+            if not semi:
+                continue
+            for sentence in _STEP_SENTENCE_RE.split(semi):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                for part in _STEP_CONNECTOR_RE.split(sentence):
+                    part = normalize_step(part)
+                    if part:
+                        out.append(part)
+    return out
+
+
 # Leading amount(+unit) stuck in name — common when the model dumps the whole line.
 _QTY_UNIT_ALTS = (
     r"gr|g|kg|ml|l|oz|lb|lbs|tsp|tbsp|el|tl|bos|"
@@ -955,13 +991,12 @@ def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None
         return None, "error: Recipe too large — too many steps"
 
     steps: list[str] = []
-    for step in steps_in:
-        normalized = normalize_step(str(step))
-        if not normalized:
-            continue
-        if len(normalized) > MAX_STEP_CHARS:
+    for fragment in split_atomic_steps([str(s) for s in steps_in]):
+        if len(fragment) > MAX_STEP_CHARS:
             return None, "error: Recipe too large — step exceeds 2000 characters"
-        steps.append(normalized)
+        steps.append(fragment)
+    if len(steps) > MAX_STEPS:
+        return None, "error: Recipe too large — too many steps"
     if not steps:
         return None, "error: Invalid recipe payload — steps required"
 
