@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import http.client
 import ipaddress
+import json
 import re
 import socket
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -18,10 +20,18 @@ from brain.config import Settings
 from brain.tools import Tool
 
 DEFAULT_TIMEOUT_S = 15.0
-MAX_BODY_BYTES = 512 * 1024
+# Modern recipe SPAs (e.g. Picnic Next.js) can exceed 512 KiB HTML.
+MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_REDIRECTS = 5
 # Prefer a tighter snippet for the model (recipe pages are mostly chrome).
 MAX_MODEL_CHARS = 12_000
+
+_RECIPE_OBJECT_START_RE = re.compile(
+    r'\{\s*"@context"\s*:\s*"https?://schema\.org/?"\s*,\s*"@type"\s*:\s*"Recipe"',
+)
+_RECIPE_ESCAPED_IN_STRING_RE = re.compile(
+    r',"\{\\"@context\\":\\"https?://schema\.org/?\\",\\"@type\\":\\"Recipe\\"',
+)
 
 _BLOCKED_NETWORKS = (
     ipaddress.ip_network("0.0.0.0/8"),
@@ -35,24 +45,56 @@ _BLOCKED_NETWORKS = (
     ipaddress.ip_network("fe80::/10"),
 )
 
+_LD_JSON_TYPE_RE = re.compile(
+    r"^application/ld\+json\b",
+    re.IGNORECASE,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_JSON_COMMENT_RE = re.compile(r"^\s*/\*.*?\*/\s*", re.DOTALL)
+
 
 class _HTMLStripper(HTMLParser):
-    """Collect visible text; drop script/style content."""
+    """Collect visible text; drop script/style; capture application/ld+json."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._chunks: list[str] = []
         self._skip_depth = 0
+        self._ld_json_depth = 0
+        self._ld_json_buf: list[str] = []
+        self.ld_json_blocks: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in {"script", "style", "noscript"}:
+        lower = tag.lower()
+        if lower == "script":
+            type_val = ""
+            for key, value in attrs:
+                if key.lower() == "type" and value:
+                    type_val = value.strip()
+                    break
+            if _LD_JSON_TYPE_RE.match(type_val):
+                self._ld_json_depth += 1
+                return
+            self._skip_depth += 1
+            return
+        if lower in {"style", "noscript"}:
             self._skip_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "noscript"} and self._skip_depth:
+        lower = tag.lower()
+        if lower == "script" and self._ld_json_depth:
+            self._ld_json_depth -= 1
+            if self._ld_json_depth == 0 and self._ld_json_buf:
+                self.ld_json_blocks.append("".join(self._ld_json_buf))
+                self._ld_json_buf = []
+            return
+        if lower in {"script", "style", "noscript"} and self._skip_depth:
             self._skip_depth -= 1
 
     def handle_data(self, data: str) -> None:
+        if self._ld_json_depth:
+            self._ld_json_buf.append(data)
+            return
         if self._skip_depth:
             return
         text = data.strip()
@@ -61,6 +103,348 @@ class _HTMLStripper(HTMLParser):
 
     def text(self) -> str:
         return "\n".join(self._chunks)
+
+
+def _types_of(node: Any) -> list[str]:
+    raw = node.get("@type") if isinstance(node, dict) else None
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw.rsplit("/", 1)[-1]]
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append(item.rsplit("/", 1)[-1])
+        return out
+    return []
+
+
+def _has_type(node: Any, *names: str) -> bool:
+    types = {t.lower() for t in _types_of(node)}
+    return any(name.lower() in types for name in names)
+
+
+def _iter_jsonld_nodes(payload: Any) -> Iterator[Any]:
+    if isinstance(payload, list):
+        for item in payload:
+            yield from _iter_jsonld_nodes(item)
+        return
+    if not isinstance(payload, dict):
+        return
+    yield payload
+    graph = payload.get("@graph")
+    if isinstance(graph, list):
+        for item in graph:
+            yield from _iter_jsonld_nodes(item)
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        return ""
+    text = html_lib.unescape(text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _walk_instruction_node(node: Any, out: list[str]) -> None:
+    if node is None:
+        return
+    if isinstance(node, str):
+        cleaned = _clean_text(node)
+        if cleaned:
+            out.append(cleaned)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _walk_instruction_node(item, out)
+        return
+    if not isinstance(node, dict):
+        return
+    if _has_type(node, "HowToStep", "HowToDirection", "HowToTip"):
+        text = _clean_text(node.get("text")) or _clean_text(node.get("name"))
+        if text:
+            out.append(text)
+        return
+    if _has_type(node, "HowToSection", "ItemList", "HowTo"):
+        elements = node.get("itemListElement")
+        if elements is not None:
+            _walk_instruction_node(elements, out)
+        step = node.get("step")
+        if step is not None:
+            _walk_instruction_node(step, out)
+        return
+    if _has_type(node, "ListItem") or "item" in node:
+        item = node.get("item")
+        if item is not None:
+            _walk_instruction_node(item, out)
+            return
+        text = _clean_text(node.get("text")) or _clean_text(node.get("name"))
+        if text:
+            out.append(text)
+        return
+    # Untyped dict that still looks like a step.
+    text = _clean_text(node.get("text")) or _clean_text(node.get("name"))
+    if text:
+        out.append(text)
+        return
+    elements = node.get("itemListElement")
+    if elements is not None:
+        _walk_instruction_node(elements, out)
+
+
+def _extract_ingredients(node: dict[str, Any]) -> list[str]:
+    raw = node.get("recipeIngredient")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        cleaned = _clean_text(raw)
+        return [cleaned] if cleaned else []
+    if not isinstance(raw, list):
+        cleaned = _clean_text(raw)
+        return [cleaned] if cleaned else []
+    out: list[str] = []
+    for item in raw:
+        cleaned = _clean_text(item)
+        if cleaned:
+            out.append(cleaned)
+    return out
+
+
+def _extract_instructions(node: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    _walk_instruction_node(node.get("recipeInstructions"), out)
+    return out
+
+
+def _parse_ld_json_blob(raw: str) -> Any | None:
+    text = raw.strip().lstrip("\ufeff")
+    text = _JSON_COMMENT_RE.sub("", text, count=1).strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _brace_match_json_object(text: str, start: int) -> Any | None:
+    """Parse a JSON object starting at ``start``, respecting string literals."""
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _load_json_string_literal(text: str, start: int) -> Any | None:
+    """Parse a JSON string literal at ``start`` (opening quote)."""
+    if start >= len(text) or text[start] != '"':
+        return None
+    escape = False
+    for i in range(start + 1, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            try:
+                return json.loads(text[start : i + 1])
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _iter_embedded_recipe_payloads(text: str) -> Iterator[Any]:
+    """Yield Recipe JSON payloads from classic or Next.js-embedded HTML."""
+    seen: set[int] = set()
+    for match in _RECIPE_OBJECT_START_RE.finditer(text):
+        payload = _brace_match_json_object(text, match.start())
+        if isinstance(payload, dict) and id(payload) not in seen:
+            seen.add(id(payload))
+            yield payload
+    for match in _RECIPE_ESCAPED_IN_STRING_RE.finditer(text):
+        # match starts at ,"{\"@context\"... — JSON string begins at the quote.
+        quote_at = match.start() + 1
+        loaded = _load_json_string_literal(text, quote_at)
+        if isinstance(loaded, str):
+            try:
+                payload = json.loads(loaded)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(loaded, dict):
+            payload = loaded
+        else:
+            continue
+        if isinstance(payload, dict) and _has_type(payload, "Recipe"):
+            if id(payload) not in seen:
+                seen.add(id(payload))
+                yield payload
+
+
+def _select_recipe_node(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    with_both: dict[str, Any] | None = None
+    with_instructions: dict[str, Any] | None = None
+    with_ingredients: dict[str, Any] | None = None
+    for node in nodes:
+        if not _has_type(node, "Recipe"):
+            continue
+        instructions = _extract_instructions(node)
+        ingredients = _extract_ingredients(node)
+        if instructions and ingredients and with_both is None:
+            with_both = node
+        if instructions and with_instructions is None:
+            with_instructions = node
+        if ingredients and with_ingredients is None:
+            with_ingredients = node
+    return with_both or with_instructions or with_ingredients
+
+
+def recipe_structured_from_html(html: str, ld_json_blocks: list[str] | None = None) -> str:
+    """Build Ingredients/Directions plain text from Recipe JSON-LD in HTML."""
+    recipe_nodes: list[dict[str, Any]] = []
+    for block in ld_json_blocks or []:
+        payload = _parse_ld_json_blob(block)
+        if payload is None:
+            continue
+        for node in _iter_jsonld_nodes(payload):
+            if isinstance(node, dict) and _has_type(node, "Recipe"):
+                recipe_nodes.append(node)
+    for node in _iter_embedded_recipe_payloads(html):
+        if isinstance(node, dict) and _has_type(node, "Recipe"):
+            recipe_nodes.append(node)
+        else:
+            for child in _iter_jsonld_nodes(node):
+                if isinstance(child, dict) and _has_type(child, "Recipe"):
+                    recipe_nodes.append(child)
+    recipe = _select_recipe_node(recipe_nodes)
+    if recipe is None:
+        return ""
+    ingredients = _extract_ingredients(recipe)
+    instructions = _extract_instructions(recipe)
+    if not ingredients and not instructions:
+        return ""
+    parts: list[str] = []
+    if ingredients:
+        parts.append("Ingredients")
+        parts.extend(ingredients)
+    if instructions:
+        if parts:
+            parts.append("")
+        parts.append("Directions")
+        parts.extend(instructions)
+    return "\n".join(parts).strip()
+
+
+def recipe_structured_from_ld_json(blocks: list[str]) -> str:
+    """Backward-compatible helper: structured text from ld+json script bodies."""
+    return recipe_structured_from_html("", ld_json_blocks=blocks)
+
+def _truncate_for_model(text: str, *, structured: str = "") -> str:
+    """Prefer structured Ingredients/Directions over chrome when truncating."""
+    if structured:
+        structured = structured.strip()
+        chrome = text.strip()
+        if chrome and structured:
+            combined = f"{structured}\n\n{chrome}"
+        else:
+            combined = structured or chrome
+        if len(combined) <= MAX_MODEL_CHARS:
+            return combined
+        # Keep structured first; drop chrome before cutting Directions.
+        budget = MAX_MODEL_CHARS
+        if len(structured) >= budget:
+            # Prefer Directions section if structured alone is huge.
+            lower = structured.lower()
+            dir_anchor = lower.find("\ndirections\n")
+            if dir_anchor < 0:
+                dir_anchor = lower.find("directions\n")
+            if dir_anchor >= 0:
+                directions = structured[dir_anchor:].lstrip("\n")
+                if directions.lower().startswith("directions"):
+                    keep = directions
+                else:
+                    keep = "Directions\n" + directions
+                if len(keep) > budget:
+                    return keep[: budget - 20] + "\n…[truncated]"
+                # Fill remaining with leading Ingredients if any.
+                head = structured[:dir_anchor].rstrip()
+                room = max(0, budget - len(keep) - 2)
+                if head and room > 40:
+                    return head[:room] + "\n\n" + keep
+                return keep[:budget]
+            return structured[: budget - 20] + "\n…[truncated]"
+        room = max(0, budget - len(structured) - 2)
+        if room == 0:
+            return structured[:budget]
+        if len(chrome) > room:
+            # room may be small; keep slice non-negative and within budget.
+            chrome_budget = max(0, room - 20)
+            truncated_chrome = chrome[:chrome_budget] + "\n…[truncated]"
+        else:
+            truncated_chrome = chrome
+        if truncated_chrome.strip():
+            out = f"{structured}\n\n{truncated_chrome}"
+            return out if len(out) <= budget else out[: budget - 20] + "\n…[truncated]"
+        return structured[:budget]
+
+    if len(text) <= MAX_MODEL_CHARS:
+        return text
+    # Prefer the slice that contains Ingredients / Directions when truncating.
+    lower = text.lower()
+    anchor = -1
+    for marker in (
+        "ingredients",
+        "ingrediënten",
+        "directions",
+        "instructions",
+        "method",
+        "bereiding",
+    ):
+        anchor = lower.find(marker)
+        if anchor >= 0:
+            break
+    if anchor > 200:
+        start = max(0, anchor - 200)
+        text = text[start : start + MAX_MODEL_CHARS]
+        if start > 0:
+            text = "…\n" + text
+        if len(text) >= MAX_MODEL_CHARS:
+            text = text[: MAX_MODEL_CHARS - 20] + "\n…[truncated]"
+        return text
+    return text[: MAX_MODEL_CHARS - 20] + "\n…[truncated]"
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -130,15 +514,21 @@ def simplify_body(raw: bytes, *, content_type: str | None) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         text = raw.decode("utf-8", errors="replace")
+    structured = ""
     if "html" in ctype or re.search(r"<\s*html\b", text, re.IGNORECASE):
+        raw_html = text
         stripper = _HTMLStripper()
         try:
             stripper.feed(text)
             stripper.close()
+            structured = recipe_structured_from_html(
+                raw_html, ld_json_blocks=stripper.ld_json_blocks
+            )
             text = stripper.text()
         except Exception:  # noqa: BLE001 — fall back to raw text
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
+            structured = recipe_structured_from_html(raw_html)
     text = text.strip()
     # Drop common CMP / cookie-wall chrome that crowds out recipe body.
     text = re.sub(
@@ -150,30 +540,7 @@ def simplify_body(raw: bytes, *, content_type: str | None) -> str:
     )
     text = re.sub(r"(?m)^(Mark as complete|Share:|fb|ig|tt|p)\s*$", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if len(text) > MAX_MODEL_CHARS:
-        # Prefer the slice that contains Ingredients / Directions when truncating.
-        lower = text.lower()
-        anchor = -1
-        for marker in (
-            "ingredients",
-            "ingrediënten",
-            "directions",
-            "instructions",
-            "method",
-            "bereiding",
-        ):
-            anchor = lower.find(marker)
-            if anchor >= 0:
-                break
-        if anchor > 200:
-            start = max(0, anchor - 200)
-            text = text[start : start + MAX_MODEL_CHARS]
-            if start > 0:
-                text = "…\n" + text
-            if len(text) >= MAX_MODEL_CHARS:
-                text = text[: MAX_MODEL_CHARS - 20] + "\n…[truncated]"
-        else:
-            text = text[: MAX_MODEL_CHARS - 20] + "\n…[truncated]"
+    text = _truncate_for_model(text, structured=structured)
     return text or "(empty page)"
 
 

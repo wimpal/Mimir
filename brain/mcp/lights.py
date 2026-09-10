@@ -22,6 +22,8 @@ _LAMP_NAME_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(?:make|maak)\s+(?:de\s+|het\s+|the\s+)?(\w+)\b",
         r"\bturn\s+(?:de\s+|het\s+|the\s+)?(\w+)\s+to\b",
         r"\b(?:turn|switch)\s+(?:on|off)\s+(\w+)\b",
+        # Particle-final: "turn Ballon on" / "switch the Ballon off"
+        r"\b(?:turn|switch)\s+(?:the\s+)?(\w+)\s+(?:on|off)\b",
         r"\blamp\s+(\w+)\b",
     )
 )
@@ -76,11 +78,16 @@ DEVICE_NO_COLOR_TEMP_ERROR = "Device does not support color temperature"
 COLOUR_AND_CT_BOTH_ERROR = "Specify colour or color temperature, not both"
 INVALID_COLOUR_OR_CT_ERROR = "Invalid colour or color temperature"
 
+# Optional NL/EN article before a room name (STT often mixes "de office").
+_OPT_ARTICLE = r"(?:(?:the|de|het)\s+)?"
+
 _ROOM_ALL_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         rf"\b(?:zet|doe|turn|switch|maak|make)\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\s+lampen\b",
-        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?({_ROOM_WORD})\s+(?:room\s+)?lights\b",
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+{_OPT_ARTICLE}({_ROOM_WORD})\s+(?:room\s+)?lights\b",
+        # Particle-final: "turn the living room lights on" / "turn de office lights off"
+        rf"\b(?:turn|switch)\s+{_OPT_ARTICLE}({_ROOM_WORD})\s+(?:room\s+)?lights\s+(?:on|off)\b",
         rf"\b(?:make|maak)\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\s+(?:room\s+)?lights\b",
         rf"\b(?:alle\s+)?lichten\s+in\s+(?:de\s+|het\s+|the\s+)?({_ROOM_WORD})\b",
         rf"\blights?\s+in\s+(?:the\s+|de\s+|het\s+)?({_ROOM_WORD})\b",
@@ -91,9 +98,11 @@ _ROOM_HINT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         rf"\b(?:licht|lamp)\b.*\bin\s+(?:het\s+|de\s+|the\s+)?({_ROOM_WORD})\b",
-        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?(?:light|lamp)\s+in\s+(?:the\s+)?({_ROOM_WORD})\b",
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+|de\s+|het\s+)?(?:light|lamp)\s+in\s+(?:the\s+|de\s+|het\s+)?({_ROOM_WORD})\b",
         # "turn off the office light" / "turn on the living room light" (singular)
-        rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?({_ROOM_WORD})\s+(?:light|lamp)\b",
+        rf"\b(?:turn|switch)\s+(?:on|off)\s+{_OPT_ARTICLE}({_ROOM_WORD})\s+(?:light|lamp)\b",
+        # Particle-final: "turn the office light on" / "turn de office light on"
+        rf"\b(?:turn|switch)\s+{_OPT_ARTICLE}({_ROOM_WORD})\s+(?:light|lamp)\s+(?:on|off)\b",
     )
 )
 
@@ -246,6 +255,20 @@ def _fuzzy_room_names(lights: list[dict[str, Any]], needle: str) -> list[str]:
     return matched
 
 
+def _fuzzy_name_lights(lights: list[dict[str, Any]], needle: str) -> list[dict[str, Any]] | None:
+    """Lights whose name is within edit distance 1 of needle (STT: balon → Ballon)."""
+    lower = (needle or "").strip().lower()
+    if not lower or len(lower) < 3:
+        return None
+    matches = [
+        light
+        for light in lights
+        if (name := (light.get("name") or "").strip().lower())
+        and _edit_distance(lower, name) <= _FUZZY_ROOM_MAX_DISTANCE
+    ]
+    return matches or None
+
+
 def _lights_for_fuzzy_room(lights: list[dict[str, Any]], needle: str) -> list[dict[str, Any]] | None:
     """Lights in the one fuzzy-matched room, or None when zero / multiple rooms match."""
     matched_rooms = _fuzzy_room_names(lights, needle)
@@ -269,6 +292,11 @@ def _lights_for_aliased_room(lights: list[dict[str, Any]], needle: str) -> list[
         for light in lights
         if canonical_room_key(light.get("room")) == key
     ]
+
+
+def _strip_leading_article(word: str) -> str:
+    """Drop a leading de/het/the so STT 'de office' resolves as office."""
+    return re.sub(r"^(?:de|het|the)\s+", "", (word or "").strip(), flags=re.IGNORECASE).strip()
 
 
 def _message_for_hints(user_message: str) -> str:
@@ -301,8 +329,10 @@ def extract_room_all_hint(user_message: str) -> str | None:
     for pattern in _ROOM_ALL_HINT_PATTERNS:
         match = pattern.search(text)
         if match:
-            word = _expand_captured_room_hint(match.group(1).strip(), text)
-            if word.lower() not in _SKIP_HINT_WORDS:
+            word = _strip_leading_article(
+                _expand_captured_room_hint(match.group(1).strip(), text)
+            )
+            if word and word.lower() not in _SKIP_HINT_WORDS:
                 return word
     return None
 
@@ -317,8 +347,10 @@ def extract_room_hint(user_message: str) -> str | None:
     for pattern in _ROOM_HINT_PATTERNS:
         match = pattern.search(text)
         if match:
-            word = _expand_captured_room_hint(match.group(1).strip(), text)
-            if word.lower() not in _SKIP_HINT_WORDS:
+            word = _strip_leading_article(
+                _expand_captured_room_hint(match.group(1).strip(), text)
+            )
+            if word and word.lower() not in _SKIP_HINT_WORDS:
                 return word
     return None
 
@@ -331,7 +363,8 @@ def extract_lamp_name_hint(user_message: str) -> str | None:
     if extract_room_hint(user_message):
         text = _message_for_hints(user_message)
         if re.search(
-            rf"\b(?:turn|switch)\s+(?:on|off)\s+(?:the\s+)?{_ROOM_WORD}\s+(?:light|lamp)\b",
+            rf"\b(?:turn|switch)\s+(?:on|off)\s+{_OPT_ARTICLE}{_ROOM_WORD}\s+(?:light|lamp)\b"
+            rf"|\b(?:turn|switch)\s+{_OPT_ARTICLE}{_ROOM_WORD}\s+(?:light|lamp)\s+(?:on|off)\b",
             text,
             re.IGNORECASE,
         ):
@@ -782,6 +815,12 @@ def resolve_light(lights: list[dict[str, Any]], phrase: str) -> LightResolveResu
     if len(partial_name) > 1:
         return LightResolveResult(status="ambiguous", matches=tuple(partial_name))
 
+    fuzzy_name = _fuzzy_name_lights(lights, lower)
+    if fuzzy_name is not None:
+        if len(fuzzy_name) == 1:
+            return LightResolveResult(status="found", device_id=str(fuzzy_name[0]["id"]))
+        return LightResolveResult(status="ambiguous", matches=tuple(fuzzy_name))
+
     partial_room = [
         light
         for light in lights
@@ -844,7 +883,9 @@ _LIGHTS_LIST_STATUS_NOTE = (
 _LIGHTS_SET_STATE_NOTE = (
     "Note: homebase.lights.set_state succeeded when success is true. "
     "Lights toggles are not in homebase.changes v1 — no revert. "
-    "When devices_toggled > 1, every listed lamp was updated — name each in the reply."
+    "When devices_toggled > 1, every listed lamp was updated — name each in the reply. "
+    "Confirm to the user in the same language as their latest message "
+    "(Dutch command → fully Dutch reply; English → English)."
 )
 
 
@@ -1086,3 +1127,28 @@ def set_state_tool_succeeded(text: str) -> bool:
     if parsed.get("devices_toggled", 0) > 1:
         return parsed.get("success") is True
     return parsed.get("success") is True
+
+
+def parse_set_state_success_facts(text: str) -> dict[str, Any] | None:
+    """Name/room/on facts from a successful set_state tool result (for reply locale fixups)."""
+    if not set_state_tool_succeeded(text):
+        return None
+    body = _strip_leading_notes(text.strip())
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not parsed.get("success"):
+        return None
+    if "on" not in parsed:
+        return None
+    facts: dict[str, Any] = {"on": bool(parsed["on"])}
+    if parsed.get("name"):
+        facts["name"] = str(parsed["name"])
+    if parsed.get("room"):
+        facts["room"] = str(parsed["room"])
+    if isinstance(parsed.get("names"), list) and parsed["names"]:
+        facts["names"] = [str(n) for n in parsed["names"] if str(n).strip()]
+    if parsed.get("devices_toggled"):
+        facts["devices_toggled"] = int(parsed["devices_toggled"])
+    return facts

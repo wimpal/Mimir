@@ -130,6 +130,9 @@ def test_lights_mutation_phrases_request_write() -> None:
     assert user_message_requests_write("zet de kantorlamp aan")
     assert user_message_requests_write("zet de kantoorlamp uit")
     assert user_message_requests_write("Show lights and turn off Ballon")
+    assert user_message_requests_write("Turn the office light on.")
+    assert user_message_requests_write("Turn Ballon on")
+    assert check_write_allowed("homebase.lights.set_state", "Turn the office light on.") is None
     assert check_write_allowed("homebase.lights.set_state", "Turn off Ballon") is None
     assert check_write_allowed(
         "homebase.lights.set_state", "Doe het licht uit in kantoor"

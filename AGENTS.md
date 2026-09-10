@@ -47,7 +47,7 @@ reads another's storage, ever.
 
 ### Current task — T-019
 
-**T-043/T-045/T-046/T-047/T-048/T-049 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
+**T-043/T-045/T-046/T-047/T-048/T-049/T-050 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
 `dist\mimir-desktop.exe` (`scripts/build_mimir_desktop_exe.ps1`). Restart:
 `scripts/restart_mimir.ps1`. Textual TUI is secondary / SSH (`-WithTui`).
 

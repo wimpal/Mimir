@@ -1,6 +1,6 @@
 # T-043 — Atomic cook steps on recipe import
 
-**Status:** done — Picnic live smoke 2026-09-09 (8 short steps saved)
+**Status:** done — Picnic live smoke 2026-09-09; full fidelity after T-050
 
 ## Goal
 
@@ -33,8 +33,9 @@ split (“salt and pepper”, “peper en zout”).
 
 ## Live smoke
 
-- **2026-09-09 Picnic** ketjap-zalm URL → confirm **8** short steps; saved on *yes*.
-- Faithful original Picnic paragraphs through the splitter → ~15 atomic steps
-  (unit fixture). Model may still invent ingredients on sparse Picnic HTML —
-  fidelity is a separate concern.
+- **2026-09-09 (pre–T-050):** Picnic ketjap-zalm URL could save short steps, but
+  fetch dropped JSON-LD Bereiding so the model invented ingredients/order.
+- **2026-09-09 (post–T-050):** same URL → confirm **8 ingredients / 15 atomic
+  steps**, rice-first matching source; *yes* saved in Homebase. See
+  [`t050-web-fetch-recipe-json-ld.md`](./t050-web-fetch-recipe-json-ld.md).
 - Paste with `Voor de dressing` must still show `group` headings (T-049).

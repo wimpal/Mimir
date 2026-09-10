@@ -23,6 +23,7 @@ import nl.heim.mimir.data.BrainApi
 import nl.heim.mimir.data.BrainClientError
 import nl.heim.mimir.data.ConfirmationDetector
 import nl.heim.mimir.data.SettingsRepository
+import nl.heim.mimir.data.TurnLocale
 import nl.heim.mimir.model.ChatMessage
 import nl.heim.mimir.model.ChatTurnResult
 import nl.heim.mimir.model.ConversationSummary
@@ -351,7 +352,6 @@ class ChatViewModel(
                     val result = completeChatTurn(
                         ConfirmationDetector.confirmReply(pending.content),
                         voiceMode = true,
-                        ttsLocale = ConfirmationDetector.localeForTts(stt.language),
                     )
                     if (!result.success) {
                         _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
@@ -363,7 +363,6 @@ class ChatViewModel(
                     val result = completeChatTurn(
                         ConfirmationDetector.cancelReply(pending.content),
                         voiceMode = true,
-                        ttsLocale = ConfirmationDetector.localeForTts(stt.language),
                     )
                     if (!result.success) {
                         _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
@@ -377,7 +376,6 @@ class ChatViewModel(
         val result = completeChatTurn(
             stt.text,
             voiceMode = true,
-            ttsLocale = ConfirmationDetector.localeForTts(stt.language),
         )
         if (!result.success) {
             result.errorMessage?.let { appendError(it) }
@@ -385,10 +383,9 @@ class ChatViewModel(
         }
     }
 
-    private suspend fun speakReply(text: String, languageHint: String?) {
+    private suspend fun speakReply(text: String, locale: String) {
         val settings = repository.settingsFlow.first()
         val api = repository.createBrainApi(settings)
-        val locale = ConfirmationDetector.localeForTts(languageHint)
         _uiState.update { it.copy(voicePhase = VoicePhase.Speaking, workStatus = "Speaking…") }
         try {
             val wav = api.tts(text, locale)
@@ -447,6 +444,7 @@ class ChatViewModel(
         var conversationId = _uiState.value.conversationId
         var errorMessage: String? = null
         var sentencesPlayed = false
+        var effectiveTtsLocale = ttsLocale
         val ttsJobs = mutableListOf<Job>()
         val queue = if (voiceMode) {
             AudioQueue(audioPlayer).also {
@@ -471,6 +469,12 @@ class ChatViewModel(
                                 repository.saveConversationId(cid)
                                 _uiState.update { it.copy(conversationId = cid) }
                             }
+                            if (!event.locale.isNullOrBlank()) {
+                                effectiveTtsLocale = TurnLocale.forTts(
+                                    event.locale,
+                                    effectiveTtsLocale,
+                                )
+                            }
                         }
                         is SseEvent.ToolStart -> {
                             _uiState.update { it.copy(workStatus = "${event.name}…") }
@@ -485,9 +489,10 @@ class ChatViewModel(
                         is SseEvent.Sentence -> {
                             if (voiceMode && queue != null) {
                                 sentencesPlayed = true
+                                val locale = effectiveTtsLocale
                                 val job = launch(Dispatchers.IO) {
                                     try {
-                                        val wav = api.tts(event.text, ttsLocale)
+                                        val wav = api.tts(event.text, locale)
                                         queue.enqueue(event.index, wav)
                                     } catch (e: BrainClientError) {
                                         appendError(e.message ?: "Speech synthesis failed.")
@@ -545,7 +550,7 @@ class ChatViewModel(
                         }
                     }
                 } else if (assistantText.isNotBlank()) {
-                    speakReply(assistantText, ttsLocale)
+                    speakReply(assistantText, effectiveTtsLocale)
                 } else {
                     _uiState.update { it.copy(voicePhase = VoicePhase.Idle, workStatus = null) }
                 }

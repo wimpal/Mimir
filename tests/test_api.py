@@ -290,6 +290,66 @@ def test_chat_stream_sse(settings: Settings) -> None:
     assert events[-1]["stopped_reason"] == "final"
 
 
+def test_chat_stream_meta_locale_follows_current_utterance(settings: Settings) -> None:
+    """T-051: SSE meta.locale flips EN→NL mid-conversation (not sticky)."""
+    ollama = ScriptedOllama(
+        [
+            ChatMessage(role="assistant", content="Office light on."),
+            ChatMessage(role="assistant", content="Ballon staat aan."),
+        ]
+    )
+    with _client(settings, ollama) as tc:
+        en = _parse_sse_events(
+            tc.post(
+                "/v1/chat",
+                json={
+                    "message": "turn the office light on",
+                    "stream": True,
+                    "conversation_id": "t051-locale",
+                },
+            ).text
+        )
+        nl = _parse_sse_events(
+            tc.post(
+                "/v1/chat",
+                json={
+                    "message": "zet Ballon aan",
+                    "stream": True,
+                    "conversation_id": "t051-locale",
+                },
+            ).text
+        )
+    assert en[0]["type"] == "meta"
+    assert en[0]["locale"] == "en"
+    assert nl[0]["type"] == "meta"
+    assert nl[0]["locale"] == "nl"
+
+
+def test_chat_stream_meta_locale_keeps_dialog_dutch_on_ja(settings: Settings) -> None:
+    ollama = ScriptedOllama([ChatMessage(role="assistant", content="Opgeslagen.")])
+    app = create_app(
+        settings,
+        client=ollama,  # type: ignore[arg-type]
+        system_prompt="You are Mimir.",
+        prompt_id="test:prompt",
+        data_dir=settings.runtime.data_dir,
+    )
+    app.state.service.pending_recipes.set(
+        "t051-ja",
+        {"title": "Test"},
+        dutch=True,
+    )
+    with TestClient(app) as tc:
+        events = _parse_sse_events(
+            tc.post(
+                "/v1/chat",
+                json={"message": "ja", "stream": True, "conversation_id": "t051-ja"},
+            ).text
+        )
+    assert events[0]["type"] == "meta"
+    assert events[0]["locale"] == "nl"
+
+
 def test_chat_stream_with_tools_emits_tool_events(settings: Settings) -> None:
     ollama = ScriptedOllama(
         [

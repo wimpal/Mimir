@@ -1,7 +1,7 @@
 package nl.heim.mimir.model
 
 sealed class SseEvent {
-    data class Meta(val conversationId: String?) : SseEvent()
+    data class Meta(val conversationId: String?, val locale: String? = null) : SseEvent()
 
     data class Token(val text: String) : SseEvent()
 

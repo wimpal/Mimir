@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from brain.shopping_list import filter_shopping_list_items
 from brain.morning_brief import (
     Locale,
     _round_temp,
     _translate_conditions,
     morning_brief_lacks_weather,
 )
+from brain.recipe_import import is_bare_cancel, is_bare_confirm
+from brain.shopping_list import filter_shopping_list_items
 
 _NL_MARKERS = re.compile(
     r"\b("
@@ -48,7 +49,9 @@ _SHOPPING_ASK = re.compile(
 _EN_REPLY_STRONG = re.compile(
     r"\b("
     r"the shopping list|would you like|includes:|labeled|marked as checked|"
-    r"adjust any|add more to the list|several items"
+    r"adjust any|add more to the list|several items|"
+    r"is now on|is now off|are now on|are now off|"
+    r"the (?:\w+\s+)?lamp\b|lamp in the|lights? (?:are|is) now"
     r")\b",
     re.IGNORECASE,
 )
@@ -56,7 +59,8 @@ _EN_REPLY_STRONG = re.compile(
 _NL_REPLY_STRONG = re.compile(
     r"\b("
     r"op de boodschappenlijst|graden|bewolkt|meneer|het weer|"
-    r"staat alleen|staan "
+    r"staat alleen|staan |"
+    r"staat nu aan|staat nu uit|staan nu aan|staan nu uit"
     r")\b",
     re.IGNORECASE,
 )
@@ -110,6 +114,25 @@ _SHOPPING_STOPWORDS = frozenset(
 )
 
 
+# Short household voice commands — marker scoring alone misses these (T-051).
+_NL_LIGHT_CMD = re.compile(
+    r"(?i)"
+    r"(?:\b(?:zet|doe|maak|dim)\b.+\b(?:aan|uit|naar|op)\b)"
+    r"|(?:\b(?:alle\s+)?(?:lampen|lamp|lichten?|licht)\b.+\b(?:aan|uit)\b)"
+    r"|(?:\b(?:aan|uit)\b.+\b(?:lampen|lamp|lichten?|licht)\b)"
+    r"|(?:\balle\s+(?:lampen|lichten)\b)"
+    r"|(?:\b(?:warme|koude)\s+wit\b)"
+    r"|(?:\bfeest(?:modus)?\b)"
+    r"|(?:\b\w{3,}lamp(?:en)?\b)"
+)
+_EN_LIGHT_CMD = re.compile(
+    r"(?i)"
+    r"(?:\b(?:turn|switch|make)\b.+\b(?:on|off)\b)"
+    r"|(?:\b(?:all\s+)?lights?\b.+\b(?:on|off)\b)"
+    r"|(?:\b(?:on|off)\b.+\b(?:the\s+)?lights?\b)"
+)
+
+
 def user_message_locale(text: str) -> Locale:
     """Infer reply locale from the user's latest message (NL vs EN)."""
     normalized = (text or "").strip().lower()
@@ -122,6 +145,12 @@ def user_message_locale(text: str) -> Locale:
         return "nl"
     if re.match(r"^(good\s*morning|goodmorning|morning|mornin)\b", normalized):
         return "en"
+    nl_light = bool(_NL_LIGHT_CMD.search(normalized))
+    en_light = bool(_EN_LIGHT_CMD.search(normalized))
+    if nl_light and not en_light:
+        return "nl"
+    if en_light and not nl_light:
+        return "en"
     nl_score = len(_NL_MARKERS.findall(normalized))
     en_score = len(_EN_MARKERS.findall(normalized))
     if nl_score > en_score:
@@ -131,6 +160,28 @@ def user_message_locale(text: str) -> Locale:
     if re.search(r"\b(de|het|een|van|op|er|is|zinnen)\b", normalized):
         return "nl"
     return "en"
+
+
+def resolve_turn_locale(
+    text: str,
+    *,
+    dialog_dutch: bool | None = None,
+) -> Locale:
+    """Locale for this turn's TTS / voice clients (current utterance only).
+
+    When a recipe (or similar) confirm dialog is open, bare ja/yes/nee/no keep the
+    dialog locale so short confirms do not flip Piper mid-flow (T-048 / T-051).
+    Otherwise Dutch confirm/cancel tokens map to ``nl``, English to ``en``, else
+    ``user_message_locale`` (including short NL light cmds).
+    """
+    if dialog_dutch is not None and (is_bare_confirm(text) or is_bare_cancel(text)):
+        return "nl" if dialog_dutch else "en"
+    if is_bare_confirm(text) or is_bare_cancel(text):
+        token = (text or "").strip().rstrip(".!?").strip().lower()
+        if token in {"ja", "nee", "bevestig", "klopt", "annuleer"}:
+            return "nl"
+        return "en"
+    return user_message_locale(text)
 
 
 def user_asked_about_weather(text: str) -> bool:
@@ -329,3 +380,64 @@ def fix_weather_shopping_reply(
     if parts:
         return " ".join(parts)
     return (reply or "").strip()
+
+
+def format_lights_toggle_reply(facts: dict[str, Any], locale: Locale) -> str:
+    """One spoken confirmation for a successful lights.set_state (user locale)."""
+    on = bool(facts.get("on"))
+    names = facts.get("names")
+    if isinstance(names, list) and names:
+        label = ", ".join(str(n) for n in names if str(n).strip())
+    else:
+        label = str(facts.get("name") or "").strip()
+    room = str(facts.get("room") or "").strip()
+    count = int(facts.get("devices_toggled") or (1 if label else 0))
+
+    if locale == "nl":
+        state = "aan" if on else "uit"
+        if count > 1 and label:
+            if room:
+                return f"Lampen {label} in {room} staan nu {state}, meneer."
+            return f"Lampen {label} staan nu {state}, meneer."
+        if label and room:
+            return f"Lamp {label} in {room} staat nu {state}, meneer."
+        if label:
+            return f"Lamp {label} staat nu {state}, meneer."
+        return f"De lamp staat nu {state}, meneer."
+
+    state = "on" if on else "off"
+    if count > 1 and label:
+        if room:
+            return f"The lamps {label} in {room} are now {state}, sir."
+        return f"The lamps {label} are now {state}, sir."
+    if label and room:
+        return f"The {label} lamp in {room} is now {state}, sir."
+    if label:
+        return f"The {label} lamp is now {state}, sir."
+    return f"The lamp is now {state}, sir."
+
+
+def needs_lights_locale_fixup(
+    user_message: str,
+    reply: str,
+    *,
+    lights_facts: dict[str, Any] | None,
+) -> bool:
+    """True when a Dutch light toggle got an English confirmation reply."""
+    if not lights_facts:
+        return False
+    locale = user_message_locale(user_message)
+    return locale == "nl" and reply_locale_mismatch(locale, reply or "")
+
+
+def fix_lights_locale_reply(
+    reply: str,
+    user_message: str,
+    *,
+    lights_facts: dict[str, Any],
+) -> str:
+    """Replace a mismatched English light confirmation with a Dutch one-liner."""
+    locale = user_message_locale(user_message)
+    if locale != "nl":
+        return (reply or "").strip()
+    return format_lights_toggle_reply(lights_facts, locale)

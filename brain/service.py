@@ -31,6 +31,7 @@ from brain.prefs import (
 from brain.recipe_import import PendingRecipeStore
 from brain.tools import Tool, build_registry
 from brain.turn_log import append_turn_trace
+from brain.turn_fixup import resolve_turn_locale
 from brain.voice.sentences import SentenceBuffer
 
 logger = logging.getLogger("mimir.service")
@@ -542,6 +543,17 @@ class BrainService:
             conversation_id=cid,
         )
 
+    def _dialog_dutch_for_locale(self, conversation_id: str | None) -> bool | None:
+        """Active recipe-dialog locale, if any (pending confirm or post-save)."""
+        if not conversation_id:
+            return None
+        if self.pending_recipes.is_confirmable(conversation_id):
+            return self.pending_recipes.is_dutch(conversation_id)
+        post = self.pending_recipes.get_post_save(conversation_id)
+        if post is not None:
+            return bool(post.dutch)
+        return None
+
     def iter_chat_events(
         self,
         *,
@@ -574,8 +586,16 @@ class BrainService:
         else:
             resolved_id = cid
 
-        if resolved_id is not None:
-            yield {"type": "meta", "conversation_id": resolved_id}
+        if resolved_id is not None or user_text is not None:
+            meta: dict[str, Any] = {"type": "meta"}
+            if resolved_id is not None:
+                meta["conversation_id"] = resolved_id
+            if user_text is not None:
+                meta["locale"] = resolve_turn_locale(
+                    user_text,
+                    dialog_dutch=self._dialog_dutch_for_locale(resolved_id),
+                )
+            yield meta
 
         chat_messages: list[ChatMessage] | None = None
         if persist:

@@ -19,6 +19,7 @@ from brain.mcp.lights import (
     format_set_state_failure_for_model,
     house_wide_set_state_args_from_user_message,
     light_set_state_args_from_user_message,
+    parse_set_state_success_facts,
     set_state_tool_succeeded,
     user_message_requests_light_write,
 )
@@ -82,8 +83,12 @@ from brain.shopping_list import filter_shopping_list_tool_result
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 from brain.turn_fixup import (
     can_tool_backed_weather_shopping_reply,
+    fix_lights_locale_reply,
     fix_weather_shopping_reply,
+    format_lights_toggle_reply,
+    needs_lights_locale_fixup,
     needs_weather_shopping_fixup,
+    user_message_locale,
 )
 
 
@@ -430,6 +435,7 @@ def run_turn(
     weather_payload_this_turn: dict[str, Any] | None = None
     shopping_list_fetched_this_turn = False
     shopping_list_items_this_turn: list[dict[str, Any]] = []
+    lights_set_state_facts_this_turn: dict[str, Any] | None = None
     tools_used_this_turn: list[str] = []
     recipe_save_turn = user_message_requests_recipe_save(user_message)
     # Greeting / search detours burn the default 3 rounds; URL import needs headroom.
@@ -1155,6 +1161,33 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
                 )
+            # Dutch light toggle → English confirmation (EN history stickiness).
+            if needs_lights_locale_fixup(
+                user_message,
+                reply_text,
+                lights_facts=lights_set_state_facts_this_turn,
+            ):
+                assert lights_set_state_facts_this_turn is not None
+                fixed = fix_lights_locale_reply(
+                    reply_text,
+                    user_message,
+                    lights_facts=lights_set_state_facts_this_turn,
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="lights_locale_fixup",
+                        content_preview=fixed[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=fixed))
+                return TurnResult(
+                    content=fixed,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             # T-048: after successful recipes.add, force short saved copy (no soft Q).
             if (
                 recipe_saved_payload_this_turn is not None
@@ -1463,6 +1496,13 @@ def run_turn(
             ):
                 result = format_set_state_failure_for_model(result)
             if (
+                dispatch_name == "homebase.lights.set_state"
+                and not tool_result_is_error(result)
+            ):
+                lights_facts = parse_set_state_success_facts(result)
+                if lights_facts is not None:
+                    lights_set_state_facts_this_turn = lights_facts
+            if (
                 dispatch_name == "homebase.lights.party_mode"
                 and not tool_result_is_error(result)
                 and not party_mode_tool_succeeded(result)
@@ -1558,6 +1598,9 @@ def run_turn(
                         and not set_state_tool_succeeded(chain_result)
                     ):
                         chain_result = format_set_state_failure_for_model(chain_result)
+                    lights_facts = parse_set_state_success_facts(chain_result)
+                    if lights_facts is not None:
+                        lights_set_state_facts_this_turn = lights_facts
                     if on_tool_end is not None:
                         preview = (
                             chain_result
@@ -1586,6 +1629,34 @@ def run_turn(
                 steps=steps,
                 stopped_reason=StoppedReason.TURN_TIMEOUT,
                 error="turn budget exceeded",
+            )
+
+        # Dutch light toggle: skip another Ollama pass (it streams English after EN
+        # history; mobile TTS would speak English with the Dutch Piper voice).
+        if (
+            lights_set_state_facts_this_turn is not None
+            and user_message_locale(user_message) == "nl"
+            and anomaly is None
+            and not dispatch_failed
+        ):
+            fixed = format_lights_toggle_reply(lights_set_state_facts_this_turn, "nl")
+            if on_assistant_delta is not None:
+                on_assistant_delta(fixed)
+            working.append(ChatMessage(role="assistant", content=fixed))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="lights_locale_forced",
+                    content_preview=fixed[:120],
+                )
+            )
+            return TurnResult(
+                content=fixed,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
             )
 
         # T-021: after staging, skip another Ollama round (max_iterations is often 3:

@@ -230,6 +230,11 @@ def test_stt_compound_and_fuzzy_room_resolve() -> None:
     ids, err = resolve_set_state_device_ids(lights, "kantor")
     assert err is None and ids == ["k1"]
 
+    # STT typo: balonlamp → balon (one L) must still resolve Ballon.
+    assert extract_lamp_name_hint("Zet de balonlamp uit.") == "balon"
+    assert pick_light_id(lights, "balon") == "k1"
+    assert resolve_light(lights, "balon").status == "found"
+
 
 def test_resolve_set_state_device_ids_room_all() -> None:
     from brain.mcp.lights import resolve_set_state_device_ids
@@ -286,6 +291,23 @@ def test_nl_en_room_aliases_resolve_to_hub_rooms() -> None:
     assert light_set_state_args_from_user_message("Turn off the office light") == {
         "device_id": "office",
         "on": False,
+    }
+    assert extract_room_hint("Turn the office light on") == "office"
+    assert light_set_state_args_from_user_message("Turn the office light on.") == {
+        "device_id": "office",
+        "on": True,
+    }
+    assert light_set_state_args_from_user_message("Turn de office light on.") == {
+        "device_id": "office",
+        "on": True,
+    }
+    assert extract_room_hint("Turn de office light on.") == "office"
+    assert light_set_state_args_from_user_message(
+        "Turn the living room lights off"
+    ) == {"device_id": "room:living room", "on": False}
+    assert light_set_state_args_from_user_message("Turn Ballon on") == {
+        "device_id": "Ballon",
+        "on": True,
     }
     assert pick_light_id(lights, "office") == "k1"
     assert resolve_light(lights, "office").status == "found"

@@ -9,8 +9,8 @@ __pycache__/
 .env
 config/config.yaml
 
-# Runtime data (SQLite, logs)
-data/
+# Runtime data (SQLite, logs) — root only (do not ignore Android `…/mimir/data/`)
+/data/
 
 # PyInstaller (TUI exe)
 build/

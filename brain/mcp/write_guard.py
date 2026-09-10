@@ -140,6 +140,8 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bmarkeer\b.*\b(compleet|klaar|af|gedaan|voltooid)\b",
         # Lights / smart home (IKEA Dirigera via Homebase)
         r"\bturn\s+(on|off)\b",
+        # Particle-final: "turn the office light on" / "turn Ballon off"
+        r"\bturn\b.+\b(on|off)\b",
         r"\bswitch\b.*\b(on|off)\b",
         r"\bdim\b.*\b\d+\s*%",
         r"\bdim\b.*\b(lamp|light|ballon|licht)\b",

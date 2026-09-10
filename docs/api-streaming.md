@@ -25,7 +25,7 @@ Do not invent a second streaming URL.
 
 | `type` | Meaning |
 |---|---|
-| `meta` | Early turn metadata (`conversation_id` when minted/known) |
+| `meta` | Early turn metadata (`conversation_id` when minted/known; **`locale`** `"nl"`\|`"en"` for the current user utterance — voice clients pass this to `/v1/tts`) |
 | `token` | Live Ollama content delta on the **final** assistant generation (after any tool loop) |
 | `sentence` | Speakable sentence completed (`index` 0-based, `text`). Voice clients should start TTS per sentence. |
 | `tool_start` | Tool about to run (`name`, optional `arguments`) |
