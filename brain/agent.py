@@ -18,6 +18,17 @@ from brain.capability_discovery import (
     probe_unavailable_services,
     should_short_circuit_capability,
 )
+from brain.evening_wind_down import (
+    HOUSE_ALL_OFF_ARGS,
+    LIGHTS_SET_STATE_TOOL,
+    TASKS_LIST_TOOL,
+    build_evening_wind_down_from_tools,
+    calendar_is_tomorrow,
+    evening_wind_down_locale,
+    is_evening_wind_down,
+    lights_off_succeeded,
+    tasks_from_payload,
+)
 from brain.mcp.errors import is_write_tool, tool_result_is_error
 from brain.mcp.lights import (
     build_set_state_args_from_user_message,
@@ -348,6 +359,7 @@ def _call_ollama(
         stream_final
         and on_assistant_delta is not None
         and not is_morning_greeting(user_message)
+        and not is_evening_wind_down(user_message)
         and not write_pending
         and hasattr(client, "chat_stream")
         # Tool calls are unreliable over Ollama stream — block until tools have run.
@@ -364,6 +376,7 @@ def _call_ollama(
             and not msg.tool_calls
             and (msg.content or "").strip()
             and not is_morning_greeting(user_message)
+            and not is_evening_wind_down(user_message)
             and not write_pending
         ):
             on_assistant_delta(msg.content)
@@ -394,6 +407,189 @@ def _call_ollama(
         msg = ChatMessage(role="assistant", content=accumulated)
 
     return ChatResponse(message=msg, raw=final_raw, timings=timings)
+
+
+def _complete_evening_wind_down(
+    *,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    registry: dict[str, Tool],
+    user_message: str,
+    deadline_monotonic: float | None,
+    default_tool_timeout_s: float,
+    on_tool_start: OnToolStartCallback | None,
+    on_tool_end: OnToolEndCallback | None,
+    after_tool: AfterToolCallback | None,
+) -> TurnResult:
+    """Force wind-down tools and return a code-backed brief (no Ollama)."""
+    locale = evening_wind_down_locale(user_message)
+    tasks_available = TASKS_LIST_TOOL in registry
+    lights_available = LIGHTS_SET_STATE_TOOL in registry
+
+    weather_payload: dict[str, Any] | None = None
+    calendar_events: list[dict[str, Any]] = []
+    calendar_fetched = False
+    tasks: list[dict[str, Any]] | None = None
+    tasks_fetched = False
+    lights_attempted = False
+    lights_ok: bool | None = None
+
+    forced_specs: list[tuple[str, dict[str, Any]]] = []
+    if "get_weather" in registry:
+        forced_specs.append(("get_weather", {}))
+    if "get_calendar" in registry:
+        forced_specs.append(("get_calendar", {"day_offset": 1}))
+    if tasks_available:
+        forced_specs.append((TASKS_LIST_TOOL, {}))
+    if lights_available:
+        forced_specs.append((LIGHTS_SET_STATE_TOOL, dict(HOUSE_ALL_OFF_ARGS)))
+
+    forced_names: list[str] = []
+    forced_dispatch_failed = False
+    if forced_specs:
+        forced_calls = [
+            ToolCall(
+                function=ToolCallFunction(name=name, arguments=dict(args))
+            )
+            for name, args in forced_specs
+        ]
+        working.append(
+            ChatMessage(role="assistant", content="", tool_calls=forced_calls)
+        )
+        tool_t0 = time.perf_counter()
+        for idx, (name, fargs) in enumerate(forced_specs):
+            tc = forced_calls[idx]
+            if _deadline_exceeded(deadline_monotonic):
+                forced_dispatch_failed = True
+                for skipped_name, _ in forced_specs[idx:]:
+                    skipped_tc = ToolCall(
+                        function=ToolCallFunction(
+                            name=skipped_name, arguments={}
+                        )
+                    )
+                    working.append(
+                        _tool_result_message(
+                            skipped_tc,
+                            (
+                                f"error: tool '{skipped_name}' "
+                                "skipped (turn budget)"
+                            ),
+                        )
+                    )
+                    forced_names.append(skipped_name)
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=0.0,
+                        tool_names=forced_names,
+                        success=False,
+                        anomaly="turn_timeout",
+                        tool_latency_ms=(time.perf_counter() - tool_t0) * 1000,
+                    )
+                )
+                break
+            remaining = _remaining_s(deadline_monotonic)
+            per_tool = default_tool_timeout_s
+            tool_entry = registry.get(name)
+            if tool_entry is not None and tool_entry.timeout_s is not None:
+                per_tool = max(per_tool, tool_entry.timeout_s)
+            if remaining is not None:
+                per_tool = min(per_tool, remaining)
+            if on_tool_start is not None:
+                on_tool_start(name, dict(fargs))
+            result = _dispatch_with_timeout(
+                name,
+                dict(fargs),
+                tools=registry,
+                timeout_s=per_tool,
+            )
+            ok = not tool_result_is_error(result)
+            if name == LIGHTS_SET_STATE_TOOL:
+                lights_attempted = True
+                if ok and not set_state_tool_succeeded(result):
+                    result = format_set_state_failure_for_model(result)
+                    ok = False
+                lights_ok = lights_off_succeeded(result)
+                if lights_ok:
+                    ok = True
+            if not ok:
+                forced_dispatch_failed = True
+            if on_tool_end is not None:
+                preview = (
+                    result if len(result) <= 200 else result[:197] + "..."
+                )
+                on_tool_end(name, ok, preview)
+            working.append(_tool_result_message(tc, result))
+            if after_tool is not None:
+                after_tool(name, result, working)
+            forced_names.append(name)
+            if name == "get_calendar" and ok:
+                try:
+                    cal_data = json.loads(result)
+                    if isinstance(cal_data, dict) and calendar_is_tomorrow(
+                        cal_data
+                    ):
+                        calendar_events = calendar_events_from_payload(cal_data)
+                        calendar_fetched = True
+                    else:
+                        forced_dispatch_failed = True
+                except (json.JSONDecodeError, TypeError):
+                    forced_dispatch_failed = True
+            if name == "get_weather" and ok:
+                try:
+                    wx_data = json.loads(result)
+                    if isinstance(wx_data, dict):
+                        weather_payload = wx_data
+                    else:
+                        forced_dispatch_failed = True
+                except (json.JSONDecodeError, TypeError):
+                    forced_dispatch_failed = True
+            if name == TASKS_LIST_TOOL:
+                parsed_tasks = tasks_from_payload(result)
+                if parsed_tasks is not None:
+                    tasks = parsed_tasks
+                    tasks_fetched = True
+                else:
+                    tasks = None
+                    tasks_fetched = False
+                    if not ok:
+                        forced_dispatch_failed = True
+        else:
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=forced_names,
+                    success=not forced_dispatch_failed,
+                    anomaly="evening_wind_down_tools_forced",
+                    tool_latency_ms=(time.perf_counter() - tool_t0) * 1000,
+                )
+            )
+
+    fixed = build_evening_wind_down_from_tools(
+        weather=weather_payload,
+        events=calendar_events,
+        tasks=tasks if tasks_available else None,
+        locale=locale,
+        calendar_fetched=calendar_fetched,
+        tasks_fetched=tasks_fetched if tasks_available else False,
+        lights_ok=lights_ok if lights_available else None,
+        lights_attempted=lights_attempted if lights_available else False,
+    )
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=[],
+            success=True,
+            anomaly="evening_wind_down_fixup",
+            content_preview=fixed[:120],
+        )
+    )
+    working.append(ChatMessage(role="assistant", content=fixed))
+    return TurnResult(
+        content=fixed,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
 
 
 def run_turn(
@@ -689,6 +885,7 @@ def run_turn(
         user_message,
         pending_confirmable=pending_confirmable,
         is_morning=is_morning_greeting,
+        is_evening=is_evening_wind_down,
         requests_write=user_message_requests_write,
         requests_recipe_save=user_message_requests_recipe_save,
         requests_light_write=user_message_requests_light_write,
@@ -727,6 +924,20 @@ def run_turn(
                 steps=steps,
                 stopped_reason=StoppedReason.FINAL,
             )
+
+    # T-053: evening wind-down — force tools + brief before Ollama (guarantees lights).
+    if is_evening_wind_down(user_message):
+        return _complete_evening_wind_down(
+            working=working,
+            steps=steps,
+            registry=registry,
+            user_message=user_message,
+            deadline_monotonic=deadline_monotonic,
+            default_tool_timeout_s=default_tool_timeout_s,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+            after_tool=after_tool,
+        )
 
     recipe_saved_payload_this_turn: dict[str, Any] | None = None
     recipe_dialog_dutch_this_turn: bool | None = None
@@ -858,8 +1069,10 @@ def run_turn(
                             steps=steps,
                             stopped_reason=StoppedReason.FINAL,
                         )
-                # Morning greetings with empty text still need the brief tools.
-                if not is_morning_greeting(user_message):
+                # Morning / evening greetings with empty text still need brief tools.
+                if not is_morning_greeting(user_message) and not is_evening_wind_down(
+                    user_message
+                ):
                     # After staging a recipe, never die on empty — emit confirm copy.
                     if (
                         recipe_staged_this_turn

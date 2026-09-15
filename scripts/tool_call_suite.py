@@ -890,6 +890,64 @@ def _require_morning_brief_dutch() -> Callable[[TurnResult], CheckResult]:
     return check
 
 
+def _require_evening_wind_down(*, locale: str = "en") -> Callable[[TurnResult], CheckResult]:
+    """Weather + tomorrow calendar; short good-night reply; no false-empty calendar."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        seq = result.tools_used()
+        if "get_weather" not in seq or "get_calendar" not in seq:
+            return _fail_right("no_tool_when_required")
+        weather_raw = _weather_payload(result)
+        calendar_raw = _calendar_payload(result)
+        if (
+            not weather_raw
+            or weather_raw.startswith("error:")
+            or not calendar_raw
+            or calendar_raw.startswith("error:")
+        ):
+            return _fail_args("malformed_args")
+        try:
+            calendar = json.loads(calendar_raw)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        if calendar.get("day_offset") != 1:
+            return _fail_args("calendar_not_tomorrow")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        greeting_ok = (
+            ("welterusten" in content or "goedenacht" in content)
+            if locale == "nl"
+            else ("good night" in content or "goodnight" in content)
+        )
+        if not greeting_ok:
+            return _fail_used("missing_greeting")
+        events = calendar.get("events") or []
+        if events and _reply_falsely_empty(content, locale=locale):
+            return _fail_used("false_empty_calendar")
+        if events:
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                summary = (ev.get("summary") or "").lower()
+                if not summary:
+                    continue
+                if summary in content:
+                    continue
+                tokens = [t for t in summary.split() if len(t) >= 3]
+                if tokens and not all(t in content for t in tokens):
+                    return _fail_used("calendar_not_grounded")
+        return _ok()
+
+    return check
+
+
+def _require_evening_wind_down_dutch() -> Callable[[TurnResult], CheckResult]:
+    return _require_evening_wind_down(locale="nl")
+
+
 def _require_set_preference(key: str, needle: str) -> Callable[[TurnResult], CheckResult]:
     def check(result: TurnResult) -> CheckResult:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
@@ -1282,6 +1340,18 @@ CASES: list[Case] = [
         "must_call_weather_and_calendar",
         "Good morning",
         _require_morning_brief_empty_day(),
+    ),
+    Case(
+        "evening_1",
+        "must_call_weather_and_calendar",
+        "Good night",
+        _require_evening_wind_down(),
+    ),
+    Case(
+        "evening_2",
+        "must_call_weather_and_calendar",
+        "Welterusten",
+        _require_evening_wind_down_dutch(),
     ),
     Case(
         "followup_weather_1",

@@ -79,6 +79,16 @@ def test_window_bounds_full_calendar_day() -> None:
     assert end == datetime(2026, 8, 28, 0, 0, tzinfo=tz)
 
 
+def test_window_bounds_day_offset_tomorrow() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/Amsterdam")
+    now = datetime(2026, 8, 27, 22, 0, tzinfo=tz)
+    start, end = window_bounds(tz=tz, now=now, day_offset=1)
+    assert start == datetime(2026, 8, 28, 0, 0, tzinfo=tz)
+    assert end == datetime(2026, 8, 29, 0, 0, tzinfo=tz)
+
+
 def test_events_in_window_includes_timed_allday_rrule() -> None:
     from zoneinfo import ZoneInfo
 
@@ -119,6 +129,41 @@ def test_tool_schema_rejects_hours_argument(tmp_path: Path) -> None:
     reg = build_registry(settings)
     out = dispatch("get_calendar", {"hours": 24}, tools=reg)
     assert out.startswith("error: unexpected argument")
+
+
+def test_tool_rejects_invalid_day_offset(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    reg = build_registry(settings)
+    out = dispatch("get_calendar", {"day_offset": 2}, tools=reg)
+    assert out.startswith("error:")
+    assert "day_offset" in out
+
+
+def test_events_in_window_day_offset_tomorrow() -> None:
+    from zoneinfo import ZoneInfo
+
+    ics = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Mimir//Test//EN
+BEGIN:VEVENT
+UID:today@mimir.test
+DTSTART:20260827T100000Z
+DTEND:20260827T110000Z
+SUMMARY:Today only
+END:VEVENT
+BEGIN:VEVENT
+UID:tomorrow@mimir.test
+DTSTART:20260828T140000Z
+DTEND:20260828T150000Z
+SUMMARY:Tomorrow meeting
+END:VEVENT
+END:VCALENDAR
+"""
+    tz = ZoneInfo("Europe/Amsterdam")
+    now = datetime(2026, 8, 27, 12, 0, tzinfo=tz)
+    start, end = window_bounds(tz=tz, now=now, day_offset=1)
+    events = events_in_window(ics, tz=tz, start=start, end=end)
+    assert [e["summary"] for e in events] == ["Tomorrow meeting"]
 
 
 def test_build_registry_includes_calendar(tmp_path: Path) -> None:

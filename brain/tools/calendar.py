@@ -25,22 +25,45 @@ from brain.morning_brief import format_event_line
 LAG_NOTE = "feed may lag publisher (e.g. Proton share up to ~8h)"
 
 
+def _annotate_calendar_override(raw: str, *, day_offset: int) -> str:
+    """Stamp day_offset/date onto a fetch_override JSON payload (suite fixtures)."""
+    text = (raw or "").strip()
+    if not text or text.startswith("error:"):
+        return raw
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    data["day_offset"] = day_offset
+    window = data.get("window")
+    if isinstance(window, dict) and isinstance(window.get("start"), str):
+        data.setdefault("date", window["start"][:10])
+    return json.dumps(data, separators=(",", ":"))
+
+
 def window_bounds(
     *,
     tz: ZoneInfo,
     now: datetime | None = None,
+    day_offset: int = 0,
 ) -> tuple[datetime, datetime]:
-    """Return [start, end) for the full calendar day in ``tz`` containing ``now``."""
+    """Return [start, end) for the full calendar day in ``tz``.
+
+    ``day_offset`` 0 = today containing ``now``; 1 = tomorrow. Other values
+    are rejected by the tool execute path.
+    """
     current = now or datetime.now(tz)
     if current.tzinfo is None:
         current = current.replace(tzinfo=tz)
     else:
         current = current.astimezone(tz)
 
-    day = current.date()
+    day = current.date() + timedelta(days=day_offset)
     start = datetime(day.year, day.month, day.day, tzinfo=tz)
-    tomorrow = day + timedelta(days=1)
-    end = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=tz)
+    next_day = day + timedelta(days=1)
+    end = datetime(next_day.year, next_day.month, next_day.day, tzinfo=tz)
     return start, end
 
 
@@ -233,18 +256,23 @@ def _execute_get_calendar(
     data_dir: Path | None = None,
     cache_ttl_s: float = 300.0,
     now: datetime | None = None,
+    day_offset: int = 0,
 ) -> str:
     from brain.calendar_cache import calendar_cache_path
 
     if not declared:
         return "error: calendar unavailable (not configured)"
 
+    if isinstance(day_offset, bool) or day_offset not in (0, 1):
+        return "error: day_offset must be 0 (today) or 1 (tomorrow)"
+
     try:
         tz = ZoneInfo(timezone_name)
     except Exception:  # noqa: BLE001
         return f"error: calendar unavailable (bad timezone: {timezone_name})"
 
-    start, end = window_bounds(tz=tz, now=now)
+    start, end = window_bounds(tz=tz, now=now, day_offset=day_offset)
+    day_iso = start.date().isoformat()
     by_id = {f.id: f for f in feeds}
     events: list[dict[str, Any]] = []
     feed_meta: list[dict[str, Any]] = []
@@ -334,6 +362,8 @@ def _execute_get_calendar(
 
     out: dict[str, Any] = {
         "timezone": timezone_name,
+        "day_offset": day_offset,
+        "date": day_iso,
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "events": events,
         "event_count": len(events),
@@ -372,9 +402,12 @@ def make_get_calendar_tool(
         feed_blurb_parts.append(bit)
     feed_blurb = "; ".join(feed_blurb_parts) if feed_blurb_parts else "none configured"
 
-    def execute() -> str:
+    def execute(*, day_offset: int = 0) -> str:
+        if isinstance(day_offset, bool) or day_offset not in (0, 1):
+            return "error: day_offset must be 0 (today) or 1 (tomorrow)"
         if fetch_override is not None:
-            return fetch_override()
+            raw = fetch_override()
+            return _annotate_calendar_override(raw, day_offset=day_offset)
         return _execute_get_calendar(
             feeds=feeds,
             declared=declared,
@@ -383,30 +416,36 @@ def make_get_calendar_tool(
             http_client=http_client,
             data_dir=data_dir,
             cache_ttl_s=cal.cache_ttl_s,
+            day_offset=day_offset,
         )
 
     return Tool(
         name="get_calendar",
         description=(
-            "Return today's events from the user's Calendar feed(s) (ICS subscribe "
-            "URLs in server config). Covers the full calendar day in the home timezone "
-            "(midnight to midnight), including morning appointments already past. "
+            "Return events from the user's Calendar feed(s) (ICS subscribe "
+            "URLs in server config) for one full calendar day in the home timezone "
+            "(midnight to midnight). Optional day_offset: 0 = today (default; "
+            "includes morning appointments already past), 1 = tomorrow. "
             f"Configured feeds: {feed_blurb}. "
             "Each event includes calendar / calendar_name / calendar_context when "
             "configured — use calendar_context to interpret titles (e.g. on a "
             "photographer/videographer work calendar, 'filmen X' is a shoot with "
             "client X, not watching a movie). Mention the calendar name when it "
-            "helps. Payload includes event_count and schedule_lines (reference only — "
-            "paraphrase each event in spoken prose with times; do not paste "
-            "schedule_lines verbatim or copy JSON escape sequences). When "
-            "event_count > 0, include every event in a natural sentence with a "
-            "short lead-in (e.g. 'Today's schedule looks like this:' or 'On your "
-            "calendar today:'). No arguments. Do not invent events. Payload may "
+            "helps. Payload includes day_offset, date (YYYY-MM-DD), event_count and "
+            "schedule_lines (reference only — paraphrase each event in spoken prose "
+            "with times; do not paste schedule_lines verbatim or copy JSON escape "
+            "sequences). When event_count > 0, include every event in a natural "
+            "sentence with a short lead-in. Do not invent events. Payload may "
             "include stale=true and per-feed errors."
         ),
         parameters={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "day_offset": {
+                    "type": "integer",
+                    "description": "0 = today (default), 1 = tomorrow",
+                },
+            },
             "additionalProperties": False,
         },
         execute=execute,

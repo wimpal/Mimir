@@ -246,6 +246,7 @@ def should_short_circuit_capability(
     *,
     pending_confirmable: bool = False,
     is_morning: Callable[[str], bool] | None = None,
+    is_evening: Callable[[str], bool] | None = None,
     requests_write: Callable[[str], bool] | None = None,
     requests_recipe_save: Callable[[str], bool] | None = None,
     requests_light_write: Callable[[str], bool] | None = None,
@@ -254,10 +255,17 @@ def should_short_circuit_capability(
     if pending_confirmable:
         return False
     morning = is_morning or (lambda _t: False)
+    evening = is_evening or (lambda _t: False)
     write = requests_write or (lambda _t: False)
     recipe = requests_recipe_save or (lambda _t: False)
     lights = requests_light_write or (lambda _t: False)
-    if morning(text) or write(text) or recipe(text) or lights(text):
+    if (
+        morning(text)
+        or evening(text)
+        or write(text)
+        or recipe(text)
+        or lights(text)
+    ):
         return False
     return is_capability_overview(text) or is_capability_explain(text)
 

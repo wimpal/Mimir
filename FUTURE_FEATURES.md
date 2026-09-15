@@ -777,15 +777,16 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Evening wind-down
 
-- **Status:** in-roadmap
+- **Status:** shipped (phrase-triggered; operator smoke open — T-053)
 - **Horizon:** near
-- **Summary:** “Good night” brief: tomorrow’s first schedule items, weather, todos.
+- **Summary:** “Good night” brief: tomorrow’s schedule, weather, open tasks, and
+  house-wide IKEA lights off (same turn, no extra M3).
 - **User stories:**
   - Evening wind-down: say good night and tomorrow’s first schedule items, weather, todos.
-- **Depends on:** Calendar + weather tools (exist); todos from Homebase (TBD); phrase trigger like morning brief.
-- **Source of truth:** Calendar feed + weather cache + todo SoT
+- **Depends on:** Calendar + weather tools; Homebase tasks + lights MCP.
+- **Source of truth:** Calendar feed + weather cache + Homebase tasks/lights
 - **API ownership:** Same as morning brief — phrase-triggered chat, not proactive push (unless user opts into notify).
-- **Tools + context:** Mirror Phase 8e pattern; prompt phrases “good night” / Dutch equivalent; keep short.
+- **Tools + context:** Mirror Phase 8e; `get_calendar` day_offset=1; lights `all:` off.
 - **ROADMAP overlap:** Heim **M5b**
 
 ### Announcements (TTS to rooms)

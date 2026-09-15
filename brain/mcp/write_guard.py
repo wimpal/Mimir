@@ -309,6 +309,16 @@ def check_write_allowed(
                 "error: write blocked — party mode uses homebase.lights.party_mode, "
                 "not set_state"
             )
+    # T-053: evening wind-down may only write house-wide lights off (forced path).
+    from brain.evening_wind_down import is_evening_wind_down
+
+    if is_evening_wind_down(user_message):
+        if tool_name == "homebase.lights.set_state":
+            return None
+        return (
+            f"error: write blocked — evening wind-down only turns lights off "
+            f"({tool_name})"
+        )
     # T-021: bare ja/yes unlocks recipes.add only when a staged candidate exists.
     if (
         tool_name == "homebase.recipes.add"
