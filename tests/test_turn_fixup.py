@@ -416,3 +416,115 @@ def test_agent_empty_final_reply_uses_tool_fixup() -> None:
     assert "graden" in content.lower() or "bewolkt" in content.lower()
     assert "kaas" in content.lower()
     assert "melk" in content.lower()
+
+
+FILLER_EN = "I'll check the weather for your home location. One moment please."
+
+WEATHER_WITH_TOMORROW = {
+    **WEATHER_PAYLOAD,
+    "tomorrow": {
+        "temp_max_c": 18.0,
+        "temp_min_c": 9.0,
+        "conditions": "partly cloudy",
+    },
+}
+
+
+def test_weather_reply_lacks_facts_ignores_filler() -> None:
+    from brain.turn_fixup import weather_reply_lacks_facts
+
+    assert weather_reply_lacks_facts(FILLER_EN)
+    assert weather_reply_lacks_facts("Ik ga het weer even checken.")
+    assert not weather_reply_lacks_facts("Het is bewolkt, 17 graden.")
+
+
+def test_agent_replaces_weather_filler_after_successful_tool() -> None:
+    registry = {
+        "get_weather": _read_tool("get_weather", json.dumps(WEATHER_WITH_TOMORROW)),
+    }
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(name="get_weather", arguments={})
+                    ),
+                ],
+            ),
+            ChatMessage(role="assistant", content=FILLER_EN),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="wat is het weer morgen?")],
+        tools=registry,
+        max_iterations=3,
+    )
+    content = (result.content or "").lower()
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert result.steps[-1].anomaly == "weather_shopping_fixup"
+    assert "moment" not in content
+    assert "morgen" in content
+    assert "graden" in content
+
+
+def test_agent_replaces_english_morgen_reply_with_dutch_tomorrow() -> None:
+    """Factful English tomorrow prose still gets NL tomorrow fixup (T-071)."""
+    english_facts = (
+        "The weather today is overcast with a temperature of 24.7°C. "
+        "Tomorrow, the weather will be dense drizzle with a temperature range "
+        "from 14.7°C to 18.6°C."
+    )
+    registry = {
+        "get_weather": _read_tool("get_weather", json.dumps(WEATHER_WITH_TOMORROW)),
+    }
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(name="get_weather", arguments={})
+                    ),
+                ],
+            ),
+            ChatMessage(role="assistant", content=english_facts),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="wat is het weer morgen?")],
+        tools=registry,
+        max_iterations=3,
+    )
+    content = (result.content or "").lower()
+    assert result.steps[-1].anomaly == "weather_shopping_fixup"
+    assert "morgen" in content
+    assert "graden" in content
+    assert "today is overcast" not in content
+
+
+def test_agent_forces_weather_when_model_skips_tool() -> None:
+    """Filler with no tool call → force get_weather and answer from payload."""
+    registry = {
+        "get_weather": _read_tool("get_weather", json.dumps(WEATHER_WITH_TOMORROW)),
+    }
+    client = _ScriptedClient(
+        [ChatMessage(role="assistant", content=FILLER_EN)]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="wat is het weer morgen?")],
+        tools=registry,
+        max_iterations=3,
+    )
+    content = (result.content or "").lower()
+    anomalies = [s.anomaly for s in result.steps]
+    assert "weather_tools_forced" in anomalies
+    assert result.steps[-1].anomaly == "weather_shopping_fixup"
+    assert "morgen" in content
+    assert "graden" in content
+    assert "moment" not in content

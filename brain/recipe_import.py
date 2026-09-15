@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from brain.repeat_last import is_repeat_intent
+
 RECIPE_ADD_TOOL = "homebase.recipes.add"
 
 MAX_TITLE_LEN = 200
@@ -266,6 +268,8 @@ def should_keep_pending_recipe(text: str) -> bool:
     """True when the user message continues a pending import dialog."""
     if is_bare_confirm(text) or is_bare_cancel(text):
         return True
+    if is_repeat_intent(text):
+        return True
     if user_message_requests_recipe_save(text):
         return True
     if user_message_renames_pending_recipe(text):
@@ -274,8 +278,8 @@ def should_keep_pending_recipe(text: str) -> bool:
 
 
 def should_keep_post_save(text: str) -> bool:
-    """True when bare ja/nee may still answer a post-save soft follow-up."""
-    return is_bare_confirm(text) or is_bare_cancel(text)
+    """True when bare ja/nee (or repeat) may still answer a post-save soft follow-up."""
+    return is_bare_confirm(text) or is_bare_cancel(text) or is_repeat_intent(text)
 
 
 def recipe_locale_dutch(user_message: str = "", *, prefer_dutch: bool | None = None) -> bool:

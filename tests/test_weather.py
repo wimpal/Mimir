@@ -234,3 +234,24 @@ def test_get_weather_fetch_override(tmp_path: Path) -> None:
     )
     out = dispatch("get_weather", {}, tools=reg)
     assert out == "error: weather unavailable (offline)"
+
+
+def test_get_weather_ignores_day_offset_hallucination(tmp_path: Path) -> None:
+    """Models sometimes pass calendar day_offset; argless tools must still run."""
+    settings = _settings(tmp_path)
+    payload = json.dumps(
+        {
+            "current": {"temperature_c": 12.0, "conditions": "overcast"},
+            "today": {"temp_max_c": 14.0, "temp_min_c": 10.0, "conditions": "overcast"},
+            "tomorrow": {
+                "temp_max_c": 18.0,
+                "temp_min_c": 9.0,
+                "conditions": "partly cloudy",
+            },
+        }
+    )
+    reg = build_registry(settings, weather_fetch_override=lambda: payload)
+    out = dispatch("get_weather", {"day_offset": 1}, tools=reg)
+    data = json.loads(out)
+    assert data["tomorrow"]["temp_max_c"] == 18.0
+    assert "error" not in out

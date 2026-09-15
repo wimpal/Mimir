@@ -176,7 +176,12 @@ def dispatch(
     tool = registry.get(name)
     if tool is None:
         return f"error: unknown tool '{name}'"
-    args = arguments or {}
+    args = dict(arguments or {})
+    # Argless tools (empty properties): drop model hallucinations such as
+    # get_weather(day_offset=1) confused with get_calendar.
+    props = tool.parameters.get("properties") or {}
+    if not props:
+        args = {}
     schema_err = validate_arguments(tool, args)
     if schema_err is not None:
         return schema_err

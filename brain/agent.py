@@ -60,6 +60,7 @@ from brain.morning_brief import (
     morning_brief_locale,
     morning_brief_tools_incomplete,
     needs_morning_brief_fixup,
+    weather_fetch_failed_line,
 )
 from brain.ollama import (
     ChatMessage,
@@ -95,6 +96,12 @@ from brain.recipe_import import (
     should_keep_post_save,
     user_message_requests_recipe_save,
 )
+from brain.repeat_last import (
+    is_repeat_intent,
+    last_final_assistant,
+    nothing_to_repeat_reply,
+    repeat_locale,
+)
 from brain.shopping_list import filter_shopping_list_tool_result
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
 from brain.turn_fixup import (
@@ -104,6 +111,7 @@ from brain.turn_fixup import (
     format_lights_toggle_reply,
     needs_lights_locale_fixup,
     needs_weather_shopping_fixup,
+    user_asked_about_weather,
     user_message_locale,
 )
 
@@ -355,11 +363,14 @@ def _call_ollama(
     write_pending = user_message_requests_write(user_message) and not write_tool_called_this_turn
     tools_available = bool(schemas)
     after_tools = _has_tool_results_this_turn(messages)
+    # Weather replies may be discarded for force/fixup — do not stream drafts.
+    weather_turn = user_asked_about_weather(user_message)
     can_stream = (
         stream_final
         and on_assistant_delta is not None
         and not is_morning_greeting(user_message)
         and not is_evening_wind_down(user_message)
+        and not weather_turn
         and not write_pending
         and hasattr(client, "chat_stream")
         # Tool calls are unreliable over Ollama stream — block until tools have run.
@@ -369,7 +380,7 @@ def _call_ollama(
     if not can_stream:
         response = client.chat(messages, tools=schemas, think=think, stream=False)
         msg = response.message
-        # Do not stream drafts that write_skipped / morning-brief may discard.
+        # Do not stream drafts that write_skipped / morning-brief / weather may discard.
         if (
             on_assistant_delta is not None
             and stream_final
@@ -377,6 +388,7 @@ def _call_ollama(
             and (msg.content or "").strip()
             and not is_morning_greeting(user_message)
             and not is_evening_wind_down(user_message)
+            and not weather_turn
             and not write_pending
         ):
             on_assistant_delta(msg.content)
@@ -641,6 +653,7 @@ def run_turn(
     shopping_list_items_this_turn: list[dict[str, Any]] = []
     lights_set_state_facts_this_turn: dict[str, Any] | None = None
     tools_used_this_turn: list[str] = []
+    weather_force_used = False
     recipe_save_turn = user_message_requests_recipe_save(user_message)
     # Greeting / search detours burn the default 3 rounds; URL import needs headroom.
     iteration_budget = (
@@ -875,6 +888,28 @@ def run_turn(
                 stopped_reason=StoppedReason.FINAL,
             )
 
+    # T-054: repeat last final assistant reply — no Ollama / no tools.
+    if is_repeat_intent(user_message):
+        prior = last_final_assistant(working)
+        locale = repeat_locale(user_message)
+        reply = prior if prior is not None else nothing_to_repeat_reply(locale)
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=[],
+                success=True,
+                anomaly="repeat_last",
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
     # T-052: capability discovery — live tools only (before Ollama).
     pending_confirmable = bool(
         pending_recipes is not None
@@ -886,6 +921,7 @@ def run_turn(
         pending_confirmable=pending_confirmable,
         is_morning=is_morning_greeting,
         is_evening=is_evening_wind_down,
+        is_repeat=is_repeat_intent,
         requests_write=user_message_requests_write,
         requests_recipe_save=user_message_requests_recipe_save,
         requests_light_write=user_message_requests_light_write,
@@ -1373,6 +1409,122 @@ def run_turn(
                         stopped_reason=StoppedReason.FINAL,
                     )
             reply_text = msg.content or ""
+            # Weather asked but never fetched successfully — force get_weather once
+            # (covers day_offset tool_error + "one moment please" filler with no tools).
+            if (
+                user_asked_about_weather(user_message)
+                and weather_payload_this_turn is None
+                and "get_weather" in registry
+                and not weather_force_used
+            ):
+                weather_force_used = True
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=False,
+                        anomaly="weather_tools_skipped",
+                        content_preview=reply_text[:120],
+                    )
+                )
+                weather_tc = ToolCall(
+                    function=ToolCallFunction(name="get_weather", arguments={})
+                )
+                working.append(
+                    ChatMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[weather_tc],
+                    )
+                )
+                remaining = _remaining_s(deadline_monotonic)
+                per_tool = default_tool_timeout_s
+                tool_entry = registry.get("get_weather")
+                if tool_entry is not None and tool_entry.timeout_s is not None:
+                    per_tool = max(per_tool, tool_entry.timeout_s)
+                if remaining is not None:
+                    per_tool = min(per_tool, remaining)
+                if on_tool_start is not None:
+                    on_tool_start("get_weather", {})
+                weather_result = _dispatch_with_timeout(
+                    "get_weather",
+                    {},
+                    tools=registry,
+                    timeout_s=per_tool,
+                )
+                weather_ok = not tool_result_is_error(weather_result)
+                if on_tool_end is not None:
+                    preview = (
+                        weather_result
+                        if len(weather_result) <= 200
+                        else weather_result[:197] + "..."
+                    )
+                    on_tool_end("get_weather", weather_ok, preview)
+                working.append(_tool_result_message(weather_tc, weather_result))
+                if after_tool is not None:
+                    after_tool("get_weather", weather_result, working)
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=0.0,
+                        tool_latency_ms=None,
+                        tool_names=["get_weather"],
+                        success=weather_ok,
+                        anomaly=(
+                            "weather_tools_forced"
+                            if weather_ok
+                            else "tool_error"
+                        ),
+                    )
+                )
+                if weather_ok:
+                    try:
+                        weather_data = json.loads(weather_result)
+                        if isinstance(weather_data, dict):
+                            weather_payload_this_turn = weather_data
+                    except json.JSONDecodeError:
+                        weather_payload_this_turn = None
+                if weather_payload_this_turn is not None:
+                    fixed = fix_weather_shopping_reply(
+                        "",
+                        user_message,
+                        weather=weather_payload_this_turn,
+                        shopping_list_fetched=shopping_list_fetched_this_turn,
+                        shopping_items=shopping_list_items_this_turn,
+                    )
+                    if fixed.strip():
+                        steps.append(
+                            StepTrace(
+                                ollama_latency_ms=0.0,
+                                tool_names=[],
+                                success=True,
+                                anomaly="weather_shopping_fixup",
+                                content_preview=fixed[:120],
+                            )
+                        )
+                        working.append(ChatMessage(role="assistant", content=fixed))
+                        return TurnResult(
+                            content=fixed,
+                            messages=working,
+                            steps=steps,
+                            stopped_reason=StoppedReason.FINAL,
+                        )
+                locale = user_message_locale(user_message)
+                fail = weather_fetch_failed_line(locale)
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=0.0,
+                        tool_names=[],
+                        success=False,
+                        anomaly="weather_fetch_failed",
+                        content_preview=fail[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=fail))
+                return TurnResult(
+                    content=fail,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             if needs_weather_shopping_fixup(
                 user_message,
                 reply_text,

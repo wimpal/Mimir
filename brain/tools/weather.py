@@ -254,7 +254,10 @@ def make_get_weather_tool(
             "Return current conditions and a short forecast for the user's home "
             "location (lat/long from server config; Netherlands KNMI model via "
             "Open-Meteo). Use for weather today/tomorrow, rain, umbrella, "
-            "temperature, or conditions. No arguments — home location is fixed. "
+            "temperature, or conditions. Takes **no arguments** — never pass "
+            "day_offset (that is get_calendar only). Home location is fixed. "
+            "Payload includes current, today, and tomorrow objects — for "
+            "morgen/tomorrow questions, ground the reply in the tomorrow field. "
             "Payload may include stale=true with fetched_at when serving Forecast cache."
         ),
         parameters={

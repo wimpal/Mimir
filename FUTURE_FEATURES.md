@@ -1080,7 +1080,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Repeat last response
 
-- **Status:** in-roadmap
+- **Status:** done (T-054; GUI smoke 2026-09-15)
 - **Horizon:** near
 - **Summary:** Repeat the last assistant response (useful for voice).
 - **User stories:**
@@ -1089,7 +1089,8 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Source of truth:** Brain Messages / in-memory last TTS text
 - **API ownership:** Brain returns last final assistant Message; HA may re-TTS.
 - **Tools + context:** Intent routing without new model call when possible.
-- **ROADMAP overlap:** Heim **M5b**
+- **ROADMAP overlap:** Heim **M5b** / **T-054**
+- **Impl:** `brain/repeat_last.py` short-circuit in `run_turn` (EN/NL phrases).
 
 ### Simplified language (ELI5)
 

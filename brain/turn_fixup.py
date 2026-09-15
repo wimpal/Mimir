@@ -9,7 +9,6 @@ from brain.morning_brief import (
     Locale,
     _round_temp,
     _translate_conditions,
-    morning_brief_lacks_weather,
 )
 from brain.recipe_import import is_bare_cancel, is_bare_confirm
 from brain.shopping_list import filter_shopping_list_items
@@ -33,6 +32,17 @@ _EN_MARKERS = re.compile(
 
 _WEATHER_ASK = re.compile(
     r"\b(weer|weather|forecast|voorspelling|temperatuur|temperature|regen|rain)\b",
+    re.IGNORECASE,
+)
+
+_TOMORROW_ASK = re.compile(r"\b(morgen|tomorrow)\b", re.IGNORECASE)
+
+# Facts that mean the reply actually answered weather (not "checking the weather…").
+_WEATHER_FACT_IN_REPLY = re.compile(
+    r"(°c|°\s*c|\bgraden\b|\bdegrees?\b|\btemperatuur\b|\btemperature\b|"
+    r"\bbewolkt\b|\bovercast\b|\bregen\b|\brain\b|\bzonnig\b|\bhelder\b|"
+    r"\bpartly cloudy\b|\bcloudy\b|\bcloud|\bneerslag\b|\bprecipitation\b|"
+    r"\bvoorspelling\b|\bforecast\b)",
     re.IGNORECASE,
 )
 
@@ -188,6 +198,19 @@ def user_asked_about_weather(text: str) -> bool:
     return bool(_WEATHER_ASK.search(text or ""))
 
 
+def user_asked_about_tomorrow(text: str) -> bool:
+    return bool(_TOMORROW_ASK.search(text or ""))
+
+
+def weather_reply_lacks_facts(reply: str) -> bool:
+    """True when the reply does not contain grounded weather facts.
+
+    Mentions of the word "weather"/"weer" alone (e.g. "I'll check the weather")
+    are not enough — those fillers used to skip fixup.
+    """
+    return not _WEATHER_FACT_IN_REPLY.search(reply or "")
+
+
 def user_asked_about_shopping_list(text: str) -> bool:
     normalized = (text or "").lower()
     if _SHOPPING_ASK.search(normalized):
@@ -256,8 +279,32 @@ def format_weather_one_liner(
     locale: Locale,
     *,
     compact: bool = False,
+    user_message: str = "",
 ) -> str:
     """One spoken weather sentence for compound answers."""
+    if user_asked_about_tomorrow(user_message):
+        tomorrow = (
+            weather.get("tomorrow") if isinstance(weather.get("tomorrow"), dict) else {}
+        )
+        tmax = _round_temp(tomorrow.get("temp_max_c"))
+        tmin = _round_temp(tomorrow.get("temp_min_c"))
+        conditions = _translate_conditions(
+            str(tomorrow.get("conditions") or ""), locale
+        )
+        if locale == "nl":
+            sentence = f"Morgen is het {conditions}" if conditions else "Morgen"
+            if tmin is not None and tmax is not None:
+                sentence = f"{sentence}, tussen {tmin} en {tmax} graden"
+            elif tmax is not None:
+                sentence = f"{sentence}, tot {tmax} graden"
+            return f"{sentence}."
+        sentence = f"Tomorrow looks {conditions}" if conditions else "Tomorrow"
+        if tmin is not None and tmax is not None:
+            sentence = f"{sentence}, between {tmin} and {tmax} degrees"
+        elif tmax is not None:
+            sentence = f"{sentence}, up to {tmax} degrees"
+        return f"{sentence}."
+
     current = weather.get("current") if isinstance(weather.get("current"), dict) else {}
     today = weather.get("today") if isinstance(weather.get("today"), dict) else {}
     temp = _round_temp(current.get("temperature_c"))
@@ -346,7 +393,12 @@ def needs_weather_shopping_fixup(
         if (asked_weather and weather) or (asked_list and shopping_list_fetched):
             return True
 
-    if asked_weather and weather and morning_brief_lacks_weather(reply):
+    if asked_weather and weather and weather_reply_lacks_facts(reply):
+        return True
+
+    # T-071: *morgen*/*tomorrow* always rebuild from payload so locale + day slice stick
+    # (model often answers in English with today+tomorrow mixed in).
+    if asked_weather and weather and user_asked_about_tomorrow(user_message):
         return True
 
     if shopping_list_fetched and not reply_grounded_in_shopping_list(
@@ -373,7 +425,14 @@ def fix_weather_shopping_reply(
     parts: list[str] = []
 
     if include_weather:
-        parts.append(format_weather_one_liner(weather, locale, compact=compact_weather))
+        parts.append(
+            format_weather_one_liner(
+                weather,
+                locale,
+                compact=compact_weather,
+                user_message=user_message,
+            )
+        )
     if include_list:
         parts.append(format_shopping_list_sentence(shopping_items, locale))
 

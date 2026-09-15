@@ -249,6 +249,13 @@ def test_should_short_circuit_precedence() -> None:
         requests_write=user_message_requests_write,
         requests_recipe_save=user_message_requests_recipe_save,
     )
+    assert not should_short_circuit_capability(
+        "Repeat that",
+        is_repeat=lambda t: t.strip().lower().startswith("repeat that"),
+        is_morning=is_morning_greeting,
+        requests_write=user_message_requests_write,
+        requests_recipe_save=user_message_requests_recipe_save,
+    )
 
 
 def test_probe_unavailable_uses_health_status() -> None:
