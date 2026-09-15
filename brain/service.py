@@ -30,8 +30,8 @@ from brain.prefs import (
 )
 from brain.recipe_import import PendingRecipeStore
 from brain.tools import Tool, build_registry
-from brain.turn_log import append_turn_trace
 from brain.turn_fixup import resolve_turn_locale
+from brain.turn_log import append_turn_trace
 from brain.voice.sentences import SentenceBuffer
 
 logger = logging.getLogger("mimir.service")
@@ -259,6 +259,8 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            settings=self.settings,
+            unavailable_services=self.unavailable_services,
         )
 
         reply = _user_facing_reply(result)
@@ -324,6 +326,8 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            settings=self.settings,
+            unavailable_services=self.unavailable_services,
         )
 
         reply = _user_facing_reply(result)
@@ -368,6 +372,8 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            settings=self.settings,
+            unavailable_services=self.unavailable_services,
         )
 
     def _outcome_from_turn(

@@ -45,13 +45,10 @@ reads another's storage, ever.
 
 ## This repo
 
-### Current task — T-019
+### Current task — T-043 / T-019
 
-**T-043/T-045/T-046/T-047/T-048/T-049/T-050 done** — Windows daily driver is `clients/desktop/` (Tauri 2). Pin
-`dist\mimir-desktop.exe` (`scripts/build_mimir_desktop_exe.ps1`). Restart:
-`scripts/restart_mimir.ps1`. Textual TUI is secondary / SSH (`-WithTui`).
-
-**Open:** T-019 daily-driver week.
+**T-021 + T-044 + T-047 + T-048 + T-049 done.** Desktop GUI daily driver. **Open:** T-043
+(atomic cook steps), T-019 (daily-driver week).
 
 Brain client auth is enabled: `MIMIR_CLIENT_TOKEN` + `MIMIR_AUTH_MODE=token` in `.env`;
 `MIMIR_AUTH_TOKEN` is a deprecated alias. Restart brain after `.env` changes.
@@ -114,7 +111,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ## Architecture invariants
 
 - The **brain** owns tools, prompts, history, timeouts, and Jellyfin sync. **Clients** under `clients/` are front doors only. Ollama never calls external APIs; clients never call MCP services.
-- **`clients/desktop/`** (Windows GUI), **`clients/tui/`** (SSH/headless), and **`clients/mobile/`** are sibling packages. Share the chat API and UX language; do not share platform UI code. See `project-control-heim/ARCHITECTURE.md` — *Mimir: brain and clients*.
+- **`clients/desktop/`** (Windows GUI), **`clients/tui/`** (SSH/headless), and **`clients/mobile/`** (phone, M5) are sibling packages. Share the chat API and UX language; do not share platform UI code. See `project-control-heim/ARCHITECTURE.md` — *Mimir: brain and clients*.
 - Prefer an **OpenAI-compatible** chat endpoint (or thin adapter) so Home Assistant can call the same brain in v2 — **after** the Phase 2 HA spike confirms the path. Never point HA at native Ollama for Mimir (bypasses tools).
 - Tool loop: user message → Ollama (+ tool schemas) → execute tool → feed result → final reply. Cap iterations. Time out every external call.
 - Fail loud and short: if Ollama/Jellyfin/weather is down, return a clear message — never hang.
@@ -128,9 +125,9 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 ```
 brain/           # FastAPI service, tools, agent loop, SQLite — only layer that calls MCP
 clients/
-  desktop/       # Tauri 2 Windows daily-driver GUI (`npm run tauri dev`)
+  desktop/       # Tauri 2 Windows daily-driver GUI (T-045) — pin dist/mimir-desktop.exe
   tui/           # Textual chat (`uv run mimir`) — SSH / headless secondary
-  mobile/        # Android (Kotlin + Jetpack Compose): typed chat + push-to-talk (M5)
+  mobile/        # Android (Kotlin + Jetpack Compose): TUI-equivalent UX + push-to-talk
 config/          # Examples + system prompt — real config.yaml gitignored
 scripts/         # try_prompt.py, tool_call_suite.py (standing regression)
 docs/            # Phase notes (tool-calling, HA spike, …)
@@ -150,7 +147,7 @@ Configurable data dir for SQLite/logs (env or config). Use `pathlib`; no hardcod
 - **Small slices:** dummy tool → weather → memory → Jellyfin → chat UI → harden → compose → voice last.
 - **Standing tool suite:** re-run `uv run python scripts/tool_call_suite.py` on model, system-prompt, tool-schema, or `num_ctx`/`think` changes. Viability bar ≥80%; track right-tool / valid-args / result-used separately when extending cases.
 - If the model drops/malforms calls after prompt/`num_ctx` fixes, **swap model** (named fallbacks in ROADMAP) — do not bury it under a framework.
-- Keep the brain **frontend-agnostic**. All chat UX lives under `clients/` (`desktop/` daily driver, `tui/` secondary, `mobile/`). Never put MCP or tool-loop logic in a client.
+- Keep the brain **frontend-agnostic**. All chat UX lives under `clients/` (`tui/` today, `mobile/` at M5). Never put MCP or tool-loop logic in a client.
 - Log prompt id, tool name, latency, success/fail (file or SQLite) once the loop exists.
 - Secrets (Jellyfin key, auth tokens) only via env / local config gitignored; ship `.env.example`.
 - Prefer `docker-compose.yml` as the Linux deploy unit even if you run Ollama natively on Windows during GPU bring-up.

@@ -1054,11 +1054,13 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **User stories:**
   - “What can you do.”
   - Also explain how a tool or capability works.
-- **Depends on:** Registry of enabled tools/features from config.
-- **Source of truth:** Brain tool registry + this backlog / ROADMAP for “coming later”
-- **API ownership:** Brain `list_capabilities` or prompt section generated from enabled tools only (don’t advertise parked features as live).
-- **Tools + context:** Auto-generate from tool schemas; distinguish live vs planned.
-- **ROADMAP overlap:** Heim **M5b**
+- **Depends on:** Live brain tool registry + MCP discovery (T-003).
+- **Source of truth:** Registered tools at connect/turn time only. **Never** advertise
+  FUTURE_FEATURES, ROADMAP phases, or parked items as live or “coming soon” (T-052).
+- **API ownership:** Deterministic brain reply from live registry (not a brochure prompt).
+- **Tools + context:** Overview + optional explain-from-schema; short “not available”
+  only for configured MCP services that are down.
+- **ROADMAP overlap:** Heim **M5b** / **T-052**
 
 ### Usage stats, milestones, and Mimir’s birthday
 

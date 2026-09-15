@@ -13,6 +13,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from brain.capability_discovery import (
+    build_capability_reply,
+    probe_unavailable_services,
+    should_short_circuit_capability,
+)
 from brain.mcp.errors import is_write_tool, tool_result_is_error
 from brain.mcp.lights import (
     build_set_state_args_from_user_message,
@@ -58,6 +63,7 @@ from brain.ollama import (
 from brain.recipe_import import (
     RECIPE_ADD_TOOL,
     PendingRecipeStore,
+    RecipeNormalizeError,
     awaiting_confirmation_result,
     build_duplicate_rename_confirm_reply,
     build_post_save_clarify_reply,
@@ -71,7 +77,6 @@ from brain.recipe_import import (
     may_stage_recipe_add,
     merge_subsection_ingredients_from_source,
     normalize_recipe_payload,
-    RecipeNormalizeError,
     parse_recipe_add_success,
     recipe_locale_dutch,
     restage_after_duplicate_title,
@@ -408,6 +413,8 @@ def run_turn(
     data_dir: Path | None = None,
     conversation_id: str | None = None,
     pending_recipes: PendingRecipeStore | None = None,
+    settings: Any | None = None,
+    unavailable_services: list[str] | None = None,
 ) -> TurnResult:
     """Run one user turn through Ollama with optional tools.
 
@@ -417,6 +424,7 @@ def run_turn(
     also capped by ``min(default_tool_timeout_s, remaining turn budget)``.
     ``after_tool`` runs after each tool result is appended (e.g. refresh system prefs).
     ``on_tool_start`` / ``on_tool_end`` are optional observability hooks for SSE.
+    ``settings`` + ``unavailable_services`` enable T-052 capability discovery.
     """
     registry = TOOLS if tools is None else tools
     schemas = tool_schemas(registry)
@@ -666,6 +674,55 @@ def run_turn(
             )
             return TurnResult(
                 content=saved_reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
+    # T-052: capability discovery — live tools only (before Ollama).
+    pending_confirmable = bool(
+        pending_recipes is not None
+        and conversation_id
+        and pending_recipes.is_confirmable(conversation_id)
+    )
+    if should_short_circuit_capability(
+        user_message,
+        pending_confirmable=pending_confirmable,
+        is_morning=is_morning_greeting,
+        requests_write=user_message_requests_write,
+        requests_recipe_save=user_message_requests_recipe_save,
+        requests_light_write=user_message_requests_light_write,
+    ):
+        startup_unavailable = list(unavailable_services or [])
+        if settings is not None:
+            unavailable_now = probe_unavailable_services(
+                settings,
+                known_unavailable=startup_unavailable,
+            )
+        else:
+            unavailable_now = startup_unavailable
+        configured = (
+            list(settings.services.keys()) if settings is not None else None
+        )
+        capability_reply = build_capability_reply(
+            user_message,
+            tools=registry,
+            unavailable=unavailable_now,
+            configured_services=configured,
+        )
+        if capability_reply is not None:
+            working.append(ChatMessage(role="assistant", content=capability_reply))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="capability_discovery",
+                    content_preview=capability_reply[:120],
+                )
+            )
+            return TurnResult(
+                content=capability_reply,
                 messages=working,
                 steps=steps,
                 stopped_reason=StoppedReason.FINAL,
