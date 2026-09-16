@@ -26,6 +26,7 @@ from brain.db import Database, Movie
 from brain.ollama import ChatMessage, OllamaClient
 from brain.prefs import build_system_prompt
 from brain.tools import Tool, build_registry, tool_schemas
+from brain.turn_log import turns_log_path
 
 
 def _iso_days_ago(days: float) -> str:
@@ -108,6 +109,8 @@ class Case:
     prompt: str
     check: Callable[[TurnResult], CheckResult]
     prior_turns: tuple[tuple[str, str], ...] = ()
+    conversation_id: str | None = None
+    plant_trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -412,6 +415,81 @@ def _no_tools() -> Callable[[TurnResult], CheckResult]:
             return _fail_right("unexpected_tool")
         if not (result.content or "").strip():
             return _fail_used("empty_response")
+        return _ok()
+
+    return check
+
+
+def _require_eli5_shape() -> Callable[[TurnResult], CheckResult]:
+    """ELI5: no invented tools; non-empty plain reply (prompt mode)."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if _tools_called(result):
+            return _fail_right("unexpected_tool")
+        content = (result.content or "").strip()
+        if not content:
+            return _fail_used("empty_response")
+        # Heuristic: keep it short — ELI5 should not essay.
+        if len(content) > 900:
+            return _fail_used("reply_too_long_for_eli5")
+        # Fluff the operator rejected (sanitizer + prompt should prevent these).
+        if any(ch in content for ch in ("\U0001f35e", "\u2728", "🍞", "✨")):
+            return _fail_used("eli5_emoji_fluff")
+        return _ok()
+
+    return check
+
+
+def _require_two_sided_shape() -> Callable[[TurnResult], CheckResult]:
+    """Two-sided: no invented tools; both-side markers in the reply."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if _tools_called(result):
+            return _fail_right("unexpected_tool")
+        content = (result.content or "").strip()
+        if not content:
+            return _fail_used("empty_response")
+        lower = content.lower()
+        markers = (
+            "side a",
+            "side b",
+            "kant a",
+            "kant b",
+            "voordeel",
+            "nadeel",
+            "pros",
+            "cons",
+            "on the one hand",
+            "on the other",
+            "enerzijds",
+            "anderzijds",
+        )
+        if not any(m in lower for m in markers):
+            return _fail_used("missing_two_sided_markers")
+        return _ok()
+
+    return check
+
+
+def _require_explain_cites_tool(tool_name: str) -> Callable[[TurnResult], CheckResult]:
+    """Explain-yourself short-circuit: cite tool, no new tools."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if _tools_called(result):
+            return _fail_right("unexpected_tool")
+        content = (result.content or "").strip()
+        if not content:
+            return _fail_used("empty_response")
+        if tool_name not in content:
+            return _fail_used(f"missing_tool_cite:{tool_name}")
+        if not any(s.anomaly == "explain_yourself" for s in result.steps):
+            return _fail_used("missing_explain_yourself_short_circuit")
         return _ok()
 
     return check
@@ -1377,6 +1455,41 @@ CASES: list[Case] = [
             ),
         ),
     ),
+    Case(
+        "modes_eli5_1",
+        "modes",
+        "Explain like I'm five: why is the sky blue?",
+        _require_eli5_shape(),
+    ),
+    Case(
+        "modes_twosided_1",
+        "modes",
+        "Give me both sides of working from home versus the office.",
+        _require_two_sided_shape(),
+    ),
+    Case(
+        "modes_explain_1",
+        "modes",
+        "Why did you do that?",
+        _require_explain_cites_tool("shopping_list.list"),
+        prior_turns=(
+            (
+                "what's on the shopping list?",
+                "Milk and eggs are on the list.",
+            ),
+        ),
+        conversation_id="suite-modes-explain-1",
+        plant_trace={
+            "ts": "2026-09-16T10:00:00+00:00",
+            "turn_id": "suite-explain-trace",
+            "prompt_id": "sha256:suite",
+            "stopped_reason": "final",
+            "success": True,
+            "tools_used": ["shopping_list.list"],
+            "tool_calls": [{"name": "shopping_list.list", "args": {}}],
+            "steps": [],
+        },
+    ),
 ]
 
 
@@ -1442,8 +1555,20 @@ def run_case(
     tools: dict,
     tool_timeout_s: float,
     settings: Settings,
+    data_dir: Path | None = None,
 ) -> CaseResult:
     messages = build_case_messages(case, settings, tools)
+    case_data_dir = data_dir
+    if case.plant_trace is not None:
+        if case_data_dir is None:
+            case_data_dir = Path(tempfile.mkdtemp(prefix="mimir-suite-modes-"))
+        path = turns_log_path(case_data_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = dict(case.plant_trace)
+        if case.conversation_id:
+            record.setdefault("conversation_id", case.conversation_id)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     t0 = time.perf_counter()
     result = run_turn(
         client,
@@ -1452,6 +1577,8 @@ def run_case(
         max_iterations=3,
         think=think,
         default_tool_timeout_s=tool_timeout_s,
+        data_dir=case_data_dir,
+        conversation_id=case.conversation_id,
     )
     wall = (time.perf_counter() - t0) * 1000
     scored = case.check(result)
@@ -1618,6 +1745,7 @@ def main() -> int:
                 tools=tools,
                 tool_timeout_s=settings.timeouts.tool_s,
                 settings=settings,
+                data_dir=data_dir,
             )
             results.append(cr)
             mark = "PASS" if cr.passed else "FAIL"

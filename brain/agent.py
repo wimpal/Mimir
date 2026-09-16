@@ -18,6 +18,7 @@ from brain.capability_discovery import (
     probe_unavailable_services,
     should_short_circuit_capability,
 )
+from brain.eli5 import apply_eli5_system_append, is_eli5_intent, sanitize_eli5_reply
 from brain.evening_wind_down import (
     HOUSE_ALL_OFF_ARGS,
     LIGHTS_SET_STATE_TOOL,
@@ -28,6 +29,10 @@ from brain.evening_wind_down import (
     is_evening_wind_down,
     lights_off_succeeded,
     tasks_from_payload,
+)
+from brain.explain_yourself import (
+    explain_yourself_reply,
+    is_explain_yourself_intent,
 )
 from brain.mcp.errors import is_write_tool, tool_result_is_error
 from brain.mcp.lights import (
@@ -660,6 +665,11 @@ def run_turn(
         max(max_iterations, 5) if recipe_save_turn else max_iterations
     )
 
+    # T-055: ELI5 — strengthen system constraints this turn (model often ignores base prompt).
+    eli5_turn = is_eli5_intent(user_message)
+    if eli5_turn:
+        apply_eli5_system_append(working)
+
     # T-021: drop stale pending on unrelated turns (bare yes must not commit later).
     if (
         pending_recipes is not None
@@ -900,6 +910,31 @@ def run_turn(
                 tool_names=[],
                 success=True,
                 anomaly="repeat_last",
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    # T-055: explain-yourself from last-turn tool-trace metadata — no CoT / no tools.
+    if is_explain_yourself_intent(user_message):
+        reply = explain_yourself_reply(
+            user_text=user_message,
+            messages=working,
+            data_dir=data_dir,
+            conversation_id=conversation_id,
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=[],
+                success=True,
+                anomaly="explain_yourself",
                 content_preview=reply[:120],
             )
         )
@@ -1654,9 +1689,19 @@ def run_turn(
                     content_preview=msg.content[:120],
                 )
             )
-            working.append(_assistant_from_response(msg))
+            working.append(
+                ChatMessage(
+                    role="assistant",
+                    content=(
+                        sanitize_eli5_reply(msg.content or "")
+                        if eli5_turn
+                        else (msg.content or "")
+                    ),
+                )
+            )
+            final_content = working[-1].content
             return TurnResult(
-                content=msg.content,
+                content=final_content,
                 messages=working,
                 steps=steps,
                 stopped_reason=StoppedReason.FINAL,

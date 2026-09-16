@@ -87,6 +87,65 @@ def read_recent_traces(path: Path, *, limit: int = 50) -> list[dict[str, Any]]:
     return summaries
 
 
+def latest_trace_for_conversation(
+    path: Path, conversation_id: str | None
+) -> dict[str, Any] | None:
+    """Newest full JSONL turn record for ``conversation_id`` that used tools.
+
+    Skips empty / explain-yourself traces so a follow-up \"why?\" still cites
+    the last real tool turn.
+    """
+    if not conversation_id or not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for line in reversed(lines):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("conversation_id") != conversation_id:
+            continue
+        used = record.get("tools_used")
+        calls = record.get("tool_calls")
+        has_used = isinstance(used, list) and any(
+            isinstance(n, str) and n for n in used
+        )
+        has_calls = isinstance(calls, list) and any(
+            isinstance(c, dict) and isinstance(c.get("name"), str) and c.get("name")
+            for c in calls
+        )
+        if has_used or has_calls:
+            return record
+    return None
+
+
+def tool_calls_summary(result: TurnResult) -> list[dict[str, Any]]:
+    """Compact name+args from assistant tool_calls (no result bodies)."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for msg in result.messages:
+        if msg.role != "assistant":
+            continue
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            args = dict(tc.function.arguments or {})
+            key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"name": name, "args": args})
+    return out
+
+
 def append_turn_trace(
     data_dir: Path,
     *,
@@ -108,6 +167,7 @@ def append_turn_trace(
         "success": result.stopped_reason == StoppedReason.FINAL,
         "error": result.error,
         "tools_used": tools_used,
+        "tool_calls": tool_calls_summary(result),
         "steps": [
             {
                 "ollama_latency_ms": round(s.ollama_latency_ms, 2),

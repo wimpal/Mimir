@@ -78,13 +78,21 @@ class ChatOutcome:
 
 
 def _user_facing_reply(result: TurnResult) -> str:
+    from brain.eli5 import is_eli5_intent, latest_user_text, sanitize_eli5_reply
+
     if result.stopped_reason == StoppedReason.FINAL and (result.content or "").strip():
-        return result.content
+        content = result.content
+        if is_eli5_intent(latest_user_text(result.messages)):
+            content = sanitize_eli5_reply(content)
+        return content
     mapped = _REPLY_BY_REASON.get(result.stopped_reason)
     if mapped is not None:
         return mapped
     if (result.content or "").strip():
-        return result.content
+        content = result.content
+        if is_eli5_intent(latest_user_text(result.messages)):
+            content = sanitize_eli5_reply(content)
+        return content
     return MSG_EMPTY
 
 
