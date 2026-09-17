@@ -244,6 +244,8 @@ def _suite_budget_registry(settings: Settings, db: Database) -> dict[str, Tool]:
         db=db,
         weather_fetch_override=_suite_weather_payload,
         calendar_fetch_override=_suite_calendar_ok,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
     )
     search = Tool(
         name="budgettracker.transactions.search",
@@ -334,6 +336,13 @@ def _require_followup_budget_wim() -> Callable[[TurnResult], CheckResult]:
 def _weather_payload(result: TurnResult) -> str | None:
     for m in result.messages:
         if m.role == "tool" and m.tool_name == "get_weather":
+            return m.content
+    return None
+
+
+def _tool_payload(result: TurnResult, tool_name: str) -> str | None:
+    for m in result.messages:
+        if m.role == "tool" and m.tool_name == tool_name:
             return m.content
     return None
 
@@ -721,6 +730,189 @@ def _echo_not_weather(expected: str) -> Callable[[TurnResult], CheckResult]:
         if not (result.content or "").strip():
             return _fail_used("empty_response")
         return _ok()
+
+    return check
+
+
+def _suite_currency_payload() -> str:
+    return json.dumps(
+        {
+            "amount": "50.00",
+            "from_currency": "USD",
+            "to_currency": "EUR",
+            "converted": "45.12",
+            "rate": "0.9024",
+            "rate_date": "2026-09-15",
+            "source": "frankfurter/ecb",
+        },
+        separators=(",", ":"),
+    )
+
+
+def _suite_wikipedia_payload() -> str:
+    return json.dumps(
+        {
+            "title": "Fiets",
+            "extract": "Een fiets is een voertuig met twee wielen.",
+            "url": "https://nl.wikipedia.org/wiki/Fiets",
+            "language": "nl",
+        },
+        separators=(",", ":"),
+    )
+
+
+def _require_currency_grounded() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "convert_currency" not in _tools_called(result):
+            return _fail_right("no_tool_when_required")
+        if any(n.startswith("budgettracker.") for n in _tools_called(result)):
+            return _fail_right("unexpected_tool")
+        payload = _tool_payload(result, "convert_currency")
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        converted = str(data.get("converted") or "")
+        rate_date = str(data.get("rate_date") or "")
+        if ("45" in content or converted.replace(".", ",") in content or converted in content) and (
+            rate_date in content or "2026-09-15" in content or "15" in content
+        ):
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
+
+
+def _require_currency_offline_clear() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "convert_currency" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _tool_payload(result, "convert_currency")
+        if not payload or not payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        fail_words = (
+            "unavailable",
+            "unable",
+            "can't",
+            "cannot",
+            "failed",
+            "error",
+            "offline",
+            "reach",
+            "timeout",
+            "timed out",
+            "down",
+            "niet",
+            "onbereikbaar",
+        )
+        if not any(w in content for w in fail_words):
+            return _fail_used("tool_not_used_in_answer")
+        return _ok()
+
+    return check
+
+
+def _require_wikipedia_grounded() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "wikipedia_lookup" not in _tools_called(result):
+            return _fail_right("no_tool_when_required")
+        payload = _tool_payload(result, "wikipedia_lookup")
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        title = str(data.get("title") or "").lower()
+        url = str(data.get("url") or "").lower()
+        if title and title in content and (
+            "wikipedia" in content
+            or "wiki" in content
+            or (url and ("http" in content or "wikipedia.org" in content))
+        ):
+            return _ok()
+        if "fiets" in content and ("wikipedia" in content or "wiki" in content):
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
+
+
+def _require_wikipedia_offline_clear() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "wikipedia_lookup" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _tool_payload(result, "wikipedia_lookup")
+        if not payload or not payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        content = (result.content or "").lower()
+        fail_words = (
+            "unavailable",
+            "unable",
+            "can't",
+            "cannot",
+            "failed",
+            "error",
+            "offline",
+            "reach",
+            "timeout",
+            "timed out",
+            "down",
+            "niet",
+            "onbereikbaar",
+        )
+        if not content.strip() or not any(w in content for w in fail_words):
+            return _fail_used("tool_not_used_in_answer")
+        return _ok()
+
+    return check
+
+
+def _require_random_fact_local() -> Callable[[TurnResult], CheckResult]:
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "random_fact" not in _tools_called(result):
+            return _fail_right("no_tool_when_required")
+        payload = _tool_payload(result, "random_fact")
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        if data.get("source") != "local":
+            return _fail_args("malformed_args")
+        fact = str(data.get("fact") or "").strip()
+        content = (result.content or "").strip()
+        if not content:
+            return _fail_used("empty_response")
+        needle = fact[:24] if len(fact) >= 24 else fact
+        if needle and needle.lower() in content.lower():
+            return _ok()
+        words = [w for w in fact.lower().split() if len(w) > 4][:3]
+        if words and all(w in content.lower() for w in words):
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
 
     return check
 
@@ -1490,6 +1682,42 @@ CASES: list[Case] = [
             "steps": [],
         },
     ),
+    Case(
+        "lookup_currency_1",
+        "must_call_currency",
+        "How many euros is 50 USD?",
+        _require_currency_grounded(),
+    ),
+    Case(
+        "lookup_currency_2",
+        "currency_offline",
+        "How many euros is 50 USD?",
+        _require_currency_offline_clear(),
+    ),
+    Case(
+        "lookup_wiki_1",
+        "must_call_wikipedia",
+        "Wat is een fiets volgens Wikipedia?",
+        _require_wikipedia_grounded(),
+    ),
+    Case(
+        "lookup_wiki_2",
+        "wikipedia_offline",
+        "Wikipedia: fiets",
+        _require_wikipedia_offline_clear(),
+    ),
+    Case(
+        "lookup_fact_1",
+        "must_call_random_fact",
+        "Tell me a random fact",
+        _require_random_fact_local(),
+    ),
+    Case(
+        "lookup_fact_2",
+        "must_call_random_fact",
+        "Vertel een weetje",
+        _require_random_fact_local(),
+    ),
 ]
 
 
@@ -1515,6 +1743,11 @@ def _system_messages(settings: Settings, registry: dict[str, Tool] | None = None
         "ground picks in the tool output.\n"
         "- `list_recently_watched`: use when asked what they watched lately / "
         "last week; ground the answer in the tool list only.\n"
+        "- `convert_currency`: use for FX / currency conversion; cite rate_date; "
+        "never write BudgetTracker for FX alone.\n"
+        "- `wikipedia_lookup`: use for Wikipedia questions; cite title and url; "
+        "not general web search.\n"
+        "- `random_fact`: use for a random fact / weetje (local list, offline).\n"
         "Call a tool when it clearly applies; otherwise answer directly.\n"
         "On morning greetings (good morning / morning / goedemorgen), call get_weather and "
         "get_calendar in the same step, then brief weather + today's schedule only. "
@@ -1683,6 +1916,8 @@ def main() -> int:
         db=db,
         calendar_fetch_override=_suite_calendar_ok,
         weather_fetch_override=_suite_weather_payload,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
     )
     budget_reg = _suite_budget_registry(settings, db)
     offline_reg = build_registry(
@@ -1690,22 +1925,46 @@ def main() -> int:
         db=db,
         weather_fetch_override=lambda: "error: weather unavailable (offline)",
         calendar_fetch_override=_suite_calendar_ok,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
+    )
+    currency_offline_reg = build_registry(
+        settings,
+        db=db,
+        calendar_fetch_override=_suite_calendar_ok,
+        weather_fetch_override=_suite_weather_payload,
+        currency_fetch_override=lambda: "error: currency unavailable (offline)",
+        wikipedia_fetch_override=_suite_wikipedia_payload,
+    )
+    wikipedia_offline_reg = build_registry(
+        settings,
+        db=db,
+        calendar_fetch_override=_suite_calendar_ok,
+        weather_fetch_override=_suite_weather_payload,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=lambda: "error: wikipedia unavailable (offline)",
     )
     calendar_offline_reg = build_registry(
         settings,
         db=db,
         calendar_fetch_override=lambda: "error: calendar unavailable (offline)",
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
     )
     empty_reg = build_registry(
         settings,
         db=empty_db,
         calendar_fetch_override=_suite_calendar_ok,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
     )
     morning_empty_reg = build_registry(
         settings,
         db=db,
         calendar_fetch_override=_suite_calendar_empty,
         weather_fetch_override=_suite_weather_payload,
+        currency_fetch_override=_suite_currency_payload,
+        wikipedia_fetch_override=_suite_wikipedia_payload,
     )
 
     print(
@@ -1726,6 +1985,10 @@ def main() -> int:
             print(f"… {case.id} ({case.category})", flush=True)
             if case.id == "weather_4":
                 tools = offline_reg
+            elif case.id == "lookup_currency_2":
+                tools = currency_offline_reg
+            elif case.id == "lookup_wiki_2":
+                tools = wikipedia_offline_reg
             elif case.id == "calendar_2":
                 tools = calendar_offline_reg
             elif case.id == "jellyfin_4":

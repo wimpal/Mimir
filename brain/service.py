@@ -13,6 +13,7 @@ from enum import StrEnum
 from typing import Any
 
 from brain.agent import StoppedReason, TurnResult, run_turn
+from brain.compaction import assemble_persist_messages
 from brain.config import Settings
 from brain.db import (
     CONVERSATIONS_LIST_DEFAULT,
@@ -78,21 +79,16 @@ class ChatOutcome:
 
 
 def _user_facing_reply(result: TurnResult) -> str:
-    from brain.eli5 import is_eli5_intent, latest_user_text, sanitize_eli5_reply
+    from brain.eli5 import sanitize_eli5_reply
 
     if result.stopped_reason == StoppedReason.FINAL and (result.content or "").strip():
-        content = result.content
-        if is_eli5_intent(latest_user_text(result.messages)):
-            content = sanitize_eli5_reply(content)
-        return content
+        # Always strip emoji — STYLE bans them; Qwen still adds smileys on chitchat.
+        return sanitize_eli5_reply(result.content)
     mapped = _REPLY_BY_REASON.get(result.stopped_reason)
     if mapped is not None:
         return mapped
     if (result.content or "").strip():
-        content = result.content
-        if is_eli5_intent(latest_user_text(result.messages)):
-            content = sanitize_eli5_reply(content)
-        return content
+        return sanitize_eli5_reply(result.content)
     return MSG_EMPTY
 
 
@@ -242,17 +238,20 @@ class BrainService:
     ) -> ChatOutcome:
         assert self.db is not None
         self.db.ensure_conversation(conversation_id)
-        limit = max(0, self.settings.memory.history_pairs) * 2
-        history = self.db.list_recent_messages(conversation_id, limit=limit)
         prefs = self.db.get_preferences()
         system = self._system_prompt_for_turn(prefs)
-        chat_messages: list[ChatMessage] = [
-            ChatMessage(role="system", content=system),
-            *[ChatMessage(role=m.role, content=m.content) for m in history],
-            ChatMessage(role="user", content=user_text),
-        ]
-
         deadline = time.monotonic() + self.settings.timeouts.turn_s
+        chat_messages = assemble_persist_messages(
+            db=self.db,
+            client=self.client,
+            settings=self.settings,
+            conversation_id=conversation_id,
+            system=system,
+            user_text=user_text,
+            pending_recipes=self.pending_recipes,
+            deadline_monotonic=deadline,
+        )
+
         result = run_turn(
             self.client,
             chat_messages,
@@ -363,8 +362,11 @@ class BrainService:
         on_tool_start: Any = None,
         on_tool_end: Any = None,
         on_assistant_delta: Any = None,
+        deadline_monotonic: float | None = None,
     ) -> TurnResult:
-        deadline = time.monotonic() + self.settings.timeouts.turn_s
+        deadline = deadline_monotonic
+        if deadline is None:
+            deadline = time.monotonic() + self.settings.timeouts.turn_s
         return run_turn(
             self.client,
             chat_messages,
@@ -417,6 +419,7 @@ class BrainService:
         *,
         user_text: str | None,
         conversation_id: str | None,
+        deadline_monotonic: float | None = None,
     ) -> Iterator[dict[str, Any] | ChatOutcome]:
         """Run turn in a worker thread; yield SSE dicts as they are produced."""
         event_q: queue.Queue[Any] = queue.Queue()
@@ -460,8 +463,13 @@ class BrainService:
                 sentence_idx += 1
 
         def on_assistant_delta(delta: str) -> None:
-            streamed_parts.append(delta)
-            emit_assistant_text(delta)
+            from brain.eli5 import strip_emoji
+
+            cleaned = strip_emoji(delta) if delta else delta
+            if not cleaned:
+                return
+            streamed_parts.append(cleaned)
+            emit_assistant_text(cleaned)
 
         def worker() -> None:
             try:
@@ -471,6 +479,7 @@ class BrainService:
                     on_tool_start=on_tool_start,
                     on_tool_end=on_tool_end,
                     on_assistant_delta=on_assistant_delta,
+                    deadline_monotonic=deadline_monotonic,
                 )
                 outcome = self._outcome_from_turn(
                     result,
@@ -612,20 +621,25 @@ class BrainService:
             yield meta
 
         chat_messages: list[ChatMessage] | None = None
+        turn_deadline: float | None = None
         if persist:
             assert self.db is not None
             assert resolved_id is not None
             assert user_text is not None
             self.db.ensure_conversation(resolved_id)
-            limit = max(0, self.settings.memory.history_pairs) * 2
-            history = self.db.list_recent_messages(resolved_id, limit=limit)
             prefs = self.db.get_preferences()
             system = self._system_prompt_for_turn(prefs)
-            chat_messages = [
-                ChatMessage(role="system", content=system),
-                *[ChatMessage(role=m.role, content=m.content) for m in history],
-                ChatMessage(role="user", content=user_text),
-            ]
+            turn_deadline = time.monotonic() + self.settings.timeouts.turn_s
+            chat_messages = assemble_persist_messages(
+                db=self.db,
+                client=self.client,
+                settings=self.settings,
+                conversation_id=resolved_id,
+                system=system,
+                user_text=user_text,
+                pending_recipes=self.pending_recipes,
+                deadline_monotonic=turn_deadline,
+            )
         else:
             try:
                 chat_messages = build_messages(
@@ -656,6 +670,7 @@ class BrainService:
                 chat_messages,
                 user_text=user_text if persist else None,
                 conversation_id=resolved_id,
+                deadline_monotonic=turn_deadline,
             ):
                 if isinstance(item, ChatOutcome):
                     outcome = item

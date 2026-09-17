@@ -147,7 +147,16 @@ def test_homebase_list_not_money_annotated(tmp_path: Path) -> None:
     server = _make_budget_server()
     with _BridgeRunner(settings, {"budgettracker": server}) as runner:
         registry = runner.registry
-        names = set(registry) - {"get_server_time", "echo", "get_weather", "get_calendar"}
+        names = set(registry) - {
+            "get_server_time",
+            "echo",
+            "get_weather",
+            "get_calendar",
+            "web.fetch",
+            "convert_currency",
+            "wikipedia_lookup",
+            "random_fact",
+        }
         assert "budgettracker.transactions.search" in registry
         assert "budgettracker.summary.by_category" in registry
         tool = registry["budgettracker.transactions.search"]

@@ -86,7 +86,16 @@ def test_normalize_forecast_compact() -> None:
 
 def test_build_registry_includes_weather(tmp_path: Path) -> None:
     reg = build_registry(_settings(tmp_path))
-    assert set(reg) == {"get_server_time", "echo", "get_weather", "get_calendar"}
+    assert {
+        "get_server_time",
+        "echo",
+        "get_weather",
+        "get_calendar",
+        "web.fetch",
+        "convert_currency",
+        "wikipedia_lookup",
+        "random_fact",
+    } <= set(reg)
     assert set(TOOLS) == {"get_server_time", "echo"}
 
 

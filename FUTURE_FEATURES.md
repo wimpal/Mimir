@@ -651,13 +651,13 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
   - RAG over household data/documents?
   - Annual review: what changed this year.
   - Decision logs.
-- **Evidence (partial):** Phase 4 = Conversation history window + allowlisted Preferences — not long-term arbitrary facts, RAG, or forget-by-topic. History compaction is Phase 11.
+- **Evidence (partial):** Phase 4 = Conversation history window + allowlisted Preferences — not long-term arbitrary facts, RAG, or forget-by-topic. History compaction done in T-057 (M5b).
 - **Depends on:** Memory model design; document store (Homebase / files); embeddings policy (Concept: vectors only when stuffing fails — apply same discipline).
 - **Source of truth:** TBD split — brain SQLite for short structured facts; Homebase/Grimoire/docs for documents; embeddings index TBD
 - **API ownership:** Brain tools `remember_fact`, `forget_fact`, `search_household_docs`; document SoT stays external. Forget must be explicit and scoped.
 - **Tools + context:** Fact schema (subject, predicate, timestamp); RAG retrieval caps; annual review = aggregate query; decision log = append-only store TBD.
-- **Open questions:** “Is a proper memory model already on the roadmap?” — Phase 4 memory + Phase 11 history compaction only; full fact/RAG model is backlog here.
-- **ROADMAP overlap:** none (partial: Phase 4 prefs; compaction → Heim **M5b**)
+- **Open questions:** “Is a proper memory model already on the roadmap?” — Phase 4 memory + T-057 compaction; full fact/RAG model is backlog here.
+- **ROADMAP overlap:** none (partial: Phase 4 prefs; compaction → Heim **M5b** / T-057 done)
 - **Sensitivity:** high — selective forget + retention policy required
 
 ### Home network documentation
@@ -676,7 +676,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Wikipedia lookup
 
-- **Status:** in-roadmap
+- **Status:** done
 - **Horizon:** near
 - **Summary:** Look up a topic on Wikipedia.
 - **User stories:**
@@ -684,8 +684,9 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Depends on:** Network; MediaWiki API; optional Grimoire ZIM path for offline (Grimoire has optional Wikipedia ZIM — separate app).
 - **Source of truth:** Wikipedia (online) or local ZIM (if wired later)
 - **API ownership:** Read-only tool in brain; cite title/URL; timeout.
-- **Tools + context:** Proposed: `wikipedia_lookup`; language prefer NL/EN from prefs; no write.
+- **Tools + context:** `wikipedia_lookup` (T-056); language prefer NL/EN from args; no write.
 - **ROADMAP overlap:** Heim **M5b**
+- **Evidence:** MediaWiki API; suite `lookup_wiki_1` / `lookup_wiki_2`; no ZIM.
 
 ### Web search
 
@@ -717,7 +718,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Random facts
 
-- **Status:** in-roadmap
+- **Status:** done
 - **Horizon:** near
 - **Summary:** Occasional random fact on request (or tightly gated ambient use).
 - **User stories:**
@@ -725,8 +726,9 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 - **Depends on:** Fact source TBD (local list vs Wikipedia).
 - **Source of truth:** Local curated list preferred for offline; else Wikipedia tool
 - **API ownership:** Brain serves local list; no external SoT required for v0.
-- **Tools + context:** Proposed: `random_fact` or prompt-only with curated file.
+- **Tools + context:** `random_fact` (T-056) with `config/random_facts.json`.
 - **ROADMAP overlap:** Heim **M5b**
+- **Evidence:** Local bilingual list; suite `lookup_fact_1` / `lookup_fact_2`; offline by design.
 
 ### Reading list / bookmark capture
 
@@ -925,16 +927,17 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Conversation summarisation
 
-- **Status:** in-roadmap
+- **Status:** done (T-057)
 - **Horizon:** mid
 - **Summary:** Summarise long conversations to avoid context clutter.
 - **User stories:**
   - Conversation summarisation — avoid context clutter on longer conversation.
 - **Depends on:** History window limits (`memory.history_pairs`, `num_ctx`).
-- **Source of truth:** Brain SQLite Messages; summary artifact TBD in SQLite
-- **API ownership:** Brain compaction job/tool; Messages remain canonical.
-- **Tools + context:** Per Phase 11 history compaction; prompt: summary injection replaces oldest pairs.
-- **ROADMAP overlap:** Heim **M5b**
+- **Source of truth:** Brain SQLite Messages; rolling `conversation_compactions` summary (schema v5)
+- **API ownership:** Brain compaction on persist turns; Messages remain canonical.
+- **Tools + context:** Prompt injects summary note + recent verbatim pairs; batch-triggered Ollama summarize; recipe confirm bypass.
+- **ROADMAP overlap:** Heim **M5b** / **T-057**
+- **Evidence:** `brain/compaction.py`, `docs/phase4-memory.md`, `tests/test_compaction.py`
 
 ---
 
@@ -1032,16 +1035,17 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Currency conversion
 
-- **Status:** in-roadmap
+- **Status:** done
 - **Horizon:** near
 - **Summary:** Convert between currencies.
 - **User stories:**
   - Currency conversion.
 - **Depends on:** Network rates API or ECB feed; offline fallback TBD.
-- **Source of truth:** Rates provider (TBD)
+- **Source of truth:** Frankfurter (ECB rates); optional `CURRENCY_RATES_BASE_URL`
 - **API ownership:** Read-only tool; display EUR with `nl-NL` awareness (BudgetTracker convention) when relevant.
-- **Tools + context:** Proposed: `convert_currency`; timeout; show rate date.
+- **Tools + context:** `convert_currency` (T-056); timeout; show rate date; never BudgetTracker write.
 - **ROADMAP overlap:** Heim **M5b**
+- **Evidence:** Frankfurter; suite `lookup_currency_1` / `lookup_currency_2`.
 
 ---
 

@@ -67,15 +67,19 @@ def apply_eli5_system_append(messages: list[ChatMessage]) -> None:
     )
 
 
-def sanitize_eli5_reply(text: str) -> str:
-    """Strip emoji / decorative fluff the model still emits despite the prompt."""
+def strip_emoji(text: str) -> str:
+    """Remove emoji / decorative symbols; keep surrounding whitespace."""
     if not text:
         return text
     cleaned = _EMOJI_RE.sub("", text)
-    # Collapse spaces left by removals; keep newlines.
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return cleaned.strip()
+    return cleaned
+
+
+def sanitize_eli5_reply(text: str) -> str:
+    """Strip emoji / decorative fluff the model still emits despite the prompt."""
+    return strip_emoji(text).strip()
 
 
 def latest_user_text(messages: list[_MessageLike]) -> str:

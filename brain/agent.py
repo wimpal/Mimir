@@ -109,6 +109,7 @@ from brain.repeat_last import (
 )
 from brain.shopping_list import filter_shopping_list_tool_result
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
+from brain.tool_gate import should_offer_tools
 from brain.turn_fixup import (
     can_tool_backed_weather_shopping_reply,
     fix_lights_locale_reply,
@@ -136,6 +137,9 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "get_calendar",
         "get_server_time",
         "echo",
+        "convert_currency",
+        "wikipedia_lookup",
+        "random_fact",
         "homebase.recipes.search",
         "homebase.recipes.get",
         "homebase.inventory.list",
@@ -645,6 +649,8 @@ def run_turn(
     steps: list[StepTrace] = []
     last_content = ""
     user_message = _latest_user_message(working)
+    if not should_offer_tools(user_message):
+        schemas = []
     write_tool_called_this_turn = False
     recipe_staged_this_turn = False
     recipe_gate_handled_this_turn = False
@@ -1692,11 +1698,7 @@ def run_turn(
             working.append(
                 ChatMessage(
                     role="assistant",
-                    content=(
-                        sanitize_eli5_reply(msg.content or "")
-                        if eli5_turn
-                        else (msg.content or "")
-                    ),
+                    content=sanitize_eli5_reply(msg.content or ""),
                 )
             )
             final_content = working[-1].content

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 RECENT_WATCHED_CAP = 50
 BOX_SET_HEAD_CAP = 3
@@ -83,6 +83,26 @@ class StoredMessage:
     role: str
     content: str
     created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class StoredMessageWithId:
+    """Internal snapshot for compaction — includes messages.id."""
+
+    id: int
+    role: str
+    content: str
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ConversationCompaction:
+    """Rolling summary of aged-out turns for one conversation."""
+
+    conversation_id: str
+    summary_text: str
+    covered_through_message_id: int
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -353,6 +373,159 @@ class Database:
             )
             for r in rows
         ]
+
+    def list_messages_with_ids(
+        self, conversation_id: str
+    ) -> list[StoredMessageWithId]:
+        """All messages with row ids, chronological — compaction snapshots only."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, created_at FROM messages
+                WHERE conversation_id = ?
+                ORDER BY id ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return [
+            StoredMessageWithId(
+                id=int(r["id"]),
+                role=r["role"],
+                content=r["content"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
+    def get_compaction(
+        self, conversation_id: str
+    ) -> ConversationCompaction | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT conversation_id, summary_text, covered_through_message_id,
+                       updated_at
+                FROM conversation_compactions
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ConversationCompaction(
+            conversation_id=row["conversation_id"],
+            summary_text=row["summary_text"],
+            covered_through_message_id=int(row["covered_through_message_id"]),
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_compaction(
+        self,
+        conversation_id: str,
+        *,
+        summary_text: str,
+        covered_through_message_id: int,
+        expected_covered_through: int | None = None,
+    ) -> bool:
+        """Upsert compaction row. Returns False if compare-and-swap rejected.
+
+        ``expected_covered_through``:
+        - ``None`` — best-effort write (never regress covered_through)
+        - ``-1`` — insert only when no row exists
+        - ``N >= 0`` — update only when current covered_through equals N
+        """
+        now = _utc_now()
+        with self._connect() as conn:
+            if expected_covered_through is None:
+                existing = conn.execute(
+                    """
+                    SELECT covered_through_message_id FROM conversation_compactions
+                    WHERE conversation_id = ?
+                    """,
+                    (conversation_id,),
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO conversation_compactions (
+                            conversation_id, summary_text,
+                            covered_through_message_id, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            conversation_id,
+                            summary_text,
+                            covered_through_message_id,
+                            now,
+                        ),
+                    )
+                else:
+                    if covered_through_message_id < int(
+                        existing["covered_through_message_id"]
+                    ):
+                        return False
+                    conn.execute(
+                        """
+                        UPDATE conversation_compactions
+                        SET summary_text = ?,
+                            covered_through_message_id = ?,
+                            updated_at = ?
+                        WHERE conversation_id = ?
+                        """,
+                        (
+                            summary_text,
+                            covered_through_message_id,
+                            now,
+                            conversation_id,
+                        ),
+                    )
+                conn.commit()
+                return True
+
+            if expected_covered_through < 0:
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO conversation_compactions (
+                            conversation_id, summary_text,
+                            covered_through_message_id, updated_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            conversation_id,
+                            summary_text,
+                            covered_through_message_id,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    return False
+                conn.commit()
+                return True
+
+            cur = conn.execute(
+                """
+                UPDATE conversation_compactions
+                SET summary_text = ?,
+                    covered_through_message_id = ?,
+                    updated_at = ?
+                WHERE conversation_id = ?
+                  AND covered_through_message_id = ?
+                  AND ? >= covered_through_message_id
+                """,
+                (
+                    summary_text,
+                    covered_through_message_id,
+                    now,
+                    conversation_id,
+                    expected_covered_through,
+                    covered_through_message_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                return False
+            conn.commit()
+            return True
 
     def list_conversations(
         self, *, limit: int = CONVERSATIONS_LIST_DEFAULT
@@ -851,9 +1024,24 @@ def _migrate_3_to_4(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE movies ADD COLUMN box_set_ids_json TEXT")
 
 
+def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_compactions (
+            conversation_id TEXT PRIMARY KEY
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            summary_text TEXT NOT NULL,
+            covered_through_message_id INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     0: _migrate_0_to_1,
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
     3: _migrate_3_to_4,
+    4: _migrate_4_to_5,
 }

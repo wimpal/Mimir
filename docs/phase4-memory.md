@@ -17,15 +17,18 @@ Persisted **Messages** = user text + final assistant reply (including user-facin
 
 **History window:** last `memory.history_pairs` (default **20**) user+assistant pairs from SQLite; full history retained.
 
+**Compaction (T-057 / schema v5):** when enough pairs age out of that window (`memory.compaction_batch_pairs`, default 8), the brain folds them into a rolling `conversation_compactions` summary via a bounded Ollama call (no tools). Persist-path prompts inject: system → optional untrusted summary note → verbatim tail → current user. Mid-recipe confirm / soft follow-up / bare ja|nee bypasses summarization and char-budget shrink. Stateless `messages`-only and OpenAI-compat paths do not compact. Messages remain canonical (never deleted).
+
 **Preferences:** allowlist `favorite_genres`, `tone`. Tools `get_preference` / `set_preference`; HTTP `GET/PUT /v1/preferences` (TUI `/settings`, Phase 8c — see [`phase8c-settings.md`](./phase8c-settings.md)); inject a “Known preferences” block into the system prompt; refresh mid-turn after a successful set.
 
 ## Schema
 
-`schema_version` → **1** via hand-rolled migration from 0:
+`schema_version` → **5** (v1 conversations/messages/prefs; v2–4 Jellyfin/movies; **v5** `conversation_compactions`):
 
 - `conversations` — id, timestamps
 - `messages` — conversation_id FK, role, content, created_at
 - `preferences` — key/value
+- `conversation_compactions` — per-conversation rolling summary + `covered_through_message_id`
 
 ## Wiring
 
@@ -33,7 +36,8 @@ Persisted **Messages** = user text + final assistant reply (including user-facin
 - `brain/prefs.py` — allowlist, normalize, format inject
 - `brain/tools/preferences.py` — get/set tools
 - `brain/service.py` — persist vs stateless branches; `after_tool` prefs refresh
-- `memory.history_pairs` in config (+ `MIMIR_HISTORY_PAIRS`)
+- `brain/compaction.py` — rolling summary + verbatim assembly (T-057)
+- `memory.history_pairs` / `memory.compaction_*` in config (+ `MIMIR_HISTORY_PAIRS`, `MIMIR_COMPACTION_*`)
 
 ## Exit checks
 

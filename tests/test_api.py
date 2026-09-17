@@ -605,7 +605,7 @@ def test_db_schema_version(tmp_path: Path) -> None:
     db = Database(tmp_path / "mimir.db")
     assert db.ping() is True
     assert db.schema_version() == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
 
 
 def test_load_system_prompt(tmp_path: Path) -> None:

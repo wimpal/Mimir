@@ -61,6 +61,10 @@ weather:
   # Forecast cache TTL (seconds). Serve last success marked stale when API fails.
   cache_ttl_s: 3600
 
+currency:
+  # Frankfurter (ECB rates). No API key. Override via CURRENCY_RATES_BASE_URL.
+  rates_base_url: https://api.frankfurter.dev/v1
+
 calendar:
   # Named feeds (id + display name). Optional context: short note for the LLM
   # about what the calendar is (work vs family, whose it is, etc.).
@@ -82,6 +86,12 @@ calendar:
 memory:
   # Last N user+assistant pairs injected from SQLite (full history retained).
   history_pairs: 20
+  # T-057: summarize aged-out turns into a rolling SQLite summary (persist path only).
+  compaction_enabled: true
+  compaction_batch_pairs: 8
+  compaction_max_summary_chars: 3000
+  compaction_timeout_s: 20
+  compaction_min_verbatim_pairs: 4
 
 # Brain-side STT/TTS (M5 — ADR-008/009). Voice files live under runtime.data_dir/voices/.
 # Requires ffmpeg on PATH. Run scripts/download_voice_models.ps1 once.

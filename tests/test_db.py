@@ -12,7 +12,7 @@ from brain.db import SCHEMA_VERSION, Database, Movie
 def test_fresh_db_migrates_to_current(tmp_path: Path) -> None:
     db = Database(tmp_path / "mimir.db")
     assert db.schema_version() == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     db.ensure_conversation("probe")
     db.append_message("probe", "user", "x")
     db.set_preference("tone", "dry")
@@ -29,7 +29,7 @@ def test_v0_db_migrates_on_open(tmp_path: Path) -> None:
         conn.commit()
 
     db = Database(path)
-    assert db.schema_version() == 4
+    assert db.schema_version() == 5
     db.ensure_conversation("c1")
     db.append_message("c1", "user", "hi")
     assert db.message_count("c1") == 1
@@ -73,7 +73,7 @@ def test_v1_db_migrates_to_v2(tmp_path: Path) -> None:
         conn.commit()
 
     db = Database(path)
-    assert db.schema_version() == 4
+    assert db.schema_version() == 5
     state = db.get_sync_state()
     assert state.active_generation is None
     assert state.in_progress is False
@@ -247,7 +247,7 @@ def test_v2_db_migrates_to_v3_last_played_at(tmp_path: Path) -> None:
         conn.commit()
 
     db = Database(path)
-    assert db.schema_version() == 4
+    assert db.schema_version() == 5
     db.seed_catalogue_for_tests(
         [
             Movie(
@@ -321,7 +321,7 @@ def test_v3_db_migrates_to_v4_box_sets(tmp_path: Path) -> None:
     from brain.db import BoxSetRef
 
     db = Database(path)
-    assert db.schema_version() == 4
+    assert db.schema_version() == 5
     db.seed_catalogue_for_tests(
         [
             Movie(

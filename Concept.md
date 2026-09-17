@@ -122,10 +122,10 @@ optional tool logs.
 
 | Topic | v1 policy |
 |---|---|
-| Migrations | Hand-rolled versioned SQL (`schema_version`); Catalogue Box sets at version 4 — no Alembic unless pain forces it |
+| Migrations | Hand-rolled versioned SQL (`schema_version`); Catalogue Box sets at version 4; conversation compaction at version 5 — no Alembic unless pain forces it |
 | Backup | Copy/stop-and-copy `data_dir` (SQLite + logs + cache); see [`docs/ops-backup.md`](./docs/ops-backup.md) |
 | Retention | Keep full history for single-user v1; no auto-prune unless disk hurts |
-| Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`. Token-budget window and summarization/compaction are backlog until long threads actually break |
+| Context injection | Last N Message pairs (`memory.history_pairs`, default 20) under `num_ctx`, plus optional rolling summary of aged-out turns (T-057 / `conversation_compactions`). Stateless OpenAI-compat path stays client `messages` only |
 | Chat memory path | Mimir `/v1/chat` owns SQLite Conversations; OpenAI-compat stays client `messages` only until Assist needs shared threads (ADR 0001) |
 | Preferences | Allowlisted keys via tools + client `/settings` + system-prompt inject; HTTP `GET/PUT /v1/preferences`; Jellyfin watch/likes are media state, not Preference rows |
 

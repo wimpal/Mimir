@@ -523,7 +523,7 @@ Brain tool posts a message to Discord. **Not** a Chat client front door (ADR 000
 5. **Proactive notifications** — worker watches Jellyfin “new episode”; notify via HA (or Discord send)
 6. **Play music** — Jellyfin playback / HA media player tool
 7. **Vector search for catalogue** — only if Phase 5 quality plateaus
-8. **History compaction / summarization** — when last-N under `num_ctx` is not enough
+8. **History compaction / summarization** — **done (T-057 / M5b)**; deepen if daily-driver threads still blow `num_ctx`
 9. **Voice ID / multi-user** — only if multi-profile was deferred and becomes painful
 10. **Buienradar / Buienalarm rain nowcast** — 5-minute precip if Open-Meteo hourly is not enough
 11. **Remote access docs** — Tailscale/WireGuard only; no port-forward recipe as default (deferred from Phase 7)

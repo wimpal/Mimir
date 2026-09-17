@@ -92,8 +92,11 @@ GET_SERVER_TIME = Tool(
 ECHO = Tool(
     name="echo",
     description=(
-        "Return the given text unchanged. Use when the user asks to echo, repeat, "
-        "or mirror a specific string."
+        "Return the given text unchanged. Use only when the user explicitly "
+        "asks to echo/mirror a string they provide in the same message "
+        "(e.g. 'echo ping', 'herhaal dit woord: X'). "
+        "Do not use for recalling earlier conversation facts, listing what "
+        "was said before, or 'herhaal de feiten' / 'repeat the facts'."
     ),
     parameters={
         "type": "object",
@@ -122,16 +125,21 @@ def build_registry(
     db: Database | None = None,
     weather_fetch_override: Callable[[], str] | None = None,
     calendar_fetch_override: Callable[[], str] | None = None,
+    currency_fetch_override: Callable[[], str] | None = None,
+    wikipedia_fetch_override: Callable[[], str] | None = None,
     data_dir: Path | None = None,
     mcp: Any | None = None,
 ) -> dict[str, Tool]:
-    """Dummy tools + weather + calendar + optional preference / recommend / MCP tools."""
+    """Dummy tools + weather + calendar + lookups + optional preference / recommend / MCP tools."""
     from brain.tools.calendar import calendar_tools
+    from brain.tools.currency import currency_tools
     from brain.tools.preferences import preference_tools
+    from brain.tools.random_fact import random_fact_tools
     from brain.tools.recently_watched import recently_watched_tools
     from brain.tools.recommend import recommend_tools
     from brain.tools.weather import weather_tools
     from brain.tools.web_fetch import web_fetch_tools
+    from brain.tools.wikipedia import wikipedia_tools
 
     resolved_data = data_dir if data_dir is not None else Path(settings.runtime.data_dir)
 
@@ -148,6 +156,9 @@ def build_registry(
             data_dir=resolved_data,
         ),
         **web_fetch_tools(settings),
+        **currency_tools(settings, fetch_override=currency_fetch_override),
+        **wikipedia_tools(settings, fetch_override=wikipedia_fetch_override),
+        **random_fact_tools(settings),
     }
     if db is not None:
         registry.update(preference_tools(db))

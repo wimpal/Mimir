@@ -153,6 +153,12 @@ class WeatherSettings(_Strict):
     cache_ttl_s: float = 3600.0  # Forecast cache TTL when Open-Meteo fails
 
 
+class CurrencySettings(_Strict):
+    """FX rates provider (Frankfurter / ECB). No API key required."""
+
+    rates_base_url: str = "https://api.frankfurter.dev/v1"
+
+
 class CalendarFeedSettings(_Strict):
     """One named Calendar feed. URL/auth secrets come from env (see load_config)."""
 
@@ -283,6 +289,11 @@ def calendar_feeds_declared(settings: CalendarSettings) -> list[CalendarFeedSett
 
 class MemorySettings(_Strict):
     history_pairs: int = 20  # last N user+assistant pairs injected under num_ctx
+    compaction_enabled: bool = True
+    compaction_batch_pairs: int = 8  # min new aged-out pairs before re-summarize
+    compaction_max_summary_chars: int = 3000
+    compaction_timeout_s: float = 20.0
+    compaction_min_verbatim_pairs: int = 4  # floor when char-budget shrinks tail
 
 
 class McpServiceSettings(_Strict):
@@ -328,6 +339,7 @@ class Settings(_Strict):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
     weather: WeatherSettings = Field(default_factory=WeatherSettings)
+    currency: CurrencySettings = Field(default_factory=CurrencySettings)
     calendar: CalendarSettings = Field(default_factory=CalendarSettings)
     memory: MemorySettings = Field(default_factory=MemorySettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
@@ -436,8 +448,14 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("timeouts", "stt_s"): "MIMIR_TIMEOUT_STT_S",
     ("timeouts", "tts_s"): "MIMIR_TIMEOUT_TTS_S",
     ("weather", "cache_ttl_s"): "MIMIR_WEATHER_CACHE_TTL_S",
+    ("currency", "rates_base_url"): "CURRENCY_RATES_BASE_URL",
     ("calendar", "cache_ttl_s"): "MIMIR_CALENDAR_CACHE_TTL_S",
     ("memory", "history_pairs"): "MIMIR_HISTORY_PAIRS",
+    ("memory", "compaction_enabled"): "MIMIR_COMPACTION_ENABLED",
+    ("memory", "compaction_batch_pairs"): "MIMIR_COMPACTION_BATCH_PAIRS",
+    ("memory", "compaction_max_summary_chars"): "MIMIR_COMPACTION_MAX_SUMMARY_CHARS",
+    ("memory", "compaction_timeout_s"): "MIMIR_COMPACTION_TIMEOUT_S",
+    ("memory", "compaction_min_verbatim_pairs"): "MIMIR_COMPACTION_MIN_VERBATIM_PAIRS",
     ("voice", "enabled"): "MIMIR_VOICE_ENABLED",
     ("voice", "warm_on_start"): "MIMIR_VOICE_WARM_ON_START",
 }
