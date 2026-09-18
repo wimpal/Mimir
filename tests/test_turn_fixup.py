@@ -194,6 +194,78 @@ def test_agent_forces_dutch_light_reply_before_english_stream() -> None:
     assert any("staat nu uit" in d for d in deltas)
 
 
+def test_agent_forces_english_light_reply_after_dutch_history() -> None:
+    """English toggle must not keep a Dutch confirmation from conversation bias."""
+    from brain.agent import StoppedReason, run_turn
+    from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
+    from brain.tools import Tool
+
+    class Scripted:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None, *, think=False, stream=False):
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResponse(
+                    message=ChatMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[
+                            ToolCall(
+                                function=ToolCallFunction(
+                                    name="homebase.lights.set_state",
+                                    arguments={"device_id": "Ballon", "on": True},
+                                )
+                            )
+                        ],
+                    )
+                )
+            return ChatResponse(
+                message=ChatMessage(
+                    role="assistant",
+                    content="De lamp Ballon in het kantoor is nu aangesloten en staat aan.",
+                )
+            )
+
+    def set_execute(**kwargs: object) -> str:
+        return (
+            'Note: ok\n'
+            '{"success": true, "device_id": "x", "on": true, '
+            '"name": "Ballon", "room": "Kantoor"}'
+        )
+
+    registry = {
+        "homebase.lights.set_state": Tool(
+            name="homebase.lights.set_state",
+            description="set",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string"},
+                    "on": {"type": "boolean"},
+                },
+            },
+            execute=set_execute,
+            service="homebase",
+        ),
+    }
+    client = Scripted()
+    deltas: list[str] = []
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="turn on the office lights")],
+        tools=registry,
+        on_assistant_delta=deltas.append,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "now on" in (result.content or "").lower()
+    assert "Ballon" in (result.content or "")
+    assert "aangesloten" not in (result.content or "").lower()
+    assert client.calls == 1
+    assert any("now on" in d.lower() for d in deltas)
+
+
 def test_user_asked_weather_and_shopping() -> None:
     assert user_asked_about_weather(USER_NL_COMPOUND)
     assert user_asked_about_shopping_list(USER_NL_COMPOUND)

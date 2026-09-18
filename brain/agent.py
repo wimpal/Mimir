@@ -120,6 +120,12 @@ from brain.turn_fixup import (
     user_asked_about_weather,
     user_message_locale,
 )
+from brain.usage_reply import (
+    format_usage_stats_reply,
+    needs_usage_stats_fixup,
+    parse_usage_payload,
+    user_asked_about_usage,
+)
 
 
 def _turn_requests_light_toggle(user_message: str) -> bool:
@@ -140,6 +146,7 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "convert_currency",
         "wikipedia_lookup",
         "random_fact",
+        "usage_stats",
         "homebase.recipes.search",
         "homebase.recipes.get",
         "homebase.inventory.list",
@@ -663,6 +670,7 @@ def run_turn(
     shopping_list_fetched_this_turn = False
     shopping_list_items_this_turn: list[dict[str, Any]] = []
     lights_set_state_facts_this_turn: dict[str, Any] | None = None
+    usage_stats_payload_this_turn: dict[str, Any] | None = None
     tools_used_this_turn: list[str] = []
     weather_force_used = False
     recipe_save_turn = user_message_requests_recipe_save(user_message)
@@ -1450,6 +1458,28 @@ def run_turn(
                         stopped_reason=StoppedReason.FINAL,
                     )
             reply_text = msg.content or ""
+            # T-058: model pasted usage_stats JSON (or empty) — rewrite from payload.
+            if needs_usage_stats_fixup(reply_text, usage_stats_payload_this_turn):
+                assert usage_stats_payload_this_turn is not None
+                locale = user_message_locale(user_message)
+                fixed = format_usage_stats_reply(
+                    usage_stats_payload_this_turn, locale
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="usage_stats_fixup",
+                        content_preview=fixed[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=fixed))
+                return TurnResult(
+                    content=fixed,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             # Weather asked but never fetched successfully — force get_weather once
             # (covers day_offset tool_error + "one moment please" filler with no tools).
             if (
@@ -2017,6 +2047,10 @@ def run_turn(
                         weather_payload_this_turn = wx_data
                 except (json.JSONDecodeError, TypeError):
                     pass
+            if dispatch_name == "usage_stats" and not tool_result_is_error(result):
+                parsed_usage = parse_usage_payload(result)
+                if parsed_usage is not None:
+                    usage_stats_payload_this_turn = parsed_usage
             if (
                 dispatch_name == "homebase.shopping_list.list"
                 and not tool_result_is_error(result)
@@ -2100,15 +2134,44 @@ def run_turn(
                 error="turn budget exceeded",
             )
 
-        # Dutch light toggle: skip another Ollama pass (it streams English after EN
-        # history; mobile TTS would speak English with the Dutch Piper voice).
+        # T-058: speak usage numbers; never let Qwen dump tool JSON (or stream it twice).
         if (
-            lights_set_state_facts_this_turn is not None
-            and user_message_locale(user_message) == "nl"
+            usage_stats_payload_this_turn is not None
+            and user_asked_about_usage(user_message)
             and anomaly is None
             and not dispatch_failed
         ):
-            fixed = format_lights_toggle_reply(lights_set_state_facts_this_turn, "nl")
+            locale = user_message_locale(user_message)
+            fixed = format_usage_stats_reply(usage_stats_payload_this_turn, locale)
+            if on_assistant_delta is not None:
+                on_assistant_delta(fixed)
+            working.append(ChatMessage(role="assistant", content=fixed))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="usage_stats_forced",
+                    content_preview=fixed[:120],
+                )
+            )
+            return TurnResult(
+                content=fixed,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
+        # Light toggle: skip another Ollama pass. After EN↔NL history the model
+        # often streams the wrong language (T-051: EN text + Dutch Piper; reverse:
+        # Dutch text after an English command). Spoken one-liner matches user locale.
+        if (
+            lights_set_state_facts_this_turn is not None
+            and anomaly is None
+            and not dispatch_failed
+        ):
+            locale = user_message_locale(user_message)
+            fixed = format_lights_toggle_reply(lights_set_state_facts_this_turn, locale)
             if on_assistant_delta is not None:
                 on_assistant_delta(fixed)
             working.append(ChatMessage(role="assistant", content=fixed))

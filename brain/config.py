@@ -96,6 +96,8 @@ class RuntimeSettings(_Strict):
 class AgentSettings(_Strict):
     max_iterations: int = 3
     system_prompt_path: Path = Path("config/system_prompt.md")
+    # Mimir's own birthday (T-058). ISO date; matched annually by month-day.
+    birthday: str = "2026-08-26"
 
 
 class TimeoutSettings(_Strict):
@@ -114,7 +116,7 @@ class VoiceSttSettings(_Strict):
     model: str = "small"
     device: Literal["cpu", "cuda"] = "cpu"
     compute_type: str = "int8"
-    language_hint: Literal["nl", "en"] | None = "nl"
+    language_hint: Literal["nl", "en"] | None = None
     cpu_threads: int | None = None
 
 

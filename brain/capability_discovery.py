@@ -45,6 +45,7 @@ _LOCAL_CLUSTER: dict[str, str] = {
     "convert_currency": "local.currency",
     "wikipedia_lookup": "local.wikipedia",
     "random_fact": "local.facts",
+    "usage_stats": "local.usage",
 }
 
 # Cluster id → (label_en, label_nl) derived from name prefixes, not descriptions.
@@ -55,6 +56,7 @@ _CLUSTER_LABELS: dict[str, tuple[str, str]] = {
     "local.currency": ("currency conversion", "valuta"),
     "local.wikipedia": ("Wikipedia", "Wikipedia"),
     "local.facts": ("random facts", "weetjes"),
+    "local.usage": ("usage stats", "gebruiksstatistieken"),
     "homebase.shopping_list": ("shopping lists", "boodschappenlijsten"),
     "homebase.inventory": ("inventory", "voorraad"),
     "homebase.recipes": ("recipes", "recepten"),

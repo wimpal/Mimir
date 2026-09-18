@@ -137,6 +137,7 @@ def build_registry(
     from brain.tools.random_fact import random_fact_tools
     from brain.tools.recently_watched import recently_watched_tools
     from brain.tools.recommend import recommend_tools
+    from brain.tools.usage_stats import usage_stats_tools
     from brain.tools.weather import weather_tools
     from brain.tools.web_fetch import web_fetch_tools
     from brain.tools.wikipedia import wikipedia_tools
@@ -159,6 +160,7 @@ def build_registry(
         **currency_tools(settings, fetch_override=currency_fetch_override),
         **wikipedia_tools(settings, fetch_override=wikipedia_fetch_override),
         **random_fact_tools(settings),
+        **usage_stats_tools(settings, data_dir=resolved_data),
     }
     if db is not None:
         registry.update(preference_tools(db))

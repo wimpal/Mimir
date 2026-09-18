@@ -15,6 +15,7 @@ _TOOLISH = re.compile(
     r"jellyfin|film|movie|serie|kijk|"
     r"budget|euro|uitgave|expense|transact|"
     r"wikipedia|weetje|random.?fact|valuta|currency|dollar|yen|"
+    r"busy|druk|usage|stats|hoe druk|"
     r"voorkeur|preference|genre|tone|"
     r"wat kun je|what can you|capabilities|uitleg jezelf|explain yourself"
     r")\b"

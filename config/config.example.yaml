@@ -40,6 +40,8 @@ auth:
 agent:
   max_iterations: 3
   system_prompt_path: config/system_prompt.md
+  # Mimir's birthday (T-058); acknowledged on that month-day in local TZ.
+  birthday: "2026-08-26"
 
 timeouts:
   ollama_s: 120
@@ -102,7 +104,9 @@ voice:
     model: small
     device: cpu
     compute_type: int8
-    language_hint: nl
+    # null = auto-detect per utterance; nl/en = hard-lock Whisper language.
+    # Env override: MIMIR_VOICE_STT_LANGUAGE_HINT (unset for auto-detect).
+    language_hint: null
     cpu_threads: null
   tts:
     default_locale: nl

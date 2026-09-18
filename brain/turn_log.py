@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,9 +24,126 @@ _SUMMARY_KEYS = (
     "tools_used",
 )
 
+# Light milestone thresholds (turn_count). Congrats only when these appear in
+# usage_stats output — never invent streaks.
+TURN_MILESTONES: tuple[int, ...] = (100, 500, 1000)
+TOP_TOOLS_CAP = 5
+
 
 def turns_log_path(data_dir: Path) -> Path:
     return data_dir / "logs" / "turns.jsonl"
+
+
+def _parse_ts(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _iter_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            out.append(record)
+    return out
+
+
+def aggregate_usage(
+    path: Path,
+    *,
+    days: int | None = None,
+    now: datetime | None = None,
+    top_n: int = TOP_TOOLS_CAP,
+) -> dict[str, Any]:
+    """Aggregate turn/tool counters from turns.jsonl.
+
+    ``tool_call_count`` sums per-turn ``tools_used`` lengths (one entry per
+    tool invocation name in that turn). Missing/empty file → zeros.
+    """
+    clock = now if now is not None else datetime.now(UTC)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=UTC)
+
+    since: datetime | None = None
+    window: dict[str, Any] = {"kind": "all"}
+    if days is not None and days > 0:
+        since = clock - timedelta(days=days)
+        window = {"kind": "days", "days": days, "since": since.isoformat()}
+
+    turn_count = 0
+    success_count = 0
+    failed_count = 0
+    tool_call_count = 0
+    tool_counter: Counter[str] = Counter()
+
+    for record in _iter_jsonl_records(path):
+        if since is not None:
+            ts = _parse_ts(record.get("ts"))
+            if ts is None or ts < since:
+                continue
+        turn_count += 1
+        if record.get("success") is True:
+            success_count += 1
+        else:
+            failed_count += 1
+        used = record.get("tools_used")
+        if isinstance(used, list):
+            names = [n for n in used if isinstance(n, str) and n]
+            tool_call_count += len(names)
+            tool_counter.update(names)
+
+    top_tools = [
+        {"name": name, "count": count}
+        for name, count in tool_counter.most_common(max(0, top_n))
+    ]
+    milestones = [
+        f"{n}_turns" for n in TURN_MILESTONES if turn_count >= n
+    ]
+    return {
+        "turn_count": turn_count,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "tool_call_count": tool_call_count,
+        "top_tools": top_tools,
+        "window": window,
+        "milestones_reached": milestones,
+    }
+
+
+def count_voice_stt(path: Path, *, since: datetime | None = None) -> int:
+    """Count voice.jsonl rows with ``op == \"stt\"`` (optional since filter)."""
+    count = 0
+    for record in _iter_jsonl_records(path):
+        if record.get("op") != "stt":
+            continue
+        if since is not None:
+            ts = _parse_ts(record.get("ts"))
+            if ts is None or ts < since:
+                continue
+        count += 1
+    return count
 
 
 def _step_latency_rollups(steps: list[dict[str, Any]]) -> dict[str, Any]:

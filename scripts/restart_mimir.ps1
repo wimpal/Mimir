@@ -157,7 +157,8 @@ function Test-BrainHealth {
 
 function Start-Brain {
   param([string]$BrainUrl, [int]$TimeoutSec = 60)
-  if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
+  $uv = Get-Command uv -ErrorAction SilentlyContinue
+  if (-not $uv) {
     throw "Could not find uv on PATH. Install uv or start the brain manually."
   }
 
@@ -167,19 +168,60 @@ function Start-Brain {
   Add-Content -Path $logPath -Value "`n--- restart_mimir ensure_brain_running url=$BrainUrl ---"
 
   Write-Host "Starting brain via ensure_brain_cli (bind from config/config.yaml runtime.host)..."
-  $cliLog = Join-Path $logDir "brain_restart_cli.log"
-  $cliErrLog = Join-Path $logDir "brain_restart_cli.err.log"
+  # Unique redirect files per run - Start-Process opens these exclusively.
+  $runId = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+  $cliLog = Join-Path $logDir "brain_restart_cli_$runId.log"
+  $cliErrLog = Join-Path $logDir "brain_restart_cli_$runId.err.log"
 
-  & uv run python scripts/ensure_brain_cli.py --url $BrainUrl --ready-timeout $TimeoutSec `
-    1> $cliLog 2> $cliErrLog
-  if ($LASTEXITCODE -ne 0) {
-    throw "ensure_brain_cli exited $LASTEXITCODE. See data/logs/brain_launch.log"
+  # Do NOT call "& uv run ..." synchronously: on Windows the nested uvicorn can
+  # inherit redirected stdout and keep this PowerShell blocked forever (blank
+  # terminal after "Starting brain..."). Same pattern as start_brain_at_login.ps1.
+  $proc = Start-Process -FilePath $uv.Source `
+    -ArgumentList @(
+      "run", "python", "scripts/ensure_brain_cli.py",
+      "--url", $BrainUrl,
+      "--ready-timeout", "$TimeoutSec"
+    ) `
+    -WorkingDirectory $RepoRoot `
+    -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $cliLog `
+    -RedirectStandardError $cliErrLog
+
+  $deadline = (Get-Date).AddSeconds([Math]::Max(30, $TimeoutSec + 15))
+  while ((Get-Date) -lt $deadline) {
+    if (Test-BrainHealth $BrainUrl) {
+      break
+    }
+    if ($proc.HasExited -and -not (Test-BrainHealth $BrainUrl)) {
+      break
+    }
+    Start-Sleep -Milliseconds 500
   }
 
-  if (-not (Test-BrainHealth $BrainUrl)) {
-    throw "Brain not healthy at $BrainUrl after start. See data/logs/brain_launch.log"
+  if (Test-Path $cliLog) {
+    Get-Content $cliLog -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($_.Trim()) { Write-Host "ensure_brain_cli: $_" }
+    }
   }
-  Write-Host "Brain ready ($BrainUrl)."
+  if (Test-Path $cliErrLog) {
+    Get-Content $cliErrLog -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($_.Trim()) { Write-Host "ensure_brain_cli stderr: $_" }
+    }
+  }
+
+  if (Test-BrainHealth $BrainUrl) {
+    if (-not $proc.HasExited) {
+      Write-Host "Brain healthy - stopping ensure_brain_cli wrapper (pid $($proc.Id))."
+      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "Brain ready ($BrainUrl)."
+    return
+  }
+
+  if ($proc.HasExited -and $proc.ExitCode -ne 0) {
+    throw "ensure_brain_cli exited $($proc.ExitCode). See data/logs/brain_launch.log"
+  }
+  throw "Brain not healthy at $BrainUrl after start. See data/logs/brain_launch.log"
 }
 
 function Build-MimirExe {

@@ -126,17 +126,20 @@ This creates:
 
 | Task | Trigger | Action |
 |------|---------|--------|
-| `Heim Ollama` | At log on | `scripts/start_ollama_at_login.ps1` (hidden) |
-| `Heim Mimir brain` | At log on, delay 30s | `scripts/start_brain_at_login.ps1` (hidden) |
+| `Heim Ollama` | At log on | `wscript` → `run_ps1_hidden.vbs` → `start_ollama_at_login.ps1` |
+| `Heim Mimir brain` | At log on, delay 30s | `wscript` → `run_ps1_hidden.vbs` → `start_brain_at_login.ps1` |
 
-Login tasks run with **no visible console**. Check these logs if something fails:
+Login tasks run with **no visible console** (VBS window-style 0; plain
+`-WindowStyle Hidden` still leaves a PowerShell window at interactive logon).
+Re-run `install_login_tasks.ps1` after updating the repo so Task Scheduler
+picks up the launcher. Check these logs if something fails:
 
 | Log | Contents |
 |-----|----------|
 | `data/logs/ollama_login.log` | Ollama login task steps |
 | `data/logs/ollama_serve.log` | `ollama serve` stdout/stderr |
 | `data/logs/brain_login.log` | Brain login task steps |
-| `data/logs/brain_login_cli.log` | `ensure_brain_cli` stdout |
+| `data/logs/brain_login_cli_*.log` | `ensure_brain_cli` stdout (per run) |
 | `data/logs/brain_launch.log` | uvicorn brain process output |
 
 Manual test without rebooting:

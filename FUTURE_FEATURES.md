@@ -1069,7 +1069,7 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
 
 ### Usage stats, milestones, and Mimir’s birthday
 
-- **Status:** in-roadmap
+- **Status:** done (T-058)
 - **Horizon:** mid
 - **Summary:** Usage statistics, congratulatory milestones, and remembering Mimir’s own birthday.
 - **User stories:**
@@ -1077,10 +1077,10 @@ See [BudgetTracker](../ProjectOverview/projects/BudgetTracker.md) (`D:\Dev\Proje
   - Congrats on milestones from Mimir.
   - Remembers his own birthday — **26-08-2026**.
 - **Depends on:** Turn traces / SQLite counters.
-- **Source of truth:** Brain observability DB/JSONL; birthday constant in config or prompt
+- **Source of truth:** Brain observability JSONL (`turns.jsonl`); birthday in `agent.birthday` / prompt
 - **API ownership:** Brain owns counters; no sibling.
-- **Tools + context:** Proposed: `usage_stats`; inject birthday **2026-08-26** into prompt on that date.
-- **ROADMAP overlap:** Heim **M5b**
+- **Tools + context:** Local `usage_stats`; inject birthday **2026-08-26** into prompt on that month-day (annual, local TZ).
+- **ROADMAP overlap:** Heim **M5b** / **T-058**
 
 ### Repeat last response
 

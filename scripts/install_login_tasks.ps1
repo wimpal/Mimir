@@ -1,5 +1,8 @@
 # Register Windows Task Scheduler tasks for T-016 auto-start (Ollama + Mimir brain).
 #
+# Tasks launch via scripts/run_ps1_hidden.vbs so no PowerShell console appears at logon
+# (powershell.exe -WindowStyle Hidden alone still flashes/lingers under Task Scheduler).
+#
 # Run once from an elevated or normal user PowerShell (tasks run as current user):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_login_tasks.ps1
 #
@@ -49,19 +52,34 @@ $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
   -DontStopIfGoingOnBatteries `
   -StartWhenAvailable `
+  -Hidden `
   -RestartCount 3 `
   -RestartInterval (New-TimeSpan -Minutes 1)
 
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$psExe = (Get-Command powershell.exe).Source
+$wscriptExe = Join-Path $env:SystemRoot "System32\wscript.exe"
+$HiddenRunner = Join-Path $RepoRoot "scripts\run_ps1_hidden.vbs"
+if (-not (Test-Path $HiddenRunner)) {
+  throw "Missing $HiddenRunner - run from the Mimir repo."
+}
+if (-not (Test-Path $wscriptExe)) {
+  throw "Missing $wscriptExe"
+}
+
+function New-HiddenPs1Action {
+  param([string]$ScriptPath)
+  # wscript + VBS Run(..., 0) avoids the console that powershell -WindowStyle Hidden
+  # still shows when Task Scheduler starts an interactive logon task.
+  $arg = "//B //Nologo `"$HiddenRunner`" `"$ScriptPath`""
+  return New-ScheduledTaskAction -Execute $wscriptExe -Argument $arg -WorkingDirectory $RepoRoot
+}
 
 if (-not $SkipOllama) {
   if (-not (Test-Path $OllamaScript)) {
     throw "Missing $OllamaScript - run from the Mimir repo."
   }
-  Write-Host "Registering $OllamaTaskName -> $OllamaScript (hidden, logged)"
-  $ollamaArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$OllamaScript`""
-  $ollamaAction = New-ScheduledTaskAction -Execute $psExe -Argument $ollamaArgs -WorkingDirectory $RepoRoot
+  Write-Host "Registering $OllamaTaskName -> $OllamaScript (no console, logged)"
+  $ollamaAction = New-HiddenPs1Action -ScriptPath $OllamaScript
   Register-ScheduledTask `
     -TaskPath $TaskPath `
     -TaskName $OllamaTaskName `
@@ -78,10 +96,8 @@ if (-not $SkipOllama) {
 $brainDelayTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $brainDelayTrigger.Delay = "PT${BrainDelaySec}S"
 
-$brainArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LoginScript`""
-$brainAction = New-ScheduledTaskAction -Execute $psExe -Argument $brainArgs -WorkingDirectory $RepoRoot
-
-Write-Host "Registering $BrainTaskName -> $LoginScript (delay ${BrainDelaySec}s, hidden, logged)"
+Write-Host "Registering $BrainTaskName -> $LoginScript (delay ${BrainDelaySec}s, no console, logged)"
+$brainAction = New-HiddenPs1Action -ScriptPath $LoginScript
 Register-ScheduledTask `
   -TaskPath $TaskPath `
   -TaskName $BrainTaskName `

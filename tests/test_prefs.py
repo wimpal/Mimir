@@ -41,6 +41,45 @@ def test_format_clock_block() -> None:
     assert "vorige maand" in block
 
 
+def test_birthday_constant_default() -> None:
+    from brain.config import AgentSettings
+    from brain.prefs import DEFAULT_BIRTHDAY
+
+    assert AgentSettings().birthday == "2026-08-26"
+    assert DEFAULT_BIRTHDAY == "2026-08-26"
+
+
+def test_birthday_inject_on_matching_month_day() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from brain.prefs import build_system_prompt, format_clock_block
+
+    tz = "Europe/Amsterdam"
+    on_day = datetime(2027, 8, 26, 10, 0, tzinfo=ZoneInfo(tz))
+    off_day = datetime(2026, 9, 17, 10, 0, tzinfo=ZoneInfo(tz))
+
+    on_block = format_clock_block(
+        timezone=tz, birthday="2026-08-26", now=on_day
+    )
+    assert "Mimir's birthday" in on_block
+    assert "2026-08-26" in on_block
+
+    off_block = format_clock_block(
+        timezone=tz, birthday="2026-08-26", now=off_day
+    )
+    assert "Mimir's birthday" not in off_block
+
+    prompt = build_system_prompt(
+        "You are Mimir.",
+        {},
+        timezone=tz,
+        birthday="2026-08-26",
+        now=on_day,
+    )
+    assert "Mimir's birthday" in prompt
+
+
 def test_build_system_prompt_includes_clock() -> None:
     prompt = build_system_prompt(
         "You are Mimir.",

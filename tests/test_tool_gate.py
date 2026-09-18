@@ -20,6 +20,9 @@ def test_should_offer_tools_chat_facts() -> None:
     assert should_offer_tools("Wat is het weer vandaag?")
     assert should_offer_tools("Zet de lamp in de keuken aan")
     assert should_offer_tools("Onthoud: zet het licht in de woonkamer uit")
+    assert should_offer_tools("How busy have you been?")
+    assert should_offer_tools("Hoe druk ben je geweest?")
+    assert should_offer_tools("Show me usage stats")
 
 
 def test_run_turn_omits_tools_for_chat_recall() -> None:

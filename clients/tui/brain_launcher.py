@@ -69,18 +69,12 @@ def _bind_host_port(base_url: str, *, repo_root: Path) -> tuple[str, int]:
 
 
 def start_brain_process(base_url: str, *, repo_root: Path | None = None) -> subprocess.Popen[bytes]:
-    """Spawn ``uv run uvicorn …`` for the brain. Raises RuntimeError on setup failure."""
+    """Spawn the brain uvicorn process. Raises RuntimeError on setup failure."""
     root = repo_root or find_repo_root()
     if root is None:
         raise RuntimeError(
             "Could not find the Mimir repo (pyproject.toml + brain/). "
             "Set MIMIR_REPO_ROOT or keep mimir.exe under the repo (e.g. dist\\)."
-        )
-
-    uv = shutil.which("uv")
-    if uv is None:
-        raise RuntimeError(
-            "Could not find `uv` on PATH. Install uv or start the brain manually."
         )
 
     host, port = _bind_host_port(base_url, repo_root=root)
@@ -92,27 +86,63 @@ def start_brain_process(base_url: str, *, repo_root: Path | None = None) -> subp
     log_file.write(f"\n--- launching brain {host}:{port} ---\n")
     log_file.flush()
 
-    cmd = [
-        uv,
-        "run",
-        "uvicorn",
-        "brain.main:app",
-        "--host",
-        host,
-        "--port",
-        str(port),
-    ]
     creationflags = 0
+    startupinfo = None
     if sys.platform == "win32":
-        # Hide the brain console; logs go to data/logs/brain_launch.log
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        # CREATE_NO_WINDOW is ignored if combined with DETACHED_PROCESS (Win32).
+        # That combo left a visible Windows Terminal tab titled
+        # .venv\Scripts\uvicorn.exe after restart_mimir / ensure_brain_cli.
+        # BREAKAWAY_FROM_JOB still lets login/restart wrappers exit without
+        # holding the brain for its lifetime.
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            | 0x00000200  # CREATE_NEW_PROCESS_GROUP
+            | 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
+        )
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+
+    # Prefer venv python -m uvicorn so we do not open an extra `uv run` console.
+    venv_python = root / ".venv" / "Scripts" / "python.exe"
+    if sys.platform == "win32" and venv_python.is_file():
+        cmd = [
+            str(venv_python),
+            "-m",
+            "uvicorn",
+            "brain.main:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+    else:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError(
+                "Could not find `uv` on PATH. Install uv or start the brain manually."
+            )
+        cmd = [
+            uv,
+            "run",
+            "uvicorn",
+            "brain.main:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
 
     proc = subprocess.Popen(
         cmd,
         cwd=str(root),
+        stdin=subprocess.DEVNULL,
         stdout=log_file,
         stderr=subprocess.STDOUT,
         creationflags=creationflags,
+        startupinfo=startupinfo,
+        close_fds=False if sys.platform == "win32" else True,
+        start_new_session=(sys.platform != "win32"),
     )
     _child_procs.append(proc)
     return proc

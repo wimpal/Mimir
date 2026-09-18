@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,24 @@ from brain.mcp.names import display_service_name
 # Stable order for GET /v1/preferences and TUI /settings.
 PREFERENCE_KEYS: tuple[str, ...] = ("favorite_genres", "tone")
 ALLOWED_KEYS = frozenset(PREFERENCE_KEYS)
+
+DEFAULT_BIRTHDAY = "2026-08-26"
+
+
+def parse_birthday(raw: str | None) -> date | None:
+    """Parse ISO YYYY-MM-DD birthday; None if missing/invalid."""
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def birthday_month_day_matches(today: date, birthday: date) -> bool:
+    """True when local today shares month-day with birthday (annual)."""
+    return today.month == birthday.month and today.day == birthday.day
 
 
 def normalize_preference_value(key: str, value: Any) -> str | None:
@@ -68,19 +86,41 @@ def format_prefs_block(prefs: dict[str, str]) -> str:
     return "## Known preferences\n\n" + "\n".join(lines)
 
 
-def format_clock_block(*, timezone: str) -> str:
+def format_clock_block(
+    *,
+    timezone: str,
+    birthday: str | None = None,
+    now: datetime | None = None,
+) -> str:
     """Inject household-local date/time so relative periods resolve correctly."""
     try:
-        now = datetime.now(ZoneInfo(timezone))
+        tz = ZoneInfo(timezone)
+        clock = now if now is not None else datetime.now(tz)
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=tz)
+        else:
+            clock = clock.astimezone(tz)
     except Exception:  # noqa: BLE001 — bad tz name; omit block
         return ""
-    return (
-        "## Current date and time\n\n"
-        f"- now: {now.strftime('%Y-%m-%dT%H:%M:%S')} ({timezone})\n"
-        f"- today: {now.date().isoformat()}\n"
+    lines = [
+        "## Current date and time",
+        "",
+        f"- now: {clock.strftime('%Y-%m-%dT%H:%M:%S')} ({timezone})",
+        f"- today: {clock.date().isoformat()}",
         '- Use this for "today", "this month", "last month" / "vorige maand", etc. '
-        "Never guess the year or month."
-    )
+        "Never guess the year or month.",
+    ]
+    bday = parse_birthday(birthday)
+    if bday is not None and birthday_month_day_matches(clock.date(), bday):
+        lines.extend(
+            [
+                "",
+                f"- Today is Mimir's birthday ({bday.isoformat()} and annually "
+                "on this month-day). Acknowledge briefly if the user greets or "
+                "asks — keep it short, no over-the-top party.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def format_unavailable_services_block(unavailable: list[str]) -> str:
@@ -102,10 +142,14 @@ def build_system_prompt(
     *,
     unavailable_services: list[str] | None = None,
     timezone: str | None = None,
+    birthday: str | None = None,
+    now: datetime | None = None,
 ) -> str:
     parts = [base.rstrip()]
     if timezone:
-        clock = format_clock_block(timezone=timezone)
+        clock = format_clock_block(
+            timezone=timezone, birthday=birthday, now=now
+        )
         if clock:
             parts.append(clock)
     block = format_prefs_block(prefs)

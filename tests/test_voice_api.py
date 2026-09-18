@@ -193,6 +193,56 @@ def test_stt_happy_path(tmp_path: Path) -> None:
         assert stt.calls[0]["content_type"] == "audio/wav"
 
 
+def test_stt_omitted_language_auto_detects_by_default(tmp_path: Path) -> None:
+    stt = MockStt(SttResult(text="turn off all the lights", language="en"))
+    with _client(_settings(tmp_path), stt=stt) as tc:
+        resp = tc.post(
+            "/v1/stt",
+            content=_tiny_wav(),
+            headers={"Content-Type": "audio/wav"},
+        )
+        assert resp.status_code == 200
+        assert stt.calls[0]["language_hint"] is None
+
+
+def test_stt_query_language_locks_whisper(tmp_path: Path) -> None:
+    stt = MockStt(SttResult(text="hello", language="en"))
+    with _client(_settings(tmp_path), stt=stt) as tc:
+        resp = tc.post(
+            "/v1/stt?language=en",
+            content=_tiny_wav(),
+            headers={"Content-Type": "audio/wav"},
+        )
+        assert resp.status_code == 200
+        assert stt.calls[0]["language_hint"] == "en"
+
+
+def test_stt_config_language_hint_locks_when_query_omitted(tmp_path: Path) -> None:
+    stt = MockStt(SttResult(text="zet de lamp uit", language="nl"))
+    s = _settings(tmp_path, voice={"stt": {"language_hint": "nl"}})
+    with _client(s, stt=stt) as tc:
+        resp = tc.post(
+            "/v1/stt",
+            content=_tiny_wav(),
+            headers={"Content-Type": "audio/wav"},
+        )
+        assert resp.status_code == 200
+        assert stt.calls[0]["language_hint"] == "nl"
+
+
+def test_stt_query_language_overrides_config_hint(tmp_path: Path) -> None:
+    stt = MockStt(SttResult(text="turn off the lights", language="en"))
+    s = _settings(tmp_path, voice={"stt": {"language_hint": "nl"}})
+    with _client(s, stt=stt) as tc:
+        resp = tc.post(
+            "/v1/stt?language=en",
+            content=_tiny_wav(),
+            headers={"Content-Type": "audio/wav"},
+        )
+        assert resp.status_code == 200
+        assert stt.calls[0]["language_hint"] == "en"
+
+
 def test_stt_empty_audio(tmp_path: Path) -> None:
     stt = MockStt(error=VoiceError("invalid_input", "I couldn't make out any speech.", http_status=400))
     with _client(_settings(tmp_path), stt=stt) as tc:

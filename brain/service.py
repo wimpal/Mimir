@@ -166,6 +166,7 @@ class BrainService:
             stored,
             unavailable_services=self.unavailable_services,
             timezone=self.settings.location.timezone,
+            birthday=self.settings.agent.birthday,
         )
 
     def _refresh_system_after_pref_tool(
