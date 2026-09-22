@@ -333,6 +333,30 @@ body {
   font-size: 0.8rem;
 }
 
+.model-profile-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0 0 0.35rem;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.model-profile-row select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-input, transparent);
+  border: 1px solid var(--border-modal);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+
+#model-profile-hint {
+  margin-top: 0.25rem;
+  margin-bottom: 0.75rem;
+  min-height: 1.1em;
+}
+
 .panel-actions {
   display: flex;
   gap: 0.5rem;

@@ -58,6 +58,32 @@ pub struct PreferenceRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfileItem {
+    pub name: String,
+    pub model: String,
+    pub num_ctx: Option<u64>,
+    pub think: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfilesState {
+    pub active_profile: String,
+    pub loaded_profile: String,
+    pub loaded_model: String,
+    pub restart_pending: bool,
+    pub env_masked_fields: Vec<String>,
+    pub profiles: Vec<ModelProfileItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfileActiveResult {
+    pub active_profile: String,
+    pub model: String,
+    pub changed: bool,
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SttResult {
     pub text: String,
     pub language: Option<String>,
@@ -495,6 +521,64 @@ pub async fn put_preference(
         key: out_key,
         value: out_value,
     })
+}
+
+pub async fn get_model_profiles(
+    base_url: &str,
+    token: &str,
+) -> Result<ModelProfilesState, BrainError> {
+    let base = normalize_brain_url(base_url)?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_S))
+        .timeout(Duration::from_secs(CONTROL_TIMEOUT_S))
+        .build()
+        .map_err(|e| BrainError::msg(e.to_string()))?;
+    let url = format!("{base}/v1/model-profiles");
+    let resp = client
+        .get(&url)
+        .headers(auth_headers(token))
+        .send()
+        .await
+        .map_err(|e| BrainError::msg(format!("get model-profiles failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 400 {
+        return Err(map_http_error(status, &text, "get model-profiles"));
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| BrainError::msg("get model-profiles returned unexpected JSON"))
+}
+
+pub async fn put_active_model_profile(
+    base_url: &str,
+    token: &str,
+    profile: &str,
+) -> Result<ModelProfileActiveResult, BrainError> {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return Err(BrainError::msg("profile name is empty"));
+    }
+    let base = normalize_brain_url(base_url)?;
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_S))
+        .timeout(Duration::from_secs(CONTROL_TIMEOUT_S))
+        .build()
+        .map_err(|e| BrainError::msg(e.to_string()))?;
+    let url = format!("{base}/v1/model-profiles/active");
+    let resp = client
+        .put(&url)
+        .headers(auth_headers(token))
+        .json(&json!({ "profile": profile }))
+        .send()
+        .await
+        .map_err(|e| BrainError::msg(format!("put model-profiles/active failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 400 {
+        return Err(map_http_error(status, &text, "put model-profiles/active"));
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| BrainError::msg("put model-profiles/active returned unexpected JSON"))
 }
 
 pub async fn post_stt(

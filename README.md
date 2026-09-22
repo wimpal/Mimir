@@ -42,6 +42,12 @@ uv run python -m brain.config
 # 4. Standing tool-call suite (>=80%)
 uv run python scripts/tool_call_suite.py
 
+# Trial another local model without rewriting the default profile:
+#   uv run python -m brain.model_profiles use trial_14b --restart
+#   uv run python scripts/tool_call_suite.py
+#   uv run python -m brain.model_profiles use default --restart
+# See docs/model-profiles.md (T-074).
+
 # 5. Brain + Windows daily-driver GUI
 powershell -File scripts/restart_mimir.ps1
 # pinable exe (once): powershell -File scripts/build_mimir_desktop_exe.ps1
@@ -74,6 +80,7 @@ OpenAI-compatible surface (for Home Assistant later): `POST /v1/chat/completions
 Streaming on native chat: [`docs/api-streaming.md`](./docs/api-streaming.md).
 Phase 7 harden notes: [`docs/phase7-harden.md`](./docs/phase7-harden.md).
 Backup: [`docs/ops-backup.md`](./docs/ops-backup.md).
+Model profiles / Active model switch: [`docs/model-profiles.md`](./docs/model-profiles.md).
 
 Turn traces: `data/logs/turns.jsonl` (under `runtime.data_dir`); Host-only
 `GET /debug/recent-traces`.

@@ -204,8 +204,8 @@ def format_schedule_sentence(events: list[dict[str, Any]], locale: Locale) -> st
     """Programmatic schedule sentence when the model omits calendar facts."""
     if not events:
         if locale == "nl":
-            return "Niets op de agenda vandaag, meneer."
-        return "Nothing on the calendar today, sir."
+            return "Niets op de agenda vandaag."
+        return "Nothing on the calendar today."
     lines = [format_event_line(ev, locale=locale) for ev in events]
     joined = "; ".join(lines)
     if locale == "nl":
@@ -301,8 +301,8 @@ _CONDITION_NL: dict[str, str] = {
 
 def format_greeting(locale: Locale) -> str:
     if locale == "nl":
-        return "Goedemorgen, meneer."
-    return "Good morning, sir."
+        return "Goedemorgen."
+    return "Good morning."
 
 
 def _round_temp(value: float | int | None) -> int | None:
@@ -321,8 +321,26 @@ def _translate_conditions(conditions: str, locale: Locale) -> str:
     return key or "unknown"
 
 
-def format_weather_brief(weather: dict[str, Any], locale: Locale) -> str:
-    """Two short spoken weather sentences from get_weather payload."""
+def format_weather_brief(
+    weather: dict[str, Any],
+    locale: Locale,
+    *,
+    user_message: str = "",
+) -> str:
+    """Two short spoken weather sentences from get_weather payload.
+
+    Bare morning greeting → now + rest of today. If the same message also asks
+    a day-part (e.g. vanavond), describe that day_parts slice instead.
+    """
+    from brain.turn_fixup import (
+        format_day_part_one_liner,
+        user_asked_about_day_part,
+    )
+
+    day_part = user_asked_about_day_part(user_message)
+    if day_part is not None:
+        return format_day_part_one_liner(weather, locale, day_part)
+
     current = weather.get("current") if isinstance(weather.get("current"), dict) else {}
     today = weather.get("today") if isinstance(weather.get("today"), dict) else {}
     temp = _round_temp(current.get("temperature_c"))
@@ -396,11 +414,12 @@ def build_morning_brief_from_tools(
     events: list[dict[str, Any]],
     locale: Locale,
     calendar_fetched: bool = True,
+    user_message: str = "",
 ) -> str:
     """Code-backed morning brief (greeting + weather + schedule). Discards model prose."""
     parts: list[str] = [format_greeting(locale)]
     if weather:
-        parts.append(format_weather_brief(weather, locale))
+        parts.append(format_weather_brief(weather, locale, user_message=user_message))
     else:
         parts.append(weather_fetch_failed_line(locale))
     if calendar_fetched:
@@ -427,6 +446,13 @@ def needs_morning_brief_fixup(
         return True
     if weather and morning_brief_lacks_weather(reply):
         return True
+    # Empty day: still need an explicit clear-schedule line.
+    if (
+        calendar_fetched
+        and not events
+        and not reply_falsely_claims_empty(reply, locale)
+    ):
+        return True
     return needs_calendar_grounding_fix(reply, events, locale)
 
 
@@ -437,14 +463,35 @@ def fix_morning_brief(
     events: list[dict[str, Any]],
     locale: Locale,
     calendar_fetched: bool = True,
+    user_message: str = "",
 ) -> str:
     """Build a complete brief: greeting + weather + schedule (code-backed gaps only)."""
+    from brain.turn_fixup import user_asked_about_day_part
+
+    # T-061: day-part in a morning greeting → full code-backed brief (slice weather).
+    if (
+        weather
+        and calendar_fetched
+        and user_asked_about_day_part(user_message) is not None
+    ):
+        return build_morning_brief_from_tools(
+            weather=weather,
+            events=events,
+            locale=locale,
+            calendar_fetched=calendar_fetched,
+            user_message=user_message,
+        )
+
     if morning_brief_tools_incomplete(
         weather=weather, calendar_fetched=calendar_fetched
     ):
         # Caller should fetch tools first; if still incomplete, rebuild what we can.
         return build_morning_brief_from_tools(
-            weather=weather, events=events, locale=locale, calendar_fetched=calendar_fetched
+            weather=weather,
+            events=events,
+            locale=locale,
+            calendar_fetched=calendar_fetched,
+            user_message=user_message,
         )
 
     base = strip_false_empty_claims(reply, locale).rstrip()
@@ -457,7 +504,9 @@ def fix_morning_brief(
         if morning_brief_lacks_greeting(reply, locale):
             parts.append(format_greeting(locale))
         if weather and morning_brief_lacks_weather(reply):
-            parts.append(format_weather_brief(weather, locale))
+            parts.append(
+                format_weather_brief(weather, locale, user_message=user_message)
+            )
         parts.append(format_schedule_sentence(events, locale))
         return " ".join(parts)
 
@@ -465,12 +514,25 @@ def fix_morning_brief(
     if events and needs_calendar_grounding_fix(reply, events, locale):
         return merge_schedule_into_reply(reply, events, locale)
 
+    # Empty calendar day missing a clear-schedule line.
+    if (
+        calendar_fetched
+        and not events
+        and not reply_falsely_claims_empty(reply, locale)
+        and (reply or "").strip()
+    ):
+        schedule = format_schedule_sentence([], locale)
+        base = base if base else (reply or "").strip()
+        if base.endswith((".", "!", "?")):
+            return f"{base} {schedule}"
+        return f"{base}. {schedule}"
+
     # Missing greeting and/or weather; calendar already fine or empty.
     parts = []
     if morning_brief_lacks_greeting(reply, locale):
         parts.append(format_greeting(locale))
     if weather and morning_brief_lacks_weather(reply):
-        parts.append(format_weather_brief(weather, locale))
+        parts.append(format_weather_brief(weather, locale, user_message=user_message))
     if not events and (
         reply_falsely_claims_empty(reply, locale) or not (reply or "").strip()
     ):

@@ -6,6 +6,9 @@
 
 ollama:
   url: http://127.0.0.1:11434
+  # Flat fields = inheritance defaults for profiles (and sole source when
+  # profiles is omitted). Active model is selected via sticky state + CLI —
+  # see docs/model-profiles.md (T-074 / ADR-016).
   model: qwen3:8b
   # Set explicitly — Ollama's default is often smaller and silently truncates
   # system + history + tool schemas + results (looks like "forgot" / dropped tools).
@@ -14,6 +17,12 @@ ollama:
   think: false
   # Keep model in VRAM between turns (45m default). Env: MIMIR_OLLAMA_KEEP_ALIVE.
   keep_alive: 45m
+  profiles:
+    default:
+      model: qwen3:8b
+    # Optional trial profile (operator must `ollama pull` the tag first):
+    trial_14b:
+      model: qwen3:14b
 
 location:
   # Home coords for get_weather (Open-Meteo → KNMI HARMONIE for NL).

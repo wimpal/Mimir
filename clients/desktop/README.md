@@ -61,7 +61,7 @@ npm run tauri -- icon ..\tui\assets\mimir-icon.png
 | mic | Click to record; click again to STT → send |
 | `/new` | New conversation |
 | `/history` | Resume a past conversation |
-| `/settings` | Brain preferences (`GET/PUT /v1/preferences`) |
+| `/settings` | Preferences + Active model profile (`GET/PUT /v1/preferences`, `GET/PUT /v1/model-profiles`) |
 | `/connect` | Brain URL + bearer token |
 | `/copy` | Copy last assistant reply |
 | `/help` | Command list |
@@ -84,9 +84,13 @@ npm run tauri -- icon ..\tui\assets\mimir-icon.png
 - `POST /v1/chat` (`stream: true`) SSE
 - `GET /v1/conversations` + messages
 - `GET/PUT /v1/preferences`
+- `GET /v1/model-profiles` + `PUT /v1/model-profiles/active` (T-089)
 - `POST /v1/stt`
 
 No MCP, Ollama, Homebase, or BudgetTracker calls from this app.
+
+Rebuild after this change: `powershell -File scripts/build_mimir_desktop_exe.ps1`
+→ pin `dist\mimir-desktop.exe`.
 
 ## Acceptance checklist (manual)
 
@@ -94,5 +98,6 @@ No MCP, Ollama, Homebase, or BudgetTracker calls from this app.
 - [ ] Slash commands work without top-bar buttons
 - [ ] Mic record → STT → chat turn; Esc cancels recording
 - [ ] `/settings` edits a preference
+- [ ] `/settings` Active model dropdown switches sticky profile (loopback restarts brain)
 - [ ] Paste a full Dutch recipe — all lines reach the brain
 - [ ] Write confirm → Confirm → succeeds

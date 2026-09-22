@@ -33,12 +33,26 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ModelProfile(_Strict):
+    """Named Ollama setup (T-074). Omitted fields inherit flat ollama.* defaults."""
+
+    model: str | None = None
+    num_ctx: int | None = None
+    think: bool | None = None
+    keep_alive: str | None = None
+
+
 class OllamaSettings(_Strict):
     url: str = "http://127.0.0.1:11434"
+    # Flat fields = inheritance defaults (and sole source when profiles omitted).
     model: str = "qwen3:8b"
     num_ctx: int = 8192
     think: bool = False
     keep_alive: str = "45m"
+    profiles: dict[str, ModelProfile] = Field(default_factory=dict)
+    # Filled by load_config after sticky Active resolve (not YAML-authored).
+    active_profile: str = "default"
+    env_masked_fields: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -419,12 +433,10 @@ def validate_bind_auth(settings: Settings) -> None:
 
 
 # Flat env names on purpose — no nested delimiters in deployment configs.
+# Ollama model/num_ctx/think/keep_alive are applied *after* Active profile resolve
+# (escape hatch; see _apply_ollama_env_escape_hatch).
 _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("ollama", "url"): "MIMIR_OLLAMA_URL",
-    ("ollama", "model"): "MIMIR_OLLAMA_MODEL",
-    ("ollama", "num_ctx"): "MIMIR_OLLAMA_NUM_CTX",
-    ("ollama", "think"): "MIMIR_OLLAMA_THINK",
-    ("ollama", "keep_alive"): "MIMIR_OLLAMA_KEEP_ALIVE",
     ("location", "latitude"): "MIMIR_LATITUDE",
     ("location", "longitude"): "MIMIR_LONGITUDE",
     ("location", "timezone"): "MIMIR_TIMEZONE",
@@ -462,6 +474,13 @@ _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("voice", "warm_on_start"): "MIMIR_VOICE_WARM_ON_START",
 }
 
+_OLLAMA_EFFECTIVE_ENV: dict[str, str] = {
+    "model": "MIMIR_OLLAMA_MODEL",
+    "num_ctx": "MIMIR_OLLAMA_NUM_CTX",
+    "think": "MIMIR_OLLAMA_THINK",
+    "keep_alive": "MIMIR_OLLAMA_KEEP_ALIVE",
+}
+
 _VOICE_NESTED_ENV: dict[tuple[str, ...], str] = {
     ("stt", "model"): "MIMIR_VOICE_STT_MODEL",
     ("stt", "device"): "MIMIR_VOICE_STT_DEVICE",
@@ -488,8 +507,19 @@ _SECRET_ENV: dict[str, dict[str, str]] = {
 }
 
 
-def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> Settings:
-    """Load and validate configuration. Raises ConfigError with specifics."""
+def load_config(
+    path: str | Path | None = None,
+    *,
+    use_dotenv: bool = True,
+    resolve_active: bool = True,
+) -> Settings:
+    """Load and validate configuration. Raises ConfigError with specifics.
+
+    When ``resolve_active`` is True (brain/suite), sticky Active profile is
+    resolved onto ``settings.ollama.model`` (and related fields). When False
+    (CLI catalog / repair), profiles are normalized but an unknown or missing
+    Active name does not fail — effective model fields stay as flat defaults.
+    """
     if use_dotenv:
         load_mimir_dotenv()
 
@@ -553,7 +583,132 @@ def load_config(path: str | Path | None = None, *, use_dotenv: bool = True) -> S
         raise ConfigError(f"invalid configuration in {cfg_path}:\n{exc}") from exc
 
     validate_bind_auth(settings)
+    _normalize_and_resolve_ollama_profiles(settings, resolve_active=resolve_active)
     return settings
+
+
+def normalized_ollama_profiles(ollama: OllamaSettings) -> dict[str, ModelProfile]:
+    """Public catalog helper (fully inherited profiles; synthesizes default)."""
+    return _normalized_profile_catalog(ollama)
+
+
+def effective_profile_settings(
+    ollama: OllamaSettings, name: str
+) -> tuple[str, int, bool, str]:
+    """Return (model, num_ctx, think, keep_alive) for a named profile after inherit."""
+    catalog = _normalized_profile_catalog(ollama)
+    if name not in catalog:
+        raise ConfigError(
+            f"unknown Model profile {name!r}; known: {sorted(catalog)}"
+        )
+    p = catalog[name]
+    return p.model, p.num_ctx, p.think, p.keep_alive  # type: ignore[return-value]
+
+
+def _normalized_profile_catalog(ollama: OllamaSettings) -> dict[str, ModelProfile]:
+    """Build fully-inherited profiles; synthesize default when profiles omitted."""
+    flat_model = ollama.model
+    flat_num_ctx = ollama.num_ctx
+    flat_think = ollama.think
+    flat_keep_alive = ollama.keep_alive
+
+    if not ollama.profiles:
+        return {
+            "default": ModelProfile(
+                model=flat_model,
+                num_ctx=flat_num_ctx,
+                think=flat_think,
+                keep_alive=flat_keep_alive,
+            )
+        }
+
+    if "default" not in ollama.profiles:
+        raise ConfigError(
+            "ollama.profiles is set but missing required profile 'default'"
+        )
+
+    catalog: dict[str, ModelProfile] = {}
+    for name, raw in ollama.profiles.items():
+        model = raw.model if raw.model is not None else flat_model
+        if not model or not str(model).strip():
+            raise ConfigError(f"ollama.profiles.{name}: model is required")
+        catalog[name] = ModelProfile(
+            model=str(model).strip(),
+            num_ctx=flat_num_ctx if raw.num_ctx is None else raw.num_ctx,
+            think=flat_think if raw.think is None else raw.think,
+            keep_alive=flat_keep_alive if raw.keep_alive is None else raw.keep_alive,
+        )
+    return catalog
+
+
+def _normalize_and_resolve_ollama_profiles(
+    settings: Settings, *, resolve_active: bool
+) -> None:
+    """Normalize profiles, resolve sticky Active onto effective ollama fields."""
+    from brain.active_model import ActiveModelStateError, load_active_profile
+
+    catalog = _normalized_profile_catalog(settings.ollama)
+    settings.ollama.profiles = catalog
+
+    data_dir = settings.runtime.ensure_data_dir()
+    try:
+        stored = load_active_profile(data_dir)
+    except ActiveModelStateError as exc:
+        if resolve_active:
+            raise ConfigError(str(exc)) from exc
+        stored = None
+
+    active_name = stored if stored is not None else "default"
+
+    if resolve_active:
+        if active_name not in catalog:
+            raise ConfigError(
+                f"Active model profile {active_name!r} is not in ollama.profiles "
+                f"(known: {sorted(catalog)}); "
+                f"run: uv run python -m brain.model_profiles use default"
+            )
+        settings.ollama.active_profile = active_name
+        chosen = catalog[active_name]
+        settings.ollama.model = chosen.model  # type: ignore[assignment]
+        settings.ollama.num_ctx = chosen.num_ctx  # type: ignore[assignment]
+        settings.ollama.think = chosen.think  # type: ignore[assignment]
+        settings.ollama.keep_alive = chosen.keep_alive  # type: ignore[assignment]
+    else:
+        # Catalog / repair path: record stored name even if unknown.
+        settings.ollama.active_profile = active_name
+
+    _apply_ollama_env_escape_hatch(settings.ollama)
+
+
+def _apply_ollama_env_escape_hatch(ollama: OllamaSettings) -> None:
+    """Re-apply MIMIR_OLLAMA_* onto effective fields after Active resolve."""
+    masked: list[str] = []
+    for field, env_name in _OLLAMA_EFFECTIVE_ENV.items():
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        if field == "num_ctx":
+            try:
+                value: object = int(raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"{env_name} must be an integer, got {raw!r}"
+                ) from exc
+        elif field == "think":
+            lowered = raw.strip().lower()
+            if lowered in ("1", "true", "yes", "on"):
+                value = True
+            elif lowered in ("0", "false", "no", "off"):
+                value = False
+            else:
+                raise ConfigError(
+                    f"{env_name} must be a boolean, got {raw!r}"
+                )
+        else:
+            value = raw
+        setattr(ollama, field, value)
+        masked.append(field)
+    ollama.env_masked_fields = masked
 
 
 def _apply_voice_env_overrides(data: dict) -> None:
@@ -658,7 +813,7 @@ def redacted_view(settings: Settings) -> dict:
             feed["username"] = "***set***"
         if feed.get("password"):
             feed["password"] = "***set***"
-    for svc_id, svc in (data.get("services") or {}).items():
+    for _svc_id, svc in (data.get("services") or {}).items():
         if isinstance(svc, dict) and svc.get("token"):
             svc["token"] = "***set***"
     return data

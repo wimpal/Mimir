@@ -117,6 +117,7 @@ from brain.turn_fixup import (
     format_lights_toggle_reply,
     needs_lights_locale_fixup,
     needs_weather_shopping_fixup,
+    user_asked_about_day_part,
     user_asked_about_weather,
     user_message_locale,
 )
@@ -1154,9 +1155,19 @@ def run_turn(
                             steps=steps,
                             stopped_reason=StoppedReason.FINAL,
                         )
+                # Weather ask with empty model text and no payload yet — fall through
+                # to weather_tools_forced (T-061 / T-071). Do not die on empty_response.
+                weather_force_pending = (
+                    user_asked_about_weather(user_message)
+                    and weather_payload_this_turn is None
+                    and "get_weather" in registry
+                    and not weather_force_used
+                )
                 # Morning / evening greetings with empty text still need brief tools.
-                if not is_morning_greeting(user_message) and not is_evening_wind_down(
-                    user_message
+                if (
+                    not weather_force_pending
+                    and not is_morning_greeting(user_message)
+                    and not is_evening_wind_down(user_message)
                 ):
                     # After staging a recipe, never die on empty — emit confirm copy.
                     if (
@@ -1330,6 +1341,7 @@ def run_turn(
                                     events=calendar_events_this_turn,
                                     locale=locale,
                                     calendar_fetched=calendar_fetched_this_turn,
+                                    user_message=user_message,
                                 )
                                 working.append(
                                     ChatMessage(role="assistant", content=fixed)
@@ -1408,6 +1420,7 @@ def run_turn(
                         events=calendar_events_this_turn,
                         locale=locale,
                         calendar_fetched=calendar_fetched_this_turn,
+                        user_message=user_message,
                     )
                     steps.append(
                         _step(
@@ -1425,12 +1438,15 @@ def run_turn(
                         stopped_reason=StoppedReason.FINAL,
                     )
                 if (
-                    needs_morning_brief_fixup(
-                        reply_text,
-                        calendar_events_this_turn,
-                        locale,
-                        weather=weather_payload_this_turn,
-                        calendar_fetched=calendar_fetched_this_turn,
+                    (
+                        needs_morning_brief_fixup(
+                            reply_text,
+                            calendar_events_this_turn,
+                            locale,
+                            weather=weather_payload_this_turn,
+                            calendar_fetched=calendar_fetched_this_turn,
+                        )
+                        or user_asked_about_day_part(user_message) is not None
                     )
                     and not calendar_fallback_used
                 ):
@@ -1441,6 +1457,7 @@ def run_turn(
                         events=calendar_events_this_turn,
                         locale=locale,
                         calendar_fetched=calendar_fetched_this_turn,
+                        user_message=user_message,
                     )
                     steps.append(
                         _step(
@@ -2271,6 +2288,33 @@ def run_turn(
             steps=steps,
             stopped_reason=StoppedReason.FINAL,
         )
+
+    # Weather already fetched but model never answered — salvage from payload.
+    if user_asked_about_weather(user_message) and weather_payload_this_turn is not None:
+        fixed = fix_weather_shopping_reply(
+            last_content or "",
+            user_message,
+            weather=weather_payload_this_turn,
+            shopping_list_fetched=shopping_list_fetched_this_turn,
+            shopping_items=shopping_list_items_this_turn,
+        )
+        if fixed.strip():
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="weather_shopping_fixup",
+                    content_preview=fixed[:120],
+                )
+            )
+            working.append(ChatMessage(role="assistant", content=fixed))
+            return TurnResult(
+                content=fixed,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
 
     return TurnResult(
         content=last_content,

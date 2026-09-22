@@ -327,7 +327,7 @@ def test_agent_injects_lights_list_before_set_state() -> None:
                     ),
                 ],
             ),
-            ChatMessage(role="assistant", content="The office lamp is now on, sir."),
+            ChatMessage(role="assistant", content="The office lamp is now on."),
         ]
     )
     result = run_turn(

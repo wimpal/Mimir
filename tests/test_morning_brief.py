@@ -55,7 +55,7 @@ def test_morning_brief_locale() -> None:
 
 
 def test_reply_falsely_claims_empty() -> None:
-    assert reply_falsely_claims_empty("Nothing on the calendar today, sir.", "en")
+    assert reply_falsely_claims_empty("Nothing on the calendar today.", "en")
     assert reply_falsely_claims_empty("Niets op de agenda vandaag.", "nl")
     assert not reply_falsely_claims_empty("Verjaardag tara at 18:00.", "en")
 
@@ -153,8 +153,8 @@ def test_reply_grounded_in_calendar_paraphrase_tokens() -> None:
 
 def test_merge_schedule_preserves_weather_and_greeting() -> None:
     base = (
-        "Good morning, sir. It's overcast and about sixteen degrees. "
-        "Rain is likely this afternoon. Nothing on the calendar today, sir."
+        "Good morning. It's overcast and about sixteen degrees. "
+        "Rain is likely this afternoon. Nothing on the calendar today."
     )
     out = merge_schedule_into_reply(base, [TARA_EVENT], "en")
     assert "Good morning" in out
@@ -163,8 +163,31 @@ def test_merge_schedule_preserves_weather_and_greeting() -> None:
     assert "nothing on the calendar" not in out.lower()
 
 
+def test_empty_day_missing_clear_schedule_gets_appended() -> None:
+    reply = (
+        "Good morning. It's overcast and about 18 degrees. "
+        "The rest of today looks overcast."
+    )
+    weather = {
+        "current": {"temperature_c": 18, "conditions": "overcast"},
+        "today": {"temp_max_c": 19, "temp_min_c": 12, "conditions": "overcast"},
+    }
+    assert needs_morning_brief_fixup(
+        reply, [], "en", weather=weather, calendar_fetched=True
+    )
+    fixed = fix_morning_brief(
+        reply,
+        weather=weather,
+        events=[],
+        locale="en",
+        calendar_fetched=True,
+    )
+    assert "nothing on the calendar" in fixed.lower()
+    assert "Good morning" in fixed
+
+
 def test_merge_schedule_english_locale_for_goodmorning() -> None:
-    base = "Good morning, sir. Overcast, sixteen degrees."
+    base = "Good morning. Overcast, sixteen degrees."
     out = merge_schedule_into_reply(base, [TARA_EVENT], "en")
     assert "Today's schedule looks like this" in out
     assert "Vandaag op je agenda" not in out
@@ -190,7 +213,7 @@ def test_format_schedule_sentence() -> None:
 
 def test_append_schedule_fallback() -> None:
     out = append_schedule_fallback(
-        "Good morning, sir. Overcast and sixteen degrees.",
+        "Good morning. Overcast and sixteen degrees.",
         [TARA_EVENT],
         "en",
     )
@@ -258,8 +281,8 @@ def test_agent_appends_schedule_without_llm_retry() -> None:
             ChatMessage(
                 role="assistant",
                 content=(
-                    "Good morning, sir. It's overcast and about sixteen degrees. "
-                    "Nothing on the calendar today, sir."
+                    "Good morning. It's overcast and about sixteen degrees. "
+                    "Nothing on the calendar today."
                 ),
             ),
         ]
@@ -400,6 +423,59 @@ def test_format_weather_brief_nl_no_duplicate_rest() -> None:
     assert out.count("De rest van vandaag") == 1
     assert "light drizzle" not in out.lower()
     assert "motregen" in out.lower()
+
+
+def test_format_weather_brief_compound_vanavond() -> None:
+    from brain.morning_brief import format_weather_brief
+
+    weather = {
+        "current": {"temperature_c": 16, "conditions": "overcast"},
+        "today": {
+            "temp_max_c": 19,
+            "temp_min_c": 15,
+            "conditions": "light drizzle",
+        },
+        "day_parts": {
+            "evening": {
+                "temp_min_c": 13,
+                "temp_max_c": 15,
+                "conditions": "moderate rain",
+            }
+        },
+    }
+    out = format_weather_brief(
+        weather,
+        "nl",
+        user_message="Goedemorgen, wat is het weer vanavond?",
+    )
+    assert "Vanavond" in out
+    assert "13" in out and "15" in out
+    assert "De rest van vandaag" not in out
+    assert "Het is nu" not in out
+
+
+def test_build_morning_brief_compound_vanavond() -> None:
+    weather = {
+        **WEATHER_PAYLOAD,
+        "day_parts": {
+            "evening": {
+                "temp_min_c": 13,
+                "temp_max_c": 15,
+                "conditions": "moderate rain",
+            }
+        },
+    }
+    out = build_morning_brief_from_tools(
+        weather=weather,
+        events=[TARA_EVENT],
+        locale="nl",
+        calendar_fetched=True,
+        user_message="Goedemorgen, wat is het weer vanavond?",
+    )
+    assert out.startswith("Goedemorgen")
+    assert "Vanavond" in out
+    assert "Verjaardag tara" in out
+    assert "De rest van vandaag" not in out
 
 
 def test_agent_forces_tools_on_empty_morning_reply() -> None:

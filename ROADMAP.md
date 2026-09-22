@@ -16,7 +16,8 @@ Source of truth for product intent: `[Concept.md](./Concept.md)`.
 | **Compute box — 24 GB tier**      | x86 + **24 GB** NVIDIA, or Mac mini **64 GB+**      | Optional **Qwen3 30B-A3B**; brain/API unchanged                                           |
 
 
-**Model ladder (same stack, swap tag in config):** **8B** → **14B** → **30B-A3B**. Try
+**Model ladder (same stack, swap via Model profiles + Active model CLI):** **8B** → **14B** → **30B-A3B**.
+See [`docs/model-profiles.md`](./docs/model-profiles.md). Try
 **14B on the 9070 XT** before buying 24 GB hardware — most day-to-day quality gain on
 16 GB lives there.
 
@@ -75,7 +76,7 @@ Lock choices before code so schema and APIs don’t thrash later.
 | Storage          | **Locked:** SQLite: history, prefs, Jellyfin cache                                                                                     |
 | Clients          | **Locked:** thin chat UI first; brain stays OpenAI-compatible / HTTP-agnostic                                                          |
 | Profiles         | **Locked:** single-user for v1 — no users table/FKs; revisit only if multi-user becomes a day-one requirement                          |
-| Personality      | **Locked:** Jarvis-led household operator (calm competence, dry wit, brief) — see `[config/system_prompt.md](./config/system_prompt.md)` |
+| Personality      | **Locked:** direct, concise household assistant (plain confirms, no honorifics/wit) — see `[config/system_prompt.md](./config/system_prompt.md)` |
 | Language/tooling | **Locked:** Python 3.12+, uv, ruff; config = `config/config.yaml` (non-secrets) + `.env` secrets, `MIMIR_`* env overrides YAML         |
 | “Uncensored”     | **Locked:** self-hosted / no cloud moderation — **stock** `qwen3:8b`, not an abliterated finetune (tool-calling tradeoff; see Concept) |
 | Thinking mode    | **Locked:** `ollama.think: false` for tool loops and voice                                                                             |
@@ -360,7 +361,7 @@ shell with an embedded webview, not a browser Chat product as the front door.
 | Security      | Default bind loopback + `auth.mode: none`. Non-loopback `runtime.host` **refuses startup** unless `auth.mode: token` + Auth token (ADR 0005). Bearer on `/v1/*` when token mode. `/health` always open. Sync + `/debug/*` are **Host-only** |
 | Remote access | **Deferred** to Phase 11 backlog (Tailscale/WireGuard). This phase = local network only |
 | Observability | `GET /debug/recent-traces` — last N Turn trace summaries, Host-only |
-| Personality   | Jarvis-led rewrite of system prompt — **re-run tool suite** after edits; see `docs/phase7-personality.md` |
+| Personality   | Direct/simple rewrite of system prompt — **re-run tool suite** after edits; see `docs/phase7-personality.md` |
 | Data          | Document SQLite backup (copy `data_dir`); retention still “keep all” unless disk hurts |
 
 
@@ -529,7 +530,7 @@ Brain tool posts a message to Discord. **Not** a Chat client front door (ADR 000
 11. **Remote access docs** — Tailscale/WireGuard only; no port-forward recipe as default (deferred from Phase 7)
 12. **Discord expand** — read channels / DM after send-only proves useful
 
-**Personality:** not a phase — small Jarvis-led prompt iterations anytime; re-run the tool suite after edits.
+**Personality:** not a phase — small direct/simple prompt iterations anytime; re-run the tool suite after edits.
 
 ---
 

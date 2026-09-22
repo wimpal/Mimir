@@ -273,3 +273,88 @@ pub async fn ensure_brain_running(base_url: &str) -> LaunchResult {
         pid,
     }
 }
+
+/// Kill + restart brain via ``scripts/restart_mimir.ps1 -BrainOnly`` (Windows + loopback).
+/// Uses the config-aware script so ``runtime.host`` bind is preserved.
+pub async fn restart_brain_brain_only(brain_url: &str) -> LaunchResult {
+    let url = match normalize_brain_url(brain_url) {
+        Ok(u) => u,
+        Err(e) => {
+            return LaunchResult {
+                already_running: false,
+                started: false,
+                message: e.to_string(),
+                pid: None,
+            };
+        }
+    };
+    if !is_loopback_url(&url) {
+        return LaunchResult {
+            already_running: false,
+            started: false,
+            message: "Brain URL is not loopback — restart the brain on the host manually."
+                .into(),
+            pid: None,
+        };
+    }
+    if !cfg!(windows) {
+        return LaunchResult {
+            already_running: false,
+            started: false,
+            message: "Automated brain restart is Windows-only; run scripts/restart_mimir.ps1 -BrainOnly."
+                .into(),
+            pid: None,
+        };
+    }
+    let Some(root) = find_mimir_repo_root() else {
+        return LaunchResult {
+            already_running: false,
+            started: false,
+            message: "Could not find the Mimir repo for restart. Set MIMIR_REPO_ROOT.".into(),
+            pid: None,
+        };
+    };
+    let script = root.join("scripts").join("restart_mimir.ps1");
+    if !script.is_file() {
+        return LaunchResult {
+            already_running: false,
+            started: false,
+            message: format!("restart script missing: {}", script.display()),
+            pid: None,
+        };
+    }
+    let _guard = LAUNCH_LOCK.lock().await;
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .arg("-BrainOnly")
+        .arg("-Url")
+        .arg(&url)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match cmd.status().await {
+        Ok(status) if status.success() => LaunchResult {
+            already_running: false,
+            started: true,
+            message: "Brain restarted.".into(),
+            pid: None,
+        },
+        Ok(status) => LaunchResult {
+            already_running: false,
+            started: false,
+            message: format!("restart_mimir.ps1 exited with status {status}"),
+            pid: None,
+        },
+        Err(e) => LaunchResult {
+            already_running: false,
+            started: false,
+            message: format!("failed to run restart_mimir.ps1: {e}"),
+            pid: None,
+        },
+    }
+}

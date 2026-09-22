@@ -27,6 +27,9 @@ pub fn run() {
             commands::copy_text,
             commands::list_preferences,
             commands::save_preference,
+            commands::list_model_profiles,
+            commands::set_active_model_profile,
+            commands::restart_brain_for_profile,
             commands::transcribe_wav,
             commands::log_voice_latency,
         ])

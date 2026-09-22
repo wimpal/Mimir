@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -12,7 +13,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from brain import __version__
-from brain.config import Settings
+from brain.active_model import ActiveModelStateError, load_active_profile, write_active_profile
+from brain.config import Settings, normalized_ollama_profiles
 from brain.db import CONVERSATIONS_LIST_DEFAULT, Database
 from brain.jellyfin_sync import SyncManager, catalogue_status_dict
 from brain.ollama import OllamaClient
@@ -80,6 +82,33 @@ class PreferencePutIn(BaseModel):
 class PreferenceOut(BaseModel):
     key: str
     value: str
+
+
+class ModelProfileItemOut(BaseModel):
+    name: str
+    model: str
+    num_ctx: int
+    think: bool
+
+
+class ModelProfilesOut(BaseModel):
+    active_profile: str
+    loaded_profile: str
+    loaded_model: str
+    restart_pending: bool
+    env_masked_fields: list[str] = Field(default_factory=list)
+    profiles: list[ModelProfileItemOut] = Field(default_factory=list)
+
+
+class ModelProfileActiveIn(BaseModel):
+    profile: str
+
+
+class ModelProfileActiveOut(BaseModel):
+    active_profile: str
+    model: str
+    changed: bool
+    restart_required: bool
 
 
 def _sse_data(event: dict[str, Any]) -> str:
@@ -284,6 +313,80 @@ def register_chat_routes(application: FastAPI) -> None:
         except PreferenceError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return PreferenceOut(key=key.strip(), value=stored)
+
+    @application.get(
+        "/v1/model-profiles",
+        response_model=ModelProfilesOut,
+    )
+    def model_profiles_list(request: Request) -> ModelProfilesOut:
+        s: Settings = request.app.state.settings
+        data_dir = Path(request.app.state.data_dir)
+        catalog = normalized_ollama_profiles(s.ollama)
+        try:
+            sticky = load_active_profile(data_dir)
+        except ActiveModelStateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        active = sticky if sticky is not None else "default"
+        loaded_profile = s.ollama.active_profile or "default"
+        loaded_model = s.ollama.model
+        restart_pending = active != loaded_profile
+        if active in catalog and catalog[active].model != loaded_model:
+            restart_pending = True
+        profiles = [
+            ModelProfileItemOut(
+                name=name,
+                model=str(p.model or ""),
+                num_ctx=int(p.num_ctx if p.num_ctx is not None else s.ollama.num_ctx),
+                think=bool(p.think if p.think is not None else s.ollama.think),
+            )
+            for name, p in sorted(catalog.items())
+        ]
+        return ModelProfilesOut(
+            active_profile=active,
+            loaded_profile=loaded_profile,
+            loaded_model=loaded_model,
+            restart_pending=restart_pending,
+            env_masked_fields=list(s.ollama.env_masked_fields),
+            profiles=profiles,
+        )
+
+    @application.put(
+        "/v1/model-profiles/active",
+        response_model=ModelProfileActiveOut,
+    )
+    def model_profiles_set_active(
+        body: ModelProfileActiveIn, request: Request
+    ) -> ModelProfileActiveOut:
+        s: Settings = request.app.state.settings
+        data_dir = Path(request.app.state.data_dir)
+        catalog = normalized_ollama_profiles(s.ollama)
+        name = (body.profile or "").strip()
+        if name not in catalog:
+            known = ", ".join(sorted(catalog))
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown profile {name!r}; known: {known}",
+            )
+        try:
+            sticky = load_active_profile(data_dir)
+        except ActiveModelStateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        current_sticky = sticky if sticky is not None else "default"
+        loaded_profile = s.ollama.active_profile or "default"
+        model_tag = str(catalog[name].model or "")
+        changed = current_sticky != name
+        if changed:
+            try:
+                write_active_profile(data_dir, name)
+            except ActiveModelStateError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        restart_required = name != loaded_profile
+        return ModelProfileActiveOut(
+            active_profile=name,
+            model=model_tag,
+            changed=changed,
+            restart_required=restart_required,
+        )
 
     @application.post(
         "/v1/chat",

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AudioCapture } from "./lib/audio";
 import { cancelReply, confirmReply, shouldShowWriteConfirm } from "./lib/confirmation";
-import { normalizeBrainUrl } from "./lib/format";
+import { normalizeBrainUrl, isLoopbackBrainUrl } from "./lib/format";
 import { editSeedValue, formatPreferenceDisplay, type PreferenceRow } from "./lib/prefs";
 import type {
   AppSettings,
@@ -13,6 +13,8 @@ import type {
   ConversationSummary,
   HealthBadge,
   LaunchResult,
+  ModelProfileActiveResult,
+  ModelProfilesState,
   SseEvent,
 } from "./lib/types";
 
@@ -37,7 +39,7 @@ const HELP_TEXT = [
   "Commands:",
   "  /new       — new conversation",
   "  /history   — resume a past conversation",
-  "  /settings  — edit brain preferences",
+  "  /settings  — preferences + Active model",
   "  /connect   — brain URL + token",
   "  /copy      — copy last assistant reply",
   "  /help      — this help",
@@ -98,6 +100,8 @@ const el = {
   prefsEditLabel: document.querySelector("#prefs-edit-label") as HTMLElement,
   prefsEdit: document.querySelector("#prefs-edit") as HTMLInputElement,
   btnPrefsClose: document.querySelector("#btn-prefs-close") as HTMLButtonElement,
+  modelProfileSelect: document.querySelector("#model-profile-select") as HTMLSelectElement,
+  modelProfileHint: document.querySelector("#model-profile-hint") as HTMLElement,
   connectDialog: document.querySelector("#connect-dialog") as HTMLDialogElement,
   connectForm: document.querySelector("#connect-form") as HTMLFormElement,
   connectUrl: document.querySelector("#connect-url") as HTMLInputElement,
@@ -339,27 +343,137 @@ async function openPrefs() {
   el.prefsList.replaceChildren();
   el.prefsEditWrap.classList.add("hidden");
   state.prefsEditingKey = null;
+  el.modelProfileHint.textContent = "";
   try {
-    const rows = await invoke<PreferenceRow[]>("list_preferences");
+    const [rows, profiles] = await Promise.all([
+      invoke<PreferenceRow[]>("list_preferences"),
+      invoke<ModelProfilesState>("list_model_profiles"),
+    ]);
+    fillModelProfileSelect(profiles);
     if (!rows.length) {
-      setStatus("");
       appendMessage({ role: "system", content: "No preferences available." });
-      return;
-    }
-    for (const row of rows) {
-      const li = document.createElement("li");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = formatPreferenceDisplay(row.key, row.value);
-      btn.addEventListener("click", () => beginPrefsEdit(row.key, row.value));
-      li.appendChild(btn);
-      el.prefsList.appendChild(li);
+    } else {
+      for (const row of rows) {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = formatPreferenceDisplay(row.key, row.value);
+        btn.addEventListener("click", () => beginPrefsEdit(row.key, row.value));
+        li.appendChild(btn);
+        el.prefsList.appendChild(li);
+      }
     }
     setStatus("");
     el.prefsDialog.showModal();
   } catch (e) {
     setStatus("");
     appendMessage({ role: "error", content: String(e) });
+  }
+}
+
+function fillModelProfileSelect(stateProfiles: ModelProfilesState) {
+  el.modelProfileSelect.replaceChildren();
+  for (const p of stateProfiles.profiles) {
+    const opt = document.createElement("option");
+    opt.value = p.name;
+    opt.textContent = `${p.name} (${p.model})`;
+    el.modelProfileSelect.appendChild(opt);
+  }
+  el.modelProfileSelect.value = stateProfiles.active_profile;
+  const hints: string[] = [];
+  if (stateProfiles.restart_pending) {
+    hints.push(
+      `Restart pending — sticky ${stateProfiles.active_profile}, loaded ${stateProfiles.loaded_profile} (${stateProfiles.loaded_model})`,
+    );
+  } else {
+    hints.push(`Loaded: ${stateProfiles.loaded_profile} (${stateProfiles.loaded_model})`);
+  }
+  if (stateProfiles.env_masked_fields?.length) {
+    hints.push(`Env override: ${stateProfiles.env_masked_fields.join(", ")}`);
+  }
+  el.modelProfileHint.textContent = hints.join(" · ");
+}
+
+async function pollModelProfilesLoaded(
+  desired: string,
+  timeoutMs = 60_000,
+): Promise<ModelProfilesState> {
+  const deadline = Date.now() + timeoutMs;
+  let last: ModelProfilesState | null = null;
+  while (Date.now() < deadline) {
+    last = await invoke<ModelProfilesState>("list_model_profiles");
+    if (!last.restart_pending && last.loaded_profile === desired) {
+      return last;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!last) {
+    throw new Error("Could not read model profiles after restart");
+  }
+  throw new Error(
+    `Brain did not load profile ${desired} in time (sticky ${last.active_profile}, loaded ${last.loaded_profile})`,
+  );
+}
+
+async function onModelProfileChange() {
+  const profile = el.modelProfileSelect.value;
+  if (!profile) return;
+  setStatus(`Switching Active model to ${profile}…`);
+  try {
+    const result = await invoke<ModelProfileActiveResult>("set_active_model_profile", {
+      profile,
+    });
+    const brainUrl = state.settings?.brain_url || "http://127.0.0.1:8000";
+    if (!result.restart_required) {
+      const latest = await invoke<ModelProfilesState>("list_model_profiles");
+      fillModelProfileSelect(latest);
+      setStatus("");
+      appendMessage({
+        role: "system",
+        content: `Active model already loaded: ${result.active_profile} (${result.model})`,
+      });
+      return;
+    }
+    if (!isLoopbackBrainUrl(brainUrl)) {
+      setStatus("");
+      appendMessage({
+        role: "system",
+        content:
+          `Active model saved as ${result.active_profile} (${result.model}). ` +
+          "Restart the brain on the host to apply (remote URL — GUI will not restart it).",
+      });
+      const latest = await invoke<ModelProfilesState>("list_model_profiles");
+      fillModelProfileSelect(latest);
+      return;
+    }
+    setStatus("Restarting brain…");
+    const launch = await invoke<LaunchResult>("restart_brain_for_profile");
+    if (!launch.started) {
+      setStatus("");
+      appendMessage({
+        role: "error",
+        content: `Active model saved as ${result.active_profile}, but restart failed: ${launch.message}`,
+      });
+      return;
+    }
+    setStatus("Waiting for brain to load new profile…");
+    const loaded = await pollModelProfilesLoaded(result.active_profile);
+    fillModelProfileSelect(loaded);
+    setStatus("");
+    appendMessage({
+      role: "system",
+      content: `Active model now ${loaded.loaded_profile} (${loaded.loaded_model})`,
+    });
+    await refreshHealth();
+  } catch (e) {
+    setStatus("");
+    appendMessage({ role: "error", content: `Could not switch Active model: ${e}` });
+    try {
+      const latest = await invoke<ModelProfilesState>("list_model_profiles");
+      fillModelProfileSelect(latest);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -687,6 +801,9 @@ async function boot() {
   el.micBtn.addEventListener("click", () => void toggleMic());
   el.btnHistoryClose.addEventListener("click", closeHistory);
   el.btnPrefsClose.addEventListener("click", closePrefs);
+  el.modelProfileSelect.addEventListener("change", () => {
+    void onModelProfileChange();
+  });
   el.connectCancel.addEventListener("click", () => el.connectDialog.close());
   el.connectForm.addEventListener("submit", (e) => void saveConnectFromForm(e));
   el.prefsEdit.addEventListener("keydown", (e) => {

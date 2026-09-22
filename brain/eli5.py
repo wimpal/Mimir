@@ -25,7 +25,7 @@ _ELI5_INTENT = re.compile(
 
 # Mandatory per-turn append — stronger than the base prompt section alone.
 ELI5_SYSTEM_APPEND = """ACTIVE MODE THIS TURN — ELI5 / SIMPLIFY (mandatory):
-- Plain short sentences. Keep Jarvis dryness: simplify the *ideas*, not the *persona*.
+- Plain short sentences. Stay direct and plain: simplify the *ideas*, not the delivery.
 - Never use emoji, emoticons, or decorative symbols (no bread, sparkles, etc.).
 - Never use baby-talk, mascots ("tiny superhero"), or cheerleading ("like a cloud!").
 - Prefer periods over exclamation marks. No hype.

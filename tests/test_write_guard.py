@@ -357,7 +357,7 @@ def test_agent_reroutes_party_mode_to_house_wide_set_state() -> None:
             ),
             ChatMessage(
                 role="assistant",
-                content="All lights are on, sir.",
+                content="All lights are on.",
             ),
         ]
     )
@@ -369,7 +369,8 @@ def test_agent_reroutes_party_mode_to_house_wide_set_state() -> None:
     assert result.stopped_reason == StoppedReason.FINAL
     assert "homebase.lights.party_mode" not in called
     assert "homebase.lights.set_state" in called
-    assert "All lights are on" in (result.content or "")
+    assert "are now on" in (result.content or "")
+    assert "sir" not in (result.content or "").lower()
 
 
 def test_agent_nudges_when_write_skipped_then_completes() -> None:
@@ -388,7 +389,7 @@ def test_agent_nudges_when_write_skipped_then_completes() -> None:
         [
             ChatMessage(
                 role="assistant",
-                content="Stofzuigen is gemarkeerd als compleet, sir.",
+                content="Stofzuigen is gemarkeerd als compleet.",
             ),
             ChatMessage(
                 role="assistant",
@@ -404,7 +405,7 @@ def test_agent_nudges_when_write_skipped_then_completes() -> None:
             ),
             ChatMessage(
                 role="assistant",
-                content="Stofzuigen is now marked complete, sir.",
+                content="Stofzuigen is now marked complete.",
             ),
         ]
     )
@@ -413,9 +414,9 @@ def test_agent_nudges_when_write_skipped_then_completes() -> None:
         [
             ChatMessage(
                 role="user",
-                content="Dweilen is gemarkeerd als compleet, sir.",
+                content="Dweilen is gemarkeerd als compleet.",
             ),
-            ChatMessage(role="assistant", content="Certainly, sir."),
+            ChatMessage(role="assistant", content="Done."),
             ChatMessage(role="user", content="markeer stofzuigen als compleet"),
         ],
         tools=registry,

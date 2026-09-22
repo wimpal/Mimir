@@ -17,6 +17,7 @@ _ENV_VARS = [
     "MIMIR_OLLAMA_MODEL",
     "MIMIR_OLLAMA_NUM_CTX",
     "MIMIR_OLLAMA_THINK",
+    "MIMIR_OLLAMA_KEEP_ALIVE",
     "MIMIR_LATITUDE",
     "MIMIR_LONGITUDE",
     "MIMIR_TIMEZONE",
@@ -50,9 +51,11 @@ _ENV_VARS = [
 
 
 @pytest.fixture(autouse=True)
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for var in _ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    # Isolate sticky Active model state from the operator's ./data.
+    monkeypatch.setenv("MIMIR_DATA_DIR", str(tmp_path / "mimir-data"))
 
 
 def write_config(tmp_path: Path, text: str = VALID_YAML) -> Path:
@@ -90,10 +93,14 @@ def test_minimal_config_loads_with_defaults(tmp_path: Path) -> None:
     assert s.calendar.feeds == []
 
 
-def test_repo_example_config_loads() -> None:
+def test_repo_example_config_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MIMIR_DATA_DIR", str(tmp_path / "example-data"))
     example = Path(__file__).parents[1] / "config" / "config.example.yaml"
     s = load_config(example, use_dotenv=False)
     assert s.ollama.model == "qwen3:8b"
+    assert s.ollama.active_profile == "default"
+    assert "default" in s.ollama.profiles
+    assert "trial_14b" in s.ollama.profiles
     assert s.ollama.num_ctx == 8192
     assert s.ollama.think is False
     assert s.agent.max_iterations == 3

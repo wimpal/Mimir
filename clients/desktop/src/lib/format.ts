@@ -27,3 +27,13 @@ export function normalizeBrainUrl(url: string): string {
   }
   return out.replace(/\/$/, "");
 }
+
+/** True when the brain URL host is loopback-only. */
+export function isLoopbackBrainUrl(url: string): boolean {
+  try {
+    const host = new URL(normalizeBrainUrl(url)).hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
+}

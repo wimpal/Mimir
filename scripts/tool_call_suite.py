@@ -678,6 +678,47 @@ def _require_weather_tomorrow() -> Callable[[TurnResult], CheckResult]:
     return check
 
 
+def _require_weather_day_part(part: str) -> Callable[[TurnResult], CheckResult]:
+    """Reply must ground in day_parts[part] temps/conditions (T-061)."""
+
+    def check(result: TurnResult) -> CheckResult:
+        if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
+            return _fail_all("ollama_error")
+        if "get_weather" not in result.tools_used():
+            return _fail_right("no_tool_when_required")
+        payload = _weather_payload(result)
+        if not payload or payload.startswith("error:"):
+            return _fail_args("malformed_args")
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return _fail_args("malformed_args")
+        parts = data.get("day_parts") if isinstance(data.get("day_parts"), dict) else {}
+        slice_ = parts.get(part) if isinstance(parts.get(part), dict) else None
+        if slice_ is None and part == "evening":
+            slice_ = parts.get("night") if isinstance(parts.get("night"), dict) else None
+        content = (result.content or "").lower()
+        if not content.strip():
+            return _fail_used("empty_response")
+        if not slice_:
+            # No remaining slice — accept an explicit no-forecast line.
+            if "voorspelling" in content or "forecast" in content or "don't have" in content:
+                return _ok()
+            return _fail_used("tool_not_used_in_answer")
+        tmax = slice_.get("temp_max_c")
+        tmin = slice_.get("temp_min_c")
+        cond = (slice_.get("conditions") or "").lower()
+        if (
+            _temp_in_content(tmax, content)
+            or _temp_in_content(tmin, content)
+            or _condition_in_content(cond, content)
+        ):
+            return _ok()
+        return _fail_used("tool_not_used_in_answer")
+
+    return check
+
+
 def _require_weather_offline_clear() -> Callable[[TurnResult], CheckResult]:
     def check(result: TurnResult) -> CheckResult:
         if result.stopped_reason == StoppedReason.OLLAMA_ERROR:
@@ -1492,6 +1533,18 @@ CASES: list[Case] = [
         _require_weather_tomorrow(),
     ),
     Case(
+        "weather_6",
+        "must_call_weather",
+        "Wat is het weer vanavond?",
+        _require_weather_day_part("evening"),
+    ),
+    Case(
+        "weather_7",
+        "must_call_weather",
+        "What's the weather tonight?",
+        _require_weather_day_part("evening"),
+    ),
+    Case(
         "weather_4",
         "weather_offline",
         "What's the weather right now?",
@@ -1968,7 +2021,8 @@ def main() -> int:
     )
 
     print(
-        f"model={settings.ollama.model} url={settings.ollama.url} "
+        f"model={settings.ollama.model} active_profile={settings.ollama.active_profile} "
+        f"url={settings.ollama.url} "
         f"num_ctx={settings.ollama.num_ctx} think={settings.ollama.think}"
     )
     print(f"tools={[t['function']['name'] for t in tool_schemas(registry)]}")

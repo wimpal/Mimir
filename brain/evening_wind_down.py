@@ -84,8 +84,8 @@ def evening_wind_down_locale(text: str) -> Locale:
 
 def format_evening_greeting(locale: Locale) -> str:
     if locale == "nl":
-        return "Welterusten, meneer."
-    return "Good night, sir."
+        return "Welterusten."
+    return "Good night."
 
 
 def _round_temp(value: float | int | None) -> int | None:
@@ -145,8 +145,8 @@ def format_tomorrow_schedule_sentence(
 ) -> str:
     if not events:
         if locale == "nl":
-            return "Niets op de agenda morgen, meneer."
-        return "Nothing on the calendar tomorrow, sir."
+            return "Niets op de agenda morgen."
+        return "Nothing on the calendar tomorrow."
     lines = [format_event_line(ev, locale=locale) for ev in events]
     joined = "; ".join(lines)
     if locale == "nl":

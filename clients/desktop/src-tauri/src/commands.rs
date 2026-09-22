@@ -10,11 +10,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex};
 
 use crate::brain_client::{
-    get_health, get_preferences, list_conversations, list_messages, post_stt, put_preference,
-    stream_chat, ChatMessage, ConversationSummary, HealthBadge, PreferenceRow, SttResult,
+    get_health, get_model_profiles, get_preferences, list_conversations, list_messages, post_stt,
+    put_active_model_profile, put_preference, stream_chat, ChatMessage, ConversationSummary,
+    HealthBadge, ModelProfileActiveResult, ModelProfilesState, PreferenceRow, SttResult,
     StreamChatArgs, TURN_TIMEOUT_S,
 };
-use crate::launcher::{ensure_brain_running, LaunchResult};
+use crate::launcher::{ensure_brain_running, restart_brain_brain_only, LaunchResult};
 use crate::settings::{
     get_settings, save_settings, set_conversation_id, AppSettings, SaveSettingsInput,
 };
@@ -270,6 +271,39 @@ pub async fn save_preference(
     put_preference(&s.brain_url, &token, &key, &value)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_model_profiles(app: AppHandle) -> Result<ModelProfilesState, String> {
+    let s = get_settings(&app);
+    let token = s
+        .token
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "Bad token — check /connect.".to_string())?;
+    get_model_profiles(&s.brain_url, &token)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_active_model_profile(
+    app: AppHandle,
+    profile: String,
+) -> Result<ModelProfileActiveResult, String> {
+    let s = get_settings(&app);
+    let token = s
+        .token
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "Bad token — check /connect.".to_string())?;
+    put_active_model_profile(&s.brain_url, &token, &profile)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restart_brain_for_profile(app: AppHandle) -> Result<LaunchResult, String> {
+    let s = get_settings(&app);
+    Ok(restart_brain_brain_only(&s.brain_url).await)
 }
 
 #[tauri::command]

@@ -103,7 +103,7 @@ def test_lights_locale_fixup_dutch_after_english_style_reply() -> None:
     )
 
     facts = {"name": "Ballon", "room": "Kantoor", "on": False}
-    en_reply = "The Ballon lamp in the office is now off, sir."
+    en_reply = "The Ballon lamp in the office is now off."
     assert reply_locale_mismatch("nl", en_reply)
     assert needs_lights_locale_fixup(
         "Zet de balonlamp uit.",
@@ -117,7 +117,8 @@ def test_lights_locale_fixup_dutch_after_english_style_reply() -> None:
     )
     assert "staat nu uit" in fixed
     assert "Ballon" in fixed
-    assert "meneer" in fixed.lower() or "Meneer" in fixed
+    assert "sir" not in fixed.lower()
+    assert "meneer" not in fixed.lower()
     assert format_lights_toggle_reply(facts, "en").startswith("The Ballon")
 
 
@@ -151,7 +152,7 @@ def test_agent_forces_dutch_light_reply_before_english_stream() -> None:
             return ChatResponse(
                 message=ChatMessage(
                     role="assistant",
-                    content="The Ballon lamp in the office is now off, sir.",
+                    content="The Ballon lamp in the office is now off.",
                 )
             )
 
@@ -600,3 +601,205 @@ def test_agent_forces_weather_when_model_skips_tool() -> None:
     assert "morgen" in content
     assert "graden" in content
     assert "moment" not in content
+
+
+def test_agent_forces_weather_on_empty_vanavond_reply() -> None:
+    """Operator smoke failure: empty Ollama turn must force get_weather, not EMPTY_RESPONSE."""
+    registry = {
+        "get_weather": _read_tool("get_weather", json.dumps(DAY_PART_WEATHER)),
+    }
+    client = _ScriptedClient([ChatMessage(role="assistant", content="")])
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="wat is het weer vanavond?")],
+        tools=registry,
+        max_iterations=3,
+    )
+    content = (result.content or "").lower()
+    anomalies = [s.anomaly for s in result.steps]
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "weather_tools_forced" in anomalies
+    assert "vanavond" in content
+    assert "13" in content or "16" in content
+    assert "geen voorspelling" not in content
+
+
+def test_agent_salvages_weather_on_max_iterations_after_fetch() -> None:
+    """Tomorrow ask: model keeps calling unrelated tools → salvage from weather payload."""
+    registry = {
+        "get_weather": _read_tool("get_weather", json.dumps(WEATHER_WITH_TOMORROW)),
+        "homebase.tasks.list": _read_tool(
+            "homebase.tasks.list",
+            json.dumps({"tasks": [], "count": 0}),
+        ),
+    }
+    forever_tasks = ChatMessage(
+        role="assistant",
+        content="",
+        tool_calls=[
+            ToolCall(
+                function=ToolCallFunction(
+                    name="homebase.tasks.list",
+                    arguments={"include_done": True},
+                )
+            )
+        ],
+    )
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="get_weather",
+                            arguments={"day_offset": 1},
+                        )
+                    ),
+                ],
+            ),
+            forever_tasks,
+            forever_tasks,
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="what is the weather tomorrow?")],
+        tools=registry,
+        max_iterations=3,
+    )
+    content = (result.content or "").lower()
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert "tomorrow" in content
+    assert "18" in content or "9" in content or "partly cloudy" in content
+
+
+DAY_PART_WEATHER = {
+    "current": {"temperature_c": 18.0, "conditions": "clear"},
+    "today": {"temp_max_c": 22.0, "temp_min_c": 12.0, "conditions": "clear"},
+    "day_parts": {
+        "evening": {
+            "temp_min_c": 13.0,
+            "temp_max_c": 16.0,
+            "precipitation_mm": 0.5,
+            "conditions": "moderate rain",
+            "weather_code": 63,
+            "start": "2026-08-25T18:00",
+            "end": "2026-08-25T23:00",
+        },
+        "night": {
+            "temp_min_c": 10.0,
+            "temp_max_c": 12.0,
+            "precipitation_mm": 0.0,
+            "conditions": "fog",
+            "weather_code": 45,
+            "start": "2026-08-26T01:00",
+            "end": "2026-08-26T05:00",
+        },
+    },
+}
+
+
+def test_user_asked_about_day_part_vanavond_tonight() -> None:
+    from brain.turn_fixup import user_asked_about_day_part
+
+    assert user_asked_about_day_part("Wat is het weer vanavond?") == "evening"
+    assert user_asked_about_day_part("What's the weather tonight?") == "evening"
+    assert user_asked_about_day_part("What's the weather this afternoon?") == "afternoon"
+    assert user_asked_about_day_part("wat is het weer vanmiddag?") == "afternoon"
+    assert user_asked_about_day_part("wat is het weer vanochtend?") == "morning"
+    assert user_asked_about_day_part("wat is het weer vannacht?") == "night"
+    assert user_asked_about_day_part("wat is het weer morgenavond?") is None
+    assert user_asked_about_day_part("goedemorgen") is None
+    assert user_asked_about_day_part("wat is het weer nu?") is None
+
+
+def test_format_weather_one_liner_vanavond() -> None:
+    from brain.turn_fixup import format_weather_one_liner
+
+    out = format_weather_one_liner(
+        DAY_PART_WEATHER, "nl", user_message="Wat is het weer vanavond?"
+    )
+    assert "Vanavond" in out
+    assert "13" in out and "16" in out
+    assert "22" not in out  # not today high
+    assert "18" not in out  # not current
+
+
+def test_format_weather_one_liner_tonight_en() -> None:
+    from brain.turn_fixup import format_weather_one_liner
+
+    out = format_weather_one_liner(
+        DAY_PART_WEATHER, "en", user_message="What's the weather tonight?"
+    )
+    assert "Tonight" in out
+    assert "13" in out and "16" in out
+    assert "moderate rain" in out
+
+
+def test_format_weather_one_liner_evening_empty_falls_to_night() -> None:
+    from brain.turn_fixup import format_weather_one_liner
+
+    weather = {
+        "current": {"temperature_c": 11.0, "conditions": "clear"},
+        "today": {"temp_max_c": 22.0, "temp_min_c": 10.0, "conditions": "clear"},
+        "day_parts": {
+            "night": {
+                "temp_min_c": 9.0,
+                "temp_max_c": 11.0,
+                "conditions": "fog",
+            }
+        },
+    }
+    out = format_weather_one_liner(
+        weather, "nl", user_message="Wat is het weer vanavond?"
+    )
+    assert "Vannacht" in out
+    assert "9" in out
+    assert "22" not in out
+
+
+def test_format_weather_one_liner_missing_day_part_no_today_fallback() -> None:
+    from brain.turn_fixup import format_weather_one_liner
+
+    weather = {
+        "current": {"temperature_c": 18.0, "conditions": "clear"},
+        "today": {"temp_max_c": 22.0, "temp_min_c": 12.0, "conditions": "clear"},
+        "day_parts": {},
+    }
+    out = format_weather_one_liner(
+        weather, "nl", user_message="Wat is het weer vanavond?"
+    )
+    assert "geen voorspelling" in out.lower()
+    assert "22" not in out
+    assert "Het is nu" not in out
+
+
+def test_needs_fixup_always_rebuilds_day_part() -> None:
+    from brain.turn_fixup import needs_weather_shopping_fixup
+
+    # Even a factful now+today reply must be rebuilt for vanavond.
+    reply = "Het is nu helder, 18 graden. Vandaag tussen 12 en 22 graden."
+    assert needs_weather_shopping_fixup(
+        "Wat is het weer vanavond?",
+        reply,
+        weather=DAY_PART_WEATHER,
+        shopping_list_fetched=False,
+        shopping_items=[],
+    )
+
+
+def test_fix_vanavond_replaces_now_today_template() -> None:
+    from brain.turn_fixup import fix_weather_shopping_reply
+
+    out = fix_weather_shopping_reply(
+        "Het is nu helder, 18 graden. Vandaag tussen 12 en 22 graden.",
+        "Wat is het weer vanavond?",
+        weather=DAY_PART_WEATHER,
+        shopping_list_fetched=False,
+        shopping_items=[],
+    )
+    assert "Vanavond" in out
+    assert "13" in out and "16" in out
+    assert "Het is nu" not in out

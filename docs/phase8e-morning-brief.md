@@ -10,7 +10,7 @@
   push
 - Reply language matches the user (English vs Dutch, etc.)
 - Reply opens with a short greeting in that language (“Good morning” /
-  “Goedemorgen”, optionally “… sir” / “… meneer”), then **weather + today’s
+  “Goedemorgen”), then **weather + today’s
   schedule only** (no news, no movie digression)
 - Calendar feed `context` / per-event `calendar_context` used when paraphrasing
   (e.g. work “filmen” = shoot, not watching a movie)

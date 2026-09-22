@@ -197,8 +197,10 @@ def create_app(
                     await mcp_bridge.close()
                 raise RuntimeError(str(exc)) from exc
             logger.info(
-                "brain ready model=%s prompt_id=%s data_dir=%s mcp_unavailable=%s",
+                "brain ready model=%s active_profile=%s prompt_id=%s "
+                "data_dir=%s mcp_unavailable=%s",
                 cfg.ollama.model,
+                cfg.ollama.active_profile,
                 app.state.prompt_id,
                 app.state.data_dir,
                 mcp_bridge.unavailable if mcp_bridge else [],

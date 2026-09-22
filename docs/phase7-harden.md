@@ -11,7 +11,7 @@
 | `/health` | Always open (no Auth token). |
 | Host-only | `POST /v1/jellyfin/sync` and `GET /debug/recent-traces` require loopback client. |
 | Debug | `GET /debug/recent-traces?limit=50` — Turn trace summaries only (no message bodies). |
-| Personality | Jarvis-led system prompt — [`phase7-personality.md`](./phase7-personality.md). |
+| Personality | Direct/simple system prompt — [`phase7-personality.md`](./phase7-personality.md). |
 | Backup | [`ops-backup.md`](./ops-backup.md). |
 | Remote access | Deferred to Phase 11 backlog (local network only this phase). |
 

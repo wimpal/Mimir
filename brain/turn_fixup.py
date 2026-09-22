@@ -37,6 +37,29 @@ _WEATHER_ASK = re.compile(
 
 _TOMORROW_ASK = re.compile(r"\b(morgen|tomorrow)\b", re.IGNORECASE)
 
+# Tomorrow-evening is out of scope for today day_parts (T-061).
+_TOMORROW_EVENING_ASK = re.compile(
+    r"morgenavond|tomorrow\s+(evening|night)",
+    re.IGNORECASE,
+)
+
+_DAY_PART_EVENING = re.compile(
+    r"\b(vanavond|tonight|avond|evening)\b",
+    re.IGNORECASE,
+)
+_DAY_PART_AFTERNOON = re.compile(
+    r"\b(vanmiddag|middag|afternoon)\b",
+    re.IGNORECASE,
+)
+_DAY_PART_MORNING = re.compile(
+    r"\b(vanochtend|this\s+morning|ochtend)\b",
+    re.IGNORECASE,
+)
+_DAY_PART_NIGHT = re.compile(
+    r"\b(vannacht|at\s+night|nacht|overnight)\b",
+    re.IGNORECASE,
+)
+
 # Facts that mean the reply actually answered weather (not "checking the weather…").
 _WEATHER_FACT_IN_REPLY = re.compile(
     r"(°c|°\s*c|\bgraden\b|\bdegrees?\b|\btemperatuur\b|\btemperature\b|"
@@ -202,6 +225,35 @@ def user_asked_about_tomorrow(text: str) -> bool:
     return bool(_TOMORROW_ASK.search(text or ""))
 
 
+def user_asked_about_day_part(
+    text: str,
+) -> Literal["morning", "afternoon", "evening", "night"] | None:
+    """Return the requested today-relative day-part, or None.
+
+    *morgenavond* / *tomorrow evening* are out of scope (not today's slices).
+    Requires a weather ask so bare greetings do not count as morning weather.
+    """
+    message = text or ""
+    if not user_asked_about_weather(message):
+        return None
+    if _TOMORROW_EVENING_ASK.search(message):
+        return None
+    lowered = message.lower()
+    # Specific evening tokens first (vanavond / tonight).
+    if "vanavond" in lowered or "tonight" in lowered:
+        return "evening"
+    if _DAY_PART_NIGHT.search(message) and not user_asked_about_tomorrow(message):
+        return "night"
+    if _DAY_PART_AFTERNOON.search(message) and not user_asked_about_tomorrow(message):
+        return "afternoon"
+    if _DAY_PART_MORNING.search(message) and not user_asked_about_tomorrow(message):
+        return "morning"
+    # Generic avond/evening — skip when paired with morgen/tomorrow.
+    if _DAY_PART_EVENING.search(message) and not user_asked_about_tomorrow(message):
+        return "evening"
+    return None
+
+
 def weather_reply_lacks_facts(reply: str) -> bool:
     """True when the reply does not contain grounded weather facts.
 
@@ -305,6 +357,10 @@ def format_weather_one_liner(
             sentence = f"{sentence}, up to {tmax} degrees"
         return f"{sentence}."
 
+    day_part = user_asked_about_day_part(user_message)
+    if day_part is not None:
+        return format_day_part_one_liner(weather, locale, day_part)
+
     current = weather.get("current") if isinstance(weather.get("current"), dict) else {}
     today = weather.get("today") if isinstance(weather.get("today"), dict) else {}
     temp = _round_temp(current.get("temperature_c"))
@@ -328,6 +384,73 @@ def format_weather_one_liner(
     if not compact and tmax is not None and tmin is not None:
         sentence = f"{sentence} Today between {tmin} and {tmax} degrees."
     return sentence
+
+
+_DAY_PART_LABEL_NL: dict[str, str] = {
+    "morning": "Vanochtend",
+    "afternoon": "Vanmiddag",
+    "evening": "Vanavond",
+    "night": "Vannacht",
+}
+_DAY_PART_LABEL_EN: dict[str, str] = {
+    "morning": "This morning",
+    "afternoon": "This afternoon",
+    "evening": "Tonight",
+    "night": "Tonight overnight",
+}
+
+
+def _day_part_slice(
+    weather: dict[str, Any], key: str
+) -> dict[str, Any] | None:
+    parts = weather.get("day_parts")
+    if not isinstance(parts, dict):
+        return None
+    slice_ = parts.get(key)
+    return slice_ if isinstance(slice_, dict) else None
+
+
+def format_day_part_one_liner(
+    weather: dict[str, Any],
+    locale: Locale,
+    day_part: Literal["morning", "afternoon", "evening", "night"],
+) -> str:
+    """Ground a day-part ask in day_parts; never fall back to today high/low."""
+    slice_ = _day_part_slice(weather, day_part)
+    # vanavond/tonight with empty evening → remaining night.
+    if slice_ is None and day_part == "evening":
+        slice_ = _day_part_slice(weather, "night")
+        day_part = "night" if slice_ is not None else day_part
+
+    if slice_ is None:
+        if locale == "nl":
+            return "Voor dat deel van de dag heb ik geen voorspelling."
+        return "I don't have a forecast for that part of the day."
+
+    conditions = _translate_conditions(str(slice_.get("conditions") or ""), locale)
+    tmax = _round_temp(slice_.get("temp_max_c"))
+    tmin = _round_temp(slice_.get("temp_min_c"))
+    label_nl = _DAY_PART_LABEL_NL[day_part]
+    label_en = _DAY_PART_LABEL_EN[day_part]
+
+    if locale == "nl":
+        sentence = f"{label_nl} is het {conditions}" if conditions else label_nl
+        if tmin is not None and tmax is not None and tmin != tmax:
+            sentence = f"{sentence}, tussen {tmin} en {tmax} graden"
+        elif tmax is not None:
+            sentence = f"{sentence}, rond {tmax} graden"
+        elif tmin is not None:
+            sentence = f"{sentence}, rond {tmin} graden"
+        return f"{sentence}."
+
+    sentence = f"{label_en} looks {conditions}" if conditions else label_en
+    if tmin is not None and tmax is not None and tmin != tmax:
+        sentence = f"{sentence}, between {tmin} and {tmax} degrees"
+    elif tmax is not None:
+        sentence = f"{sentence}, around {tmax} degrees"
+    elif tmin is not None:
+        sentence = f"{sentence}, around {tmin} degrees"
+    return f"{sentence}."
 
 
 def format_shopping_list_sentence(items: list[dict[str, Any]], locale: Locale) -> str:
@@ -401,6 +524,14 @@ def needs_weather_shopping_fixup(
     if asked_weather and weather and user_asked_about_tomorrow(user_message):
         return True
 
+    # T-061: day-part asks always rebuild from day_parts (not now+today template).
+    # Skip for morning greetings — those keep greeting + calendar via morning-brief path.
+    if asked_weather and weather and user_asked_about_day_part(user_message):
+        from brain.morning_brief import is_morning_greeting
+
+        if not is_morning_greeting(user_message):
+            return True
+
     if shopping_list_fetched and not reply_grounded_in_shopping_list(
         reply, shopping_items
     ):
@@ -456,24 +587,24 @@ def format_lights_toggle_reply(facts: dict[str, Any], locale: Locale) -> str:
         state = "aan" if on else "uit"
         if count > 1 and label:
             if room:
-                return f"Lampen {label} in {room} staan nu {state}, meneer."
-            return f"Lampen {label} staan nu {state}, meneer."
+                return f"Lampen {label} in {room} staan nu {state}."
+            return f"Lampen {label} staan nu {state}."
         if label and room:
-            return f"Lamp {label} in {room} staat nu {state}, meneer."
+            return f"Lamp {label} in {room} staat nu {state}."
         if label:
-            return f"Lamp {label} staat nu {state}, meneer."
-        return f"De lamp staat nu {state}, meneer."
+            return f"Lamp {label} staat nu {state}."
+        return f"De lamp staat nu {state}."
 
     state = "on" if on else "off"
     if count > 1 and label:
         if room:
-            return f"The lamps {label} in {room} are now {state}, sir."
-        return f"The lamps {label} are now {state}, sir."
+            return f"The {label} lamps in {room} are now {state}."
+        return f"The {label} lamps are now {state}."
     if label and room:
-        return f"The {label} lamp in {room} is now {state}, sir."
+        return f"The {label} lamp in {room} is now {state}."
     if label:
-        return f"The {label} lamp is now {state}, sir."
-    return f"The lamp is now {state}, sir."
+        return f"The {label} lamp is now {state}."
+    return f"The lamp is now {state}."
 
 
 def needs_lights_locale_fixup(

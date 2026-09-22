@@ -56,8 +56,11 @@ is the project’s ground truth for *this* stack.
 proxy**, not an abliterated / “uncensored” fine-tune. Abliterated finetunes often
 degrade instruction-following and structured tool calls — the capability we
 optimized for. Stay on stock `qwen3:8b` unless a measured suite run justifies a
-swap. Personality is **Jarvis-led** (calm competence, dry wit, brief answers);
-refusal style and tone live in
+swap. To trial another local tag without losing the daily driver, use **Model
+profiles** + sticky **Active model** (`uv run python -m brain.model_profiles`,
+[`docs/model-profiles.md`](./docs/model-profiles.md)) — not env-only edits.
+Personality is **direct and concise** (plain confirmations, no honorifics
+or wit); refusal style and tone live in
 [`config/system_prompt.md`](./config/system_prompt.md).
 
 **Thinking mode (locked):** Qwen3 is hybrid. **`think: false` for all tool loops

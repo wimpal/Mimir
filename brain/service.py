@@ -92,6 +92,29 @@ def _user_facing_reply(result: TurnResult) -> str:
     return MSG_EMPTY
 
 
+def stream_final_unsent(streamed: str, reply: str) -> str:
+    """Return any assistant text still needed after SSE deltas, or empty.
+
+    Clients concatenate token events. Never re-emit a full ``reply`` when
+    ``streamed`` is already non-empty and does not prefix-match — that
+    duplicated sentences after emoji strip (T-072).
+    """
+    if not reply:
+        return ""
+    if not streamed:
+        return reply
+    if reply.startswith(streamed):
+        return reply[len(streamed) :]
+    if streamed.startswith(reply):
+        return ""
+    logger.warning(
+        "stream/final mismatch; keeping streamed (streamed_len=%s reply_len=%s)",
+        len(streamed),
+        len(reply),
+    )
+    return ""
+
+
 def _normalize_conversation_id(conversation_id: str | None) -> str | None:
     if conversation_id is None:
         return None
@@ -489,15 +512,9 @@ class BrainService:
                 )
                 streamed = "".join(streamed_parts)
                 reply = outcome.reply
-                if reply:
-                    if not streamed:
-                        emit_assistant_text(reply)
-                    elif reply.startswith(streamed):
-                        unsent = reply[len(streamed) :]
-                        if unsent:
-                            emit_assistant_text(unsent)
-                    elif streamed != reply:
-                        emit_assistant_text(reply)
+                unsent = stream_final_unsent(streamed, reply or "")
+                if unsent:
+                    emit_assistant_text(unsent)
                 tail = sentence_buf.flush()
                 if tail:
                     event_q.put(

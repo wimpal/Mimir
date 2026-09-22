@@ -19,12 +19,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PHRASES: dict[str, list[str]] = {
     "nl": [
-        "Kaas is toegevoegd aan de boodschappenlijst, sir.",
+        "Kaas is toegevoegd aan de boodschappenlijst.",
         "Morgen wordt het achttien graden Celsius in Utrecht.",
         "We hebben vorige maand tweehonderd euro aan boodschappen uitgegeven.",
     ],
     "en": [
-        "Cheese has been added to the shopping list, sir.",
+        "Cheese has been added to the shopping list.",
         "Tomorrow it will be eighteen degrees Celsius in Utrecht.",
     ],
 }

@@ -59,3 +59,26 @@ export type LaunchResult = {
   message: string;
   pid?: number | null;
 };
+
+export type ModelProfileItem = {
+  name: string;
+  model: string;
+  num_ctx?: number | null;
+  think?: boolean | null;
+};
+
+export type ModelProfilesState = {
+  active_profile: string;
+  loaded_profile: string;
+  loaded_model: string;
+  restart_pending: boolean;
+  env_masked_fields: string[];
+  profiles: ModelProfileItem[];
+};
+
+export type ModelProfileActiveResult = {
+  active_profile: string;
+  model: string;
+  changed: boolean;
+  restart_required: boolean;
+};
