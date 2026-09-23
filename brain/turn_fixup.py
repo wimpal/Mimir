@@ -31,7 +31,8 @@ _EN_MARKERS = re.compile(
 )
 
 _WEATHER_ASK = re.compile(
-    r"\b(weer|weather|forecast|voorspelling|temperatuur|temperature|regen|rain)\b",
+    # Do not match hyphenated tokens like "no-weather-42" (suite echo controls).
+    r"(?<![\w-])(weer|weather|forecast|voorspelling|temperatuur|temperature|regen|rain)(?![\w-])",
     re.IGNORECASE,
 )
 

@@ -109,7 +109,16 @@ from brain.repeat_last import (
 )
 from brain.shopping_list import filter_shopping_list_tool_result
 from brain.tools import TOOLS, Tool, dispatch, tool_schemas
-from brain.tool_gate import should_offer_tools
+from brain.tool_format import content_looks_like_tool_markup, normalize_message_tool_calls, strip_tool_markup
+from brain.tool_gate import filter_schemas_for_turn, is_echo_exact_intent, should_offer_tools
+from brain.tool_retry import (
+    MAX_BUDGET_FOLLOWUP_NUDGES,
+    MAX_PREFERENCE_TOOL_NUDGES,
+    budget_followup_retry_nudge,
+    preference_retry_nudge,
+    user_message_is_budget_person_followup,
+    user_message_requests_preference_write,
+)
 from brain.turn_fixup import (
     can_tool_backed_weather_shopping_reply,
     fix_lights_locale_reply,
@@ -652,13 +661,14 @@ def run_turn(
     ``settings`` + ``unavailable_services`` enable T-052 capability discovery.
     """
     registry = TOOLS if tools is None else tools
-    schemas = tool_schemas(registry)
+    schemas = filter_schemas_for_turn(tool_schemas(registry), _latest_user_message(list(messages)))
     working = list(messages)
     steps: list[StepTrace] = []
     last_content = ""
     user_message = _latest_user_message(working)
-    if not should_offer_tools(user_message):
-        schemas = []
+    preference_nudge_count = 0
+    budget_followup_nudge_count = 0
+    result_nudge_count = 0
     write_tool_called_this_turn = False
     recipe_staged_this_turn = False
     recipe_gate_handled_this_turn = False
@@ -672,6 +682,7 @@ def run_turn(
     shopping_list_items_this_turn: list[dict[str, Any]] = []
     lights_set_state_facts_this_turn: dict[str, Any] | None = None
     usage_stats_payload_this_turn: dict[str, Any] | None = None
+    random_fact_text_this_turn: str | None = None
     tools_used_this_turn: list[str] = []
     weather_force_used = False
     recipe_save_turn = user_message_requests_recipe_save(user_message)
@@ -1092,7 +1103,12 @@ def run_turn(
             )
 
         ollama_latency = (time.perf_counter() - t0) * 1000
-        msg = response.message
+        offered_names = {
+            _schema_tool_name(s) for s in ollama_schemas if _schema_tool_name(s)
+        }
+        msg = normalize_message_tool_calls(
+            response.message, allowed_names=offered_names
+        )
         last_content = msg.content or last_content
         tool_names = [tc.function.name for tc in msg.tool_calls]
 
@@ -1103,6 +1119,35 @@ def run_turn(
 
         if not msg.tool_calls:
             anomaly = None
+            # T-090: model emitted tool XML as the final answer.
+            if content_looks_like_tool_markup(msg.content or "") and result_nudge_count < 1:
+                result_nudge_count += 1
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=False,
+                        anomaly="tool_markup_as_answer",
+                        content_preview=(msg.content or "")[:120],
+                    )
+                )
+                if _has_tool_results_this_turn(working):
+                    nudge = (
+                        "Answer now using the tool results above in plain text. "
+                        "Do not emit tool_call or function markup."
+                    )
+                else:
+                    nudge = (
+                        "Answer in plain text without tools or tool_call markup."
+                    )
+                    # Drop leaked markup from the transcript so clients never see it.
+                    working.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=strip_tool_markup(msg.content or "") or "",
+                        )
+                    )
+                working.append(ChatMessage(role="user", content=nudge))
+                continue
             if not (msg.content or "").strip():
                 # T-021/T-047: empty with recipe-save intent — nudge extract+stage
                 # (paste or after web.fetch) instead of dying on empty_response.
@@ -1163,6 +1208,37 @@ def run_turn(
                     and "get_weather" in registry
                     and not weather_force_used
                 )
+                # T-090: empty model text after morning tools → code-backed brief.
+                if (
+                    is_morning_greeting(user_message)
+                    and not morning_brief_tools_incomplete(
+                        weather=weather_payload_this_turn,
+                        calendar_fetched=calendar_fetched_this_turn,
+                    )
+                ):
+                    locale = morning_brief_locale(user_message)
+                    fixed = build_morning_brief_from_tools(
+                        weather=weather_payload_this_turn,
+                        events=calendar_events_this_turn,
+                        locale=locale,
+                        calendar_fetched=calendar_fetched_this_turn,
+                        user_message=user_message,
+                    )
+                    steps.append(
+                        _step(
+                            tool_names=[],
+                            success=True,
+                            anomaly="morning_brief_empty_fixup",
+                            content_preview=fixed[:120],
+                        )
+                    )
+                    working.append(ChatMessage(role="assistant", content=fixed))
+                    return TurnResult(
+                        content=fixed,
+                        messages=working,
+                        steps=steps,
+                        stopped_reason=StoppedReason.FINAL,
+                    )
                 # Morning / evening greetings with empty text still need brief tools.
                 if (
                     not weather_force_pending
@@ -1260,6 +1336,51 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
                 )
+            if (
+                user_message_requests_preference_write(user_message)
+                and "set_preference" in offered_names
+                and preference_nudge_count < MAX_PREFERENCE_TOOL_NUDGES
+            ):
+                preference_nudge_count += 1
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=False,
+                        anomaly="preference_skipped",
+                        content_preview=(msg.content or "")[:120],
+                    )
+                )
+                working.append(
+                    ChatMessage(
+                        role="user",
+                        content=preference_retry_nudge(user_message),
+                    )
+                )
+                continue
+            if (
+                user_message_is_budget_person_followup(user_message, working)
+                and (
+                    "budgettracker.transactions.search" in offered_names
+                    or "budgettracker.summary.by_category" in offered_names
+                )
+                and budget_followup_nudge_count < MAX_BUDGET_FOLLOWUP_NUDGES
+            ):
+                budget_followup_nudge_count += 1
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=False,
+                        anomaly="budget_followup_skipped",
+                        content_preview=(msg.content or "")[:120],
+                    )
+                )
+                working.append(
+                    ChatMessage(
+                        role="user",
+                        content=budget_followup_retry_nudge(user_message),
+                    )
+                )
+                continue
             if is_morning_greeting(user_message):
                 locale = morning_brief_locale(user_message)
                 reply_text = msg.content or ""
@@ -1475,6 +1596,31 @@ def run_turn(
                         stopped_reason=StoppedReason.FINAL,
                     )
             reply_text = msg.content or ""
+            # T-090: random_fact called but reply ignored the tool fact — use the tool text.
+            if random_fact_text_this_turn:
+                needle = random_fact_text_this_turn[:24].lower()
+                words = [w for w in random_fact_text_this_turn.lower().split() if len(w) > 4][:3]
+                grounded = (
+                    (needle and needle in reply_text.lower())
+                    or (words and all(w in reply_text.lower() for w in words))
+                )
+                if not grounded:
+                    fixed = random_fact_text_this_turn
+                    steps.append(
+                        _step(
+                            tool_names=[],
+                            success=True,
+                            anomaly="random_fact_fixup",
+                            content_preview=fixed[:120],
+                        )
+                    )
+                    working.append(ChatMessage(role="assistant", content=fixed))
+                    return TurnResult(
+                        content=fixed,
+                        messages=working,
+                        steps=steps,
+                        stopped_reason=StoppedReason.FINAL,
+                    )
             # T-058: model pasted usage_stats JSON (or empty) — rewrite from payload.
             if needs_usage_stats_fixup(reply_text, usage_stats_payload_this_turn):
                 assert usage_stats_payload_this_turn is not None
@@ -1500,7 +1646,8 @@ def run_turn(
             # Weather asked but never fetched successfully — force get_weather once
             # (covers day_offset tool_error + "one moment please" filler with no tools).
             if (
-                user_asked_about_weather(user_message)
+                not is_echo_exact_intent(user_message)
+                and user_asked_about_weather(user_message)
                 and weather_payload_this_turn is None
                 and "get_weather" in registry
                 and not weather_force_used
@@ -1810,6 +1957,23 @@ def run_turn(
                         )
                     )
 
+            # T-090: never dispatch tools that were not offered this Ollama round
+            # (empty offered_names means the model was given no tools).
+            if dispatch_name not in offered_names:
+                skip_msg = (
+                    f"error: tool '{dispatch_name}' was not offered this turn"
+                )
+                if on_tool_start is not None:
+                    on_tool_start(dispatch_name, dispatch_args)
+                if on_tool_end is not None:
+                    on_tool_end(dispatch_name, False, skip_msg[:200])
+                working.append(_tool_result_message(result_tc, skip_msg))
+                dispatch_failed = True
+                if anomaly is None:
+                    anomaly = "tool_not_offered"
+                tools_used_this_turn.append(dispatch_name)
+                continue
+
             if on_tool_start is not None:
                 on_tool_start(dispatch_name, dispatch_args)
 
@@ -2068,6 +2232,15 @@ def run_turn(
                 parsed_usage = parse_usage_payload(result)
                 if parsed_usage is not None:
                     usage_stats_payload_this_turn = parsed_usage
+            if dispatch_name == "random_fact" and not tool_result_is_error(result):
+                try:
+                    fact_data = json.loads(result)
+                    if isinstance(fact_data, dict):
+                        fact_text = str(fact_data.get("fact") or "").strip()
+                        if fact_text:
+                            random_fact_text_this_turn = fact_text
+                except (json.JSONDecodeError, TypeError):
+                    pass
             if (
                 dispatch_name == "homebase.shopping_list.list"
                 and not tool_result_is_error(result)

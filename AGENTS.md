@@ -75,7 +75,7 @@ Mimir is the **orchestrator** and the only MCP client. It exposes no tools of it
 
 ### Repo guide
 
-Offline, self-hosted personal assistant. v1 is a **thin chat client** talking to a **FastAPI brain** that runs **Ollama + Qwen3** with tools (weather, Jellyfin). Voice (Home Assistant / Wyoming) is v2 and must not reshape the brain.
+Offline, self-hosted personal assistant. v1 is a **thin chat client** talking to a **FastAPI brain** that runs **Ollama + Granite 4.2 8B** (default) with tools (weather, Jellyfin). Voice (Home Assistant / Wyoming) is v2 and must not reshape the brain.
 
 ## Read first
 
@@ -97,7 +97,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 
 | Layer | Choice |
 |---|---|
-| Inference | **Ollama** + **stock Qwen3 8B** Q4_K_M (dev default). **14B** optional on 16 GB GPU (middle tier). **30B-A3B** only on 24 GB compute box. Not an abliterated “uncensored” finetune |
+| Inference | **Ollama** + **Granite 4.2 8B** (dev default, T-090). **Qwen3 8B** rollback profile; **14B** optional on 16 GB GPU. **30B-A3B** only on 24 GB compute box. Not an abliterated silent daily driver |
 | Options | `ollama.num_ctx: 8192`, `ollama.think: false` (tool loops + voice) |
 | Orchestration | **Custom FastAPI** tool loop — not LangChain / LlamaIndex / CrewAI |
 | Memory | **SQLite** (history, prefs, Jellyfin cache); hand-rolled migrations (`schema_version`, Phase 4+) |

@@ -78,3 +78,35 @@ def test_run_turn_omits_tools_for_chat_recall() -> None:
     assert calls
     assert calls[0]["tools"] in (None, [])
     assert "zebra" in (result.content or "")
+
+
+def test_echo_exact_and_modes_surface() -> None:
+    from brain.tool_gate import (
+        filter_schemas_for_turn,
+        is_echo_exact_intent,
+        is_non_live_modes_turn,
+        should_offer_tools,
+    )
+
+    assert is_echo_exact_intent("Echo exactly: no-weather-42")
+    assert should_offer_tools("Echo exactly: no-weather-42")
+    schemas = [
+        {"type": "function", "function": {"name": "echo"}},
+        {"type": "function", "function": {"name": "get_weather"}},
+    ]
+    filtered = filter_schemas_for_turn(schemas, "Echo exactly: no-weather-42")
+    assert [s["function"]["name"] for s in filtered] == ["echo"]
+
+    both = "Give me both sides of working from home versus the office."
+    assert is_non_live_modes_turn(both)
+    assert not should_offer_tools(both)
+    assert filter_schemas_for_turn(schemas, both) == []
+
+    # Live ELI5 still offers tools
+    live = "ELI5: what is the weather today?"
+    assert should_offer_tools(live)
+
+def test_preference_remember_offers_tools() -> None:
+    assert should_offer_tools(
+        "Please remember that my favorite genres are sci-fi and drama."
+    )

@@ -264,12 +264,11 @@ def strip_false_empty_claims(reply: str, locale: Locale) -> str:
 
 _LOCALE_GREETING_IN_REPLY: dict[Locale, re.Pattern[str]] = {
     "en": re.compile(
-        r"\b(good\s*morning|goodmorning|morning|mornin)\b",
-        re.IGNORECASE,
+        r"(?i)^\s*(good\s*morning|goodmorning|morning|mornin)\b",
     ),
+    # Reply check: require an actual morning greeting — bare "Morgen" (tomorrow) must not count.
     "nl": re.compile(
-        r"\b(goedemorgen|goed\s*morgen|goemorge|morge|morgen)\b",
-        re.IGNORECASE,
+        r"(?i)^\s*(goedemorgen|goed\s*morgen|goemorge|morge)\b",
     ),
 }
 
@@ -494,25 +493,27 @@ def fix_morning_brief(
             user_message=user_message,
         )
 
-    base = strip_false_empty_claims(reply, locale).rstrip()
-
-    # Model returned schedule only — rebuild greeting + weather + schedule.
-    if events and reply_grounded_in_calendar(base, events) and (
-        morning_brief_lacks_greeting(reply, locale) or morning_brief_lacks_weather(reply)
+    # Any missing greeting / weather / calendar grounding → full code-backed brief.
+    # Avoid merge_schedule-only paths that drop Goedemorgen or weather facts (T-090).
+    if weather and calendar_fetched and (
+        morning_brief_lacks_greeting(reply, locale)
+        or morning_brief_lacks_weather(reply)
+        or (events and needs_calendar_grounding_fix(reply, events, locale))
+        or (
+            not events
+            and not reply_falsely_claims_empty(reply, locale)
+            and (reply or "").strip()
+        )
     ):
-        parts: list[str] = []
-        if morning_brief_lacks_greeting(reply, locale):
-            parts.append(format_greeting(locale))
-        if weather and morning_brief_lacks_weather(reply):
-            parts.append(
-                format_weather_brief(weather, locale, user_message=user_message)
-            )
-        parts.append(format_schedule_sentence(events, locale))
-        return " ".join(parts)
+        return build_morning_brief_from_tools(
+            weather=weather,
+            events=events,
+            locale=locale,
+            calendar_fetched=calendar_fetched,
+            user_message=user_message,
+        )
 
-    # Greeting + weather present — append or fix schedule only.
-    if events and needs_calendar_grounding_fix(reply, events, locale):
-        return merge_schedule_into_reply(reply, events, locale)
+    base = strip_false_empty_claims(reply, locale).rstrip()
 
     # Empty calendar day missing a clear-schedule line.
     if (

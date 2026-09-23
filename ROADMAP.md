@@ -11,7 +11,7 @@ Source of truth for product intent: `[Concept.md](./Concept.md)`.
 
 | Role                              | Hardware                                            | Model choice                                                                               |
 | --------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| **Dev machine (now)**             | AMD Radeon RX **9070 XT 16 GB**                     | **Qwen3 8B** Q4_K_M (default); optional **Qwen3 14B** on the same GPU — see middle tier   |
+| **Dev machine (now)**             | AMD Radeon RX **9070 XT 16 GB**                     | **Granite 4.2 8B** (default, T-090); optional **Qwen3 8B/14B** on the same GPU — see middle tier |
 | **Compute box — 16 GB tier**      | x86 Linux + **12–16 GB** discrete GPU               | **Qwen3 14B** Q4_K_M — always-on target without paying for 24 GB VRAM                    |
 | **Compute box — 24 GB tier**      | x86 + **24 GB** NVIDIA, or Mac mini **64 GB+**      | Optional **Qwen3 30B-A3B**; brain/API unchanged                                           |
 
@@ -71,14 +71,14 @@ Lock choices before code so schema and APIs don’t thrash later.
 
 | Decision         | Status                                                                                                                                 |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Inference        | **Locked:** Ollama + **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on 9070 XT; **14B** optional same GPU; **30B-A3B** deferred to 24 GB compute box |
+| Inference        | **Locked:** Ollama + **Granite 4.2 8B** (`granite4.2:8b`, default profile) on 9070 XT; **Qwen3 8B** rollback profile; **14B** optional same GPU; **30B-A3B** deferred to 24 GB compute box |
 | Orchestration    | **Locked:** custom FastAPI loop (no LangChain)                                                                                         |
 | Storage          | **Locked:** SQLite: history, prefs, Jellyfin cache                                                                                     |
 | Clients          | **Locked:** thin chat UI first; brain stays OpenAI-compatible / HTTP-agnostic                                                          |
 | Profiles         | **Locked:** single-user for v1 — no users table/FKs; revisit only if multi-user becomes a day-one requirement                          |
 | Personality      | **Locked:** direct, concise household assistant (plain confirms, no honorifics/wit) — see `[config/system_prompt.md](./config/system_prompt.md)` |
 | Language/tooling | **Locked:** Python 3.12+, uv, ruff; config = `config/config.yaml` (non-secrets) + `.env` secrets, `MIMIR_`* env overrides YAML         |
-| “Uncensored”     | **Locked:** self-hosted / no cloud moderation — **stock** `qwen3:8b`, not an abliterated finetune (tool-calling tradeoff; see Concept) |
+| “Uncensored”     | **Locked:** self-hosted / no cloud moderation — not an abliterated finetune as silent daily driver (tool-calling tradeoff; see Concept). Default = Granite after measured suite |
 | Thinking mode    | **Locked:** `ollama.think: false` for tool loops and voice                                                                             |
 | Context          | **Locked default:** `ollama.num_ctx: 8192` (set explicitly; never rely on Ollama’s silent default)                                     |
 

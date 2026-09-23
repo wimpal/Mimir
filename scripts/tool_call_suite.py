@@ -5,18 +5,21 @@ Exit 0 if pass rate >= 80%, else 1.
 Reports right_tool / valid_args / result_used separately (ROADMAP quality metrics).
 
   uv run python scripts/tool_call_suite.py
+  uv run python scripts/tool_call_suite.py --json-out data/logs/suite_autopsy.json
+  uv run python scripts/tool_call_suite.py --case weather_4
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import statistics
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +128,9 @@ class CaseResult:
     result_used: bool
     tool_sequence: list[str] = field(default_factory=list)
     content_preview: str = ""
+    content: str = ""
+    tool_trace: list[dict[str, Any]] = field(default_factory=list)
+    failure_class: str = ""
 
 
 def _ok() -> CheckResult:
@@ -145,6 +151,114 @@ def _fail_used(reason: str) -> CheckResult:
 
 def _fail_all(reason: str) -> CheckResult:
     return CheckResult(False, False, False, reason)
+
+
+_OFFLINE_FAIL_WORDS = (
+    "unavailable",
+    "not available",
+    "unable",
+    "can't",
+    "cannot",
+    "couldn't",
+    "could not",
+    "failed",
+    "error",
+    "offline",
+    "reach",
+    "timeout",
+    "timed out",
+    "down",
+)
+
+
+def classify_failure(reason: str, content: str = "") -> str:
+    """Map checker reason (+ content) to a T-090 failure class."""
+    if reason == "ok":
+        return "ok"
+    known = {
+        "no_tool_when_required",
+        "unexpected_tool",
+        "tool_not_used_in_answer",
+        "malformed_args",
+        "empty_response",
+        "ollama_error",
+        "max_iterations",
+    }
+    if reason in known:
+        return reason
+    lowered = (content or "").lower()
+    if "<tool_call" in lowered or "<|tool_call" in lowered:
+        return "format_xml_leakage"
+    if reason.startswith("reply_") or reason.startswith("missing_") or reason.startswith("english_"):
+        return reason
+    return reason or "unknown"
+
+
+def _tool_trace(result: TurnResult) -> list[dict[str, Any]]:
+    trace: list[dict[str, Any]] = []
+    for m in result.messages:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                trace.append(
+                    {
+                        "kind": "call",
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    }
+                )
+        elif m.role == "tool":
+            body = m.content or ""
+            trace.append(
+                {
+                    "kind": "result",
+                    "name": m.tool_name,
+                    "content": body if len(body) <= 4000 else body[:4000] + "…",
+                }
+            )
+    return trace
+
+
+def build_autopsy(
+    *,
+    settings: Settings,
+    results: list[CaseResult],
+    rates: dict[str, float],
+) -> dict[str, Any]:
+    fails = [r for r in results if not r.passed]
+    by_class: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in fails:
+        cls = r.failure_class or classify_failure(r.reason, r.content)
+        by_class[cls].append(
+            {
+                "id": r.id,
+                "category": r.category,
+                "reason": r.reason,
+                "failure_class": cls,
+                "tool_sequence": r.tool_sequence,
+                "content": r.content,
+                "tool_trace": r.tool_trace,
+                "right_tool": r.right_tool,
+                "valid_args": r.valid_args,
+                "result_used": r.result_used,
+                "latency_ms": r.latency_ms,
+            }
+        )
+    passed = sum(1 for r in results if r.passed)
+    total = len(results)
+    return {
+        "model": settings.ollama.model,
+        "active_profile": settings.ollama.active_profile,
+        "num_ctx": settings.ollama.num_ctx,
+        "think": settings.ollama.think,
+        "pass_rate": f"{passed}/{total}",
+        "pass_pct": (passed / total) if total else 0.0,
+        "right_tool": rates["right_tool"],
+        "valid_args": rates["valid_args"],
+        "result_used": rates["result_used"],
+        "reasons": dict(Counter(r.reason for r in results)),
+        "failures_by_class": dict(by_class),
+        "failure_ids": [r.id for r in fails],
+    }
 
 
 def _tools_called(result: TurnResult) -> list[str]:
@@ -731,20 +845,7 @@ def _require_weather_offline_clear() -> Callable[[TurnResult], CheckResult]:
         content = (result.content or "").lower()
         if not content.strip():
             return _fail_used("empty_response")
-        fail_words = (
-            "unavailable",
-            "unable",
-            "can't",
-            "cannot",
-            "failed",
-            "error",
-            "offline",
-            "reach",
-            "timeout",
-            "timed out",
-            "down",
-        )
-        if not any(w in content for w in fail_words):
+        if not any(w in content for w in _OFFLINE_FAIL_WORDS):
             return _fail_used("tool_not_used_in_answer")
         return _ok()
 
@@ -843,21 +944,7 @@ def _require_currency_offline_clear() -> Callable[[TurnResult], CheckResult]:
         content = (result.content or "").lower()
         if not content.strip():
             return _fail_used("empty_response")
-        fail_words = (
-            "unavailable",
-            "unable",
-            "can't",
-            "cannot",
-            "failed",
-            "error",
-            "offline",
-            "reach",
-            "timeout",
-            "timed out",
-            "down",
-            "niet",
-            "onbereikbaar",
-        )
+        fail_words = _OFFLINE_FAIL_WORDS + ("niet", "onbereikbaar",)
         if not any(w in content for w in fail_words):
             return _fail_used("tool_not_used_in_answer")
         return _ok()
@@ -906,21 +993,7 @@ def _require_wikipedia_offline_clear() -> Callable[[TurnResult], CheckResult]:
         if not payload or not payload.startswith("error:"):
             return _fail_args("malformed_args")
         content = (result.content or "").lower()
-        fail_words = (
-            "unavailable",
-            "unable",
-            "can't",
-            "cannot",
-            "failed",
-            "error",
-            "offline",
-            "reach",
-            "timeout",
-            "timed out",
-            "down",
-            "niet",
-            "onbereikbaar",
-        )
+        fail_words = _OFFLINE_FAIL_WORDS + ("niet", "onbereikbaar",)
         if not content.strip() or not any(w in content for w in fail_words):
             return _fail_used("tool_not_used_in_answer")
         return _ok()
@@ -1006,21 +1079,7 @@ def _require_calendar_offline_clear() -> Callable[[TurnResult], CheckResult]:
         content = (result.content or "").lower()
         if not content.strip():
             return _fail_used("empty_response")
-        fail_words = (
-            "unavailable",
-            "unable",
-            "can't",
-            "cannot",
-            "failed",
-            "error",
-            "offline",
-            "reach",
-            "timeout",
-            "timed out",
-            "down",
-            "configured",
-            "calendar",
-        )
+        fail_words = _OFFLINE_FAIL_WORDS + ("configured", "calendar",)
         if not any(w in content for w in fail_words):
             return _fail_used("tool_not_used_in_answer")
         return _ok()
@@ -1868,7 +1927,9 @@ def run_case(
     )
     wall = (time.perf_counter() - t0) * 1000
     scored = case.check(result)
-    preview = (result.content or "").replace("\n", " ")[:80]
+    content = result.content or ""
+    preview = content.replace("\n", " ")[:80]
+    failure_class = "" if scored.passed else classify_failure(scored.reason, content)
     return CaseResult(
         id=case.id,
         category=case.category,
@@ -1880,6 +1941,9 @@ def run_case(
         result_used=scored.result_used,
         tool_sequence=result.tools_used(),
         content_preview=preview,
+        content=content,
+        tool_trace=_tool_trace(result),
+        failure_class=failure_class,
     )
 
 
@@ -1952,7 +2016,22 @@ def _suite_calendar_empty() -> str:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Standing tool-call suite")
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="Write autopsy JSON (banner + failures_by_class)",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        help="Run only these case ids (repeatable)",
+    )
+    args = parser.parse_args(argv)
+
     try:
         settings = load_config()
     except ConfigError as exc:
@@ -2020,13 +2099,22 @@ def main() -> int:
         wikipedia_fetch_override=_suite_wikipedia_payload,
     )
 
+    selected = list(CASES)
+    if args.case:
+        wanted = set(args.case)
+        selected = [c for c in CASES if c.id in wanted]
+        missing = wanted - {c.id for c in selected}
+        if missing:
+            print(f"ERROR: unknown case id(s): {sorted(missing)}", file=sys.stderr)
+            return 1
+
     print(
         f"model={settings.ollama.model} active_profile={settings.ollama.active_profile} "
         f"url={settings.ollama.url} "
         f"num_ctx={settings.ollama.num_ctx} think={settings.ollama.think}"
     )
     print(f"tools={[t['function']['name'] for t in tool_schemas(registry)]}")
-    print(f"cases={len(CASES)} threshold={PASS_THRESHOLD:.0%}\n")
+    print(f"cases={len(selected)} threshold={PASS_THRESHOLD:.0%}\n")
 
     results: list[CaseResult] = []
     with OllamaClient(
@@ -2035,7 +2123,7 @@ def main() -> int:
         num_ctx=settings.ollama.num_ctx,
         timeout_s=settings.timeouts.ollama_s,
     ) as client:
-        for case in CASES:
+        for case in selected:
             print(f"… {case.id} ({case.category})", flush=True)
             if case.id == "weather_4":
                 tools = offline_reg
@@ -2134,6 +2222,15 @@ def main() -> int:
     if followup_cases:
         f_pass = sum(1 for r in followup_cases if r.passed)
         print(f"followup_pinned={f_pass}/{len(followup_cases)}")
+
+    if args.json_out is not None:
+        autopsy = build_autopsy(settings=settings, results=results, rates=rates)
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(
+            json.dumps(autopsy, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"json_out={args.json_out}")
 
     if rate >= PASS_THRESHOLD:
         print(f"\nEXIT OK (>= {PASS_THRESHOLD:.0%})")

@@ -42,23 +42,28 @@ Reasoning:
 - vLLM is multi-user throughput tooling — unnecessary ops for a single-user assistant.
 - llama.cpp directly remains the fallback for fine-grained control later.
 
-**Model (locked for this hardware):** stock **Qwen3 8B** (`qwen3:8b`, Q4_K_M) on
-the current AMD box; optional **Qwen3 14B** on the same 16 GB GPU (middle tier —
+**Model (locked for this hardware):** **Granite 4.2 8B** (`granite4.2:8b`) is the
+daily-driver **default** profile (promoted 2026-09-23 after **T-090** suite
+**50/50** with harness). Optional **Qwen3 8B** (`qwen3:8b`) remains a named
+rollback profile; optional **Qwen3 14B** on the same 16 GB GPU (middle tier —
 try before buying 24 GB hardware); **Qwen3 30B-A3B** only on a later compute box
-with **24 GB** VRAM. See ROADMAP hardware + VRAM tables.
+with **24 GB** VRAM. See ROADMAP hardware + VRAM tables. Default `num_ctx` for
+Granite is **16384**.
 
-**Why Qwen3:** chosen for local tool-calling reliability via Ollama’s tools API.
-Do not treat comparative “beats Llama / Gemma on benchmarks” claims as fact
-without a dated source — re-verify if swapping models. Phase 1’s scripted suite
-is the project’s ground truth for *this* stack.
+**Why this default:** Phase 1's scripted suite is the project's ground truth for
+*this* stack. Granite cleared **100%** of the standing suite under the T-090
+harness; stock Qwen3 8B was the prior default by Concept lock, not scoreboard.
+Do not treat comparative "beats X on benchmarks" claims as fact without a dated
+source — re-verify with `tool_call_suite` if swapping models.
 
-**“Uncensored” decision (locked):** means **self-hosted + no cloud moderation
-proxy**, not an abliterated / “uncensored” fine-tune. Abliterated finetunes often
-degrade instruction-following and structured tool calls — the capability we
-optimized for. Stay on stock `qwen3:8b` unless a measured suite run justifies a
-swap. To trial another local tag without losing the daily driver, use **Model
-profiles** + sticky **Active model** (`uv run python -m brain.model_profiles`,
-[`docs/model-profiles.md`](./docs/model-profiles.md)) — not env-only edits.
+**"Uncensored" decision (locked):** means **self-hosted + no cloud moderation
+proxy**, not an abliterated / "uncensored" fine-tune as the silent daily driver.
+Abliterated finetunes often degrade instruction-following and structured tool
+calls. Trial other local tags via **Model profiles** + sticky **Active model**
+(`uv run python -m brain.model_profiles`,
+[`docs/model-profiles.md`](./docs/model-profiles.md)) — not env-only edits;
+promote `default` only after a measured suite run.
+
 Personality is **direct and concise** (plain confirmations, no honorifics
 or wit); refusal style and tone live in
 [`config/system_prompt.md`](./config/system_prompt.md).

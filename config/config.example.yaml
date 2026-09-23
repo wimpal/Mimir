@@ -9,20 +9,28 @@ ollama:
   # Flat fields = inheritance defaults for profiles (and sole source when
   # profiles is omitted). Active model is selected via sticky state + CLI —
   # see docs/model-profiles.md (T-074 / ADR-016).
-  model: qwen3:8b
+  # Inheritance defaults = daily-driver when a profile omits a field.
+  # Promoted 2026-09-23: granite4.2:8b after T-090 suite 50/50 (was qwen3:8b).
+  model: granite4.2:8b
   # Set explicitly — Ollama's default is often smaller and silently truncates
   # system + history + tool schemas + results (looks like "forgot" / dropped tools).
-  num_ctx: 8192
-  # Qwen3 hybrid thinking: off for tool loops and voice (latency + formatting).
+  num_ctx: 16384
+  # Thinking off for tool loops and voice (latency + formatting).
   think: false
   # Keep model in VRAM between turns (45m default). Env: MIMIR_OLLAMA_KEEP_ALIVE.
   keep_alive: 45m
   profiles:
     default:
+      model: granite4.2:8b
+      num_ctx: 16384
+    # Optional trial / rollback profiles (operator must `ollama pull` the tag first).
+    # Prefer tags that clear scripts/tool_call_suite.py ≥80% (see T-075 / T-090).
+    qwen3_8b:
       model: qwen3:8b
-    # Optional trial profile (operator must `ollama pull` the tag first):
-    trial_14b:
-      model: qwen3:14b
+      num_ctx: 8192
+    granite42_8b:
+      model: granite4.2:8b
+      num_ctx: 16384
 
 location:
   # Home coords for get_weather (Open-Meteo → KNMI HARMONIE for NL).

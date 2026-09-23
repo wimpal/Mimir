@@ -498,3 +498,20 @@ def test_agent_forces_tools_on_empty_morning_reply() -> None:
     assert "get_weather" in result.tools_used()
     assert "get_calendar" in result.tools_used()
     assert "niets op de agenda" in content.lower()
+
+
+def test_fix_morning_brief_adds_dutch_greeting_when_schedule_present() -> None:
+    reply = (
+        "Icijfer de weersgegevens: nu 18 graden, bewolkt. "
+        "Standup, from 12:00 to 13:00."
+    )
+    out = fix_morning_brief(
+        reply,
+        weather=WEATHER_PAYLOAD,
+        events=[TARA_EVENT],
+        locale="nl",
+        calendar_fetched=True,
+        user_message="Goedemorgen",
+    )
+    assert out.startswith("Goedemorgen")
+    assert "graden" in out.lower() or "bewolkt" in out.lower()
