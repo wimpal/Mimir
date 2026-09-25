@@ -52,6 +52,14 @@ _RECIPE_SAVE_NUDGE = (
     "Do not claim it was saved yet — the brain will ask the user to confirm."
 )
 
+_RECIPE_EDIT_NUDGE = (
+    "System correction (do not repeat to the user): the user asked to edit/retag/"
+    "set-calories/mark-optional a recipe THIS turn. Resolve the recipe "
+    "(recipes.search / known id) → recipes.get → merge deltas into a COMPLETE "
+    "homebase.recipes.update payload (full-replace) → call recipes.update once to "
+    "stage it. Never invent calories or nutrition the user did not state."
+)
+
 # Read-only questions — checked before mutation patterns.
 _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -67,6 +75,11 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bwat\s+kunnen\s+we\s+koken\b",
         r"\bwat\s+kunnen\s+we\s+eten\b",
         r"\brecept\s+met\b",
+        r"\bhow\s+many\s+calories\b",
+        r"\bhoeveel\s+calorie",
+        r"\blunch\s+recipes\b",
+        r"\brecepten\s+voor\s+lunch\b",
+        r"\brecipe(s)?\s+for\s+lunch\b",
         r"\brecipe\s+with\b",
         r"\bfind\s+a\s+recipe\b",
         r"\bzoek\s+een\s+recept\b",
@@ -177,6 +190,24 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+_DEVICE_WAKE_NUDGE = (
+    "THIS turn is Wake-on-LAN for a Network device (NAS/PC/TV) — not IKEA lights. "
+    "Call homebase.devices.list first, find a wake_capable match by name, then "
+    "homebase.devices.wake with device_id only. Never ask for a MAC. Never call "
+    "homebase.lights.set_state or party_mode for wake/wek phrases."
+)
+_DEVICE_TV_NUDGE = (
+    "THIS turn is LG webOS TV control (SSAP) via homebase.devices.go_home / "
+    "launch_app / set_input / power_off — not CEC and not Home Assistant. "
+    "Call homebase.devices.list, prefer tv_capable, M3-confirm, then the tool. "
+    "Use wake_if_needed when the set may be off (not for power_off); do not invent "
+    "fixed sleeps. Console / PlayStation → input hdmi1. TV-off phrases → "
+    "homebase.devices.power_off with device_id only. Never ask for SSAP client "
+    "key or MAC."
+)
+
+
+
 def user_message_requests_write(text: str) -> bool:
     """True when the latest user message shows mutation intent."""
     if not (text or "").strip():
@@ -188,10 +219,13 @@ def user_message_requests_write(text: str) -> bool:
         user_message_requests_house_wide_lights,
         user_message_requests_party_mode,
     )
+    from brain.device_inventory import user_message_requests_device_write
     from brain.recipe_import import (
         recipe_save_negated,
         user_message_renames_pending_recipe,
+        user_message_requests_recipe_edit,
         user_message_requests_recipe_save,
+        user_message_requests_recipe_to_shopping,
     )
 
     normalized = message_for_hints(text)
@@ -202,7 +236,13 @@ def user_message_requests_write(text: str) -> bool:
     # must not suppress "voeg dit recept met kip toe").
     if user_message_requests_recipe_save(normalized):
         return True
+    if user_message_requests_recipe_edit(normalized):
+        return True
+    if user_message_requests_recipe_to_shopping(normalized):
+        return True
     if user_message_renames_pending_recipe(normalized):
+        return True
+    if user_message_requests_device_write(normalized):
         return True
     # Lights classifiers before broad lights-in-room read-only patterns
     # ("light in the house" must not suppress house-wide on/off).
@@ -239,11 +279,24 @@ def write_retry_nudge(user_message: str) -> str:
         classify_lights_write_intent,
         party_mode_disallowed_this_turn,
     )
-    from brain.recipe_import import user_message_requests_recipe_save
+    from brain.device_inventory import (
+        user_message_requests_device_tv,
+        user_message_requests_device_wake,
+    )
+    from brain.recipe_import import (
+        user_message_requests_recipe_edit,
+        user_message_requests_recipe_save,
+    )
 
     normalized = message_for_hints(user_message)
+    if user_message_requests_device_tv(normalized):
+        return _DEVICE_TV_NUDGE
+    if user_message_requests_device_wake(normalized):
+        return _DEVICE_WAKE_NUDGE
     if user_message_requests_recipe_save(normalized):
         return _RECIPE_SAVE_NUDGE
+    if user_message_requests_recipe_edit(normalized):
+        return _RECIPE_EDIT_NUDGE
     if re.search(
         r"\b(markeer|mark|complete|afvinken)\b.*\b(compleet|klaar|af|gedaan|voltooid|done)\b",
         normalized,
@@ -284,6 +337,7 @@ def check_write_allowed(
     user_message: str,
     *,
     recipe_pending: bool = False,
+    device_pending: bool = False,
 ) -> str | None:
     """Return an error string when a write tool must be blocked, else None."""
     if not is_write_tool(tool_name):
@@ -293,8 +347,28 @@ def check_write_allowed(
         classify_lights_write_intent,
         party_mode_disallowed_this_turn,
     )
+    from brain.device_inventory import (
+        user_message_requests_device_power_off,
+        user_message_requests_device_wake,
+    )
     from brain.recipe_import import is_bare_confirm
 
+    if user_message_requests_device_wake(user_message) and tool_name in {
+        "homebase.lights.set_state",
+        "homebase.lights.party_mode",
+    }:
+        return (
+            "error: write blocked — wake/wek is Wake-on-LAN via homebase.devices.wake, "
+            "not lights (list wake_capable devices then wake by device_id)"
+        )
+    if user_message_requests_device_power_off(user_message) and tool_name in {
+        "homebase.lights.set_state",
+        "homebase.lights.party_mode",
+    }:
+        return (
+            "error: write blocked — TV off uses homebase.devices.power_off, "
+            "not lights (list tv_capable devices then power_off by device_id)"
+        )
     if tool_name == "homebase.lights.party_mode" and party_mode_disallowed_this_turn(
         user_message
     ):
@@ -319,10 +393,27 @@ def check_write_allowed(
             f"error: write blocked — evening wind-down only turns lights off "
             f"({tool_name})"
         )
-    # T-021: bare ja/yes unlocks recipes.add only when a staged candidate exists.
+    # T-021 / T-106: bare ja/yes unlocks recipes.add/update when staged.
     if (
-        tool_name == "homebase.recipes.add"
+        tool_name in {"homebase.recipes.add", "homebase.recipes.update"}
         and recipe_pending
+        and is_bare_confirm(user_message)
+    ):
+        return None
+    # T-108/T-101/T-112: bare ja/yes unlocks staged Network device writes.
+    if (
+        tool_name
+        in {
+            "homebase.devices.add",
+            "homebase.devices.update",
+            "homebase.devices.remove",
+            "homebase.devices.wake",
+            "homebase.devices.go_home",
+            "homebase.devices.launch_app",
+            "homebase.devices.set_input",
+            "homebase.devices.power_off",
+        }
+        and device_pending
         and is_bare_confirm(user_message)
     ):
         return None

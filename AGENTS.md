@@ -98,7 +98,7 @@ Do not invent scope outside Concept/Roadmap. Advance one phase at a time; meet t
 | Layer | Choice |
 |---|---|
 | Inference | **Ollama** + **Granite 4.2 8B** (dev default, T-090). **Qwen3 8B** rollback profile; **14B** optional on 16 GB GPU. **30B-A3B** only on 24 GB compute box. Not an abliterated silent daily driver |
-| Options | `ollama.num_ctx: 8192`, `ollama.think: false` (tool loops + voice) |
+| Options | `ollama.num_ctx: 32768` (default/granite; full tool schemas ~16.5k), `ollama.think: false` (tool loops + voice) |
 | Orchestration | **Custom FastAPI** tool loop — not LangChain / LlamaIndex / CrewAI |
 | Memory | **SQLite** (history, prefs, Jellyfin cache); hand-rolled migrations (`schema_version`, Phase 4+) |
 | Weather | **Open-Meteo** (no API key) → **KNMI HARMONIE** for NL; lat/long + timezone in config |

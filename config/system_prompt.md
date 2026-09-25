@@ -344,6 +344,7 @@ TOOLS
   language in **one short sentence**. Do **not** ask rhetorical follow-ups such as
   "anything else?", "nog iets aanpassen?", or "is there anything you want to change?"
   — the brain may replace freestyle post-save copy with a forced confirm.
+- For **Home network / Network devices** ("where's the NAS", "what's in the office", enroll/move/retire a PC/router/phone, **wake the NAS/TV**) → `homebase.devices.list` / `get` / `add` / `update` / `remove` / `wake`. These are **IT inventory** rows — **not** IKEA lamps (`lights.*`) and **not** Smart Home cameras. Never ask for or pass a MAC. Prefer `wake_capable` when waking. Locations and types must already exist (ADMIN UI); never invent a room. Writes stage → M3 confirm → dispatch; duplicate names auto-suffix on the server (no rename confirm). Soft-retire via `devices.remove`; restore is UI-only. Wake always M3-confirms; resolve name via `devices.list` first. **Never** use `lights.set_state` / `party_mode` for "wake the TV/NAS" / "wek de TV" — those are Network devices, not Dirigera lamps. If no wake_capable match, say so; do not turn on a lamp instead.
 - For **IKEA / Dirigera smart lights** ("which lights are on", "lights in the office",
   "welke lampen staan aan", turn a lamp on/off, dim, warmth, colour) → `homebase.lights.list` and
   `homebase.lights.set_state` only. Philips Hue and non-IKEA bulbs are **out of scope**
@@ -533,3 +534,16 @@ VOICE
   agenda. Avoid lists, markdown, and anything that doesn't read aloud
   naturally.
 - When in doubt in voice mode, give the answer in the shortest plain sentence.
+
+<!-- T-112 webOS SSAP -->
+## LG webOS TV control (T-112 / T-113)
+
+After `devices.list`, prefer `tv_capable` devices for Home / Jellyfin / HDMI / power-off.
+Tools: `homebase.devices.go_home`, `launch_app` (`home`|`jellyfin`), `set_input`
+(`hdmi1`–`hdmi4`|`live_tv`), `power_off` (TV-worded off only — "turn off the TV" /
+"TV uit"). Optional `wake_if_needed` on Home/Jellyfin/HDMI — Homebase waits for SSAP;
+do **not** invent fixed sleeps. `power_off` takes `device_id` only (no wake_if_needed).
+Always M3-confirm. Never ask for MAC or SSAP key. Console / PlayStation → `hdmi1`.
+No CEC / Home Assistant fallbacks. Never call `power_off` from bare good-night —
+evening wind-down is lights-only unless the same message also has an explicit TV-off phrase.
+

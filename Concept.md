@@ -74,9 +74,12 @@ it costs latency/tokens and can interfere with tool-call formatting. Config:
 `ollama.think` (default `false`).
 
 **Context window (locked default):** set `ollama.num_ctx` explicitly (default
-**8192**). Ollama’s implicit default is often smaller and **silently truncates**
-system prompt + history + tool schemas + tool results — which looks like “forgot”
-or “dropped a tool call”. Raise only after checking VRAM (`ollama ps`).
+**32768** for the Granite daily driver). Full Homebase+Budget tool schemas alone
+are ~16.5k tokens — **16384 overflowed** and Ollama returned
+`exceed_context_size_error` (looked like “can't reach the language model”).
+Ollama’s implicit default is often smaller and **silently truncates** system
+prompt + history + tool schemas + tool results. Raise further only after
+checking VRAM (`ollama ps`).
 
 ---
 

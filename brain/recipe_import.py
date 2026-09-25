@@ -11,6 +11,7 @@ from typing import Any
 from brain.repeat_last import is_repeat_intent
 
 RECIPE_ADD_TOOL = "homebase.recipes.add"
+RECIPE_UPDATE_TOOL = "homebase.recipes.update"
 
 MAX_TITLE_LEN = 200
 MAX_INGREDIENTS = 50
@@ -85,6 +86,52 @@ _RECIPE_RENAME_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+
+# T-106: edit / retag / calories / optional — write intent (not import/save).
+_RECIPE_EDIT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bedit\b.*\b(recipe|recept)\b",
+        r"\bedit\b\s+the\s+\w+",
+        r"\b(recipe|recept)\b.*\bedit\b",
+        r"\bchange\b.*\b(recipe|recept|steps?|ingredients?|tags?)\b",
+        r"\bupdate\b.*\b(recipe|recept)\b",
+        r"\b(recipe|recept)\b.*\bupdate\b",
+        r"\bpas\b.*\brecept\b.*\baan\b",
+        r"\brecept\b.*\baanpas",
+        r"\bwijzig\b.*\b(recept|stappen|ingredi[eë]nten)\b",
+        r"\bretag\b",
+        r"\btag\b.*\b(as|als|it|het|recept)\b",
+        r"\b(add|set)\b.*\btag\b",
+        r"\blabel\b.*\b(as|als)\b",
+        r"\btag\s+als\b",
+        r"\bset\b.*\bcalories?\b",
+        r"\bcalories?\b.*\b(to|are|=|:)\b",
+        r"\bzet\b.*\bcalorie",
+        r"\bcalorie[eë]n\b.*\b(op|naar|=|:)\b",
+        r"\bmark\b.*\boptional\b",
+        r"\bmake\b.*\boptional\b",
+        r"\bmaak\b.*\boptioneel\b",
+        r"\boptioneel\b.*\b(maak|zet|markeer)\b",
+    )
+)
+
+_RECIPE_EDIT_NEGATION = re.compile(
+    r"\b(don'?t|do\s+not|niet|geen)\b.*\b(edit|change|update|retag|tag|calories?|"
+    r"optional|pas\s+aan|wijzig|calorie)\b",
+    re.IGNORECASE,
+)
+
+_RECIPE_TO_SHOPPING_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\badd\b.*\b(the\s+)?\w+\b.*\b(to\s+the\s+)?(shopping\s+)?list\b",
+        r"\bzet\b.*\b(op\s+de\s+)?(boodschappen)?lijst\b",
+        r"\bboodschappen\b.*\bvoor\b",
+        r"\bingredi[eë]nten\b.*\b(lijst|boodschappen)\b",
+    )
+)
+
 @dataclass
 class PendingRecipe:
     payload: dict[str, Any]
@@ -93,6 +140,8 @@ class PendingRecipe:
     confirmable: bool = True
     # Locale of the original save/import turn — bare yes/ja must not flip EN/NL.
     dutch: bool = False
+    # T-106: staged tool — recipes.add or recipes.update.
+    tool_name: str = RECIPE_ADD_TOOL
 
 
 @dataclass
@@ -136,6 +185,7 @@ class PendingRecipeStore:
         payload: dict[str, Any],
         *,
         dutch: bool | None = None,
+        tool_name: str = RECIPE_ADD_TOOL,
     ) -> None:
         self._purge_expired()
         prior = self._by_conversation.get(conversation_id)
@@ -149,6 +199,7 @@ class PendingRecipeStore:
             payload=dict(payload),
             confirmable=True,
             dutch=locale,
+            tool_name=tool_name or RECIPE_ADD_TOOL,
         )
 
     def get(self, conversation_id: str | None) -> dict[str, Any] | None:
@@ -157,6 +208,15 @@ class PendingRecipeStore:
         self._purge_expired()
         item = self._by_conversation.get(conversation_id)
         return dict(item.payload) if item is not None else None
+
+    def get_tool_name(self, conversation_id: str | None) -> str:
+        if not conversation_id:
+            return RECIPE_ADD_TOOL
+        self._purge_expired()
+        item = self._by_conversation.get(conversation_id)
+        if item is None:
+            return RECIPE_ADD_TOOL
+        return item.tool_name or RECIPE_ADD_TOOL
 
     def is_dutch(self, conversation_id: str | None) -> bool:
         if not conversation_id:
@@ -241,6 +301,61 @@ def recipe_save_negated(text: str) -> bool:
     return bool((text or "").strip()) and _RECIPE_SAVE_NEGATION.search(text) is not None
 
 
+
+def recipe_edit_negated(text: str) -> bool:
+    return bool((text or "").strip()) and _RECIPE_EDIT_NEGATION.search(text) is not None
+
+
+def user_message_requests_recipe_edit(text: str) -> bool:
+    """True when the user asked to edit/retag/set-calories/mark-optional a recipe."""
+    if not (text or "").strip():
+        return False
+    if recipe_edit_negated(text):
+        return False
+    return any(p.search(text) for p in _RECIPE_EDIT_PATTERNS)
+
+
+def user_message_requests_recipe_to_shopping(text: str) -> bool:
+    """True when the user asked to put a recipe's ingredients on the shopping list."""
+    if not (text or "").strip():
+        return False
+    return any(p.search(text) for p in _RECIPE_TO_SHOPPING_PATTERNS)
+
+
+def may_stage_recipe_update(text: str, *, has_pending: bool) -> bool:
+    """Whether this turn may stage homebase.recipes.update."""
+    if user_message_requests_recipe_edit(text):
+        return True
+    return has_pending and user_message_renames_pending_recipe(text)
+
+
+def calories_answer_from_recipe(detail: dict | None) -> str | None:
+    """Return stated calories or None when unset — never invent."""
+    if not isinstance(detail, dict):
+        return None
+    cal = detail.get("calories")
+    if cal is None:
+        return None
+    try:
+        return str(float(cal))
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_recipe_get_with_deltas(base: dict, deltas: dict) -> dict:
+    """Build a full-replace recipes.update payload from get + user deltas."""
+    out = dict(base)
+    if "title" not in out and "name" in out:
+        out["title"] = out["name"]
+    for key, value in deltas.items():
+        out[key] = value
+    if "id" not in out and "id" in base:
+        out["id"] = base["id"]
+    out.pop("name", None)
+    out.pop("instructions", None)
+    return out
+
+
 def user_message_requests_recipe_save(text: str) -> bool:
     """True when the user explicitly asked to save/import a recipe."""
     if not (text or "").strip():
@@ -265,12 +380,14 @@ def may_stage_recipe_add(text: str, *, has_pending: bool) -> bool:
 
 
 def should_keep_pending_recipe(text: str) -> bool:
-    """True when the user message continues a pending import dialog."""
+    """True when the user message continues a pending import/update dialog."""
     if is_bare_confirm(text) or is_bare_cancel(text):
         return True
     if is_repeat_intent(text):
         return True
     if user_message_requests_recipe_save(text):
+        return True
+    if user_message_requests_recipe_edit(text):
         return True
     if user_message_renames_pending_recipe(text):
         return True
@@ -1004,6 +1121,13 @@ def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None
     if not steps:
         return None, "error: Invalid recipe payload — steps required"
 
+    if isinstance(ingredients_in, list):
+        for i, item in enumerate(ingredients_in):
+            if i >= len(ingredients):
+                break
+            if isinstance(item, dict) and item.get("optional"):
+                ingredients[i]["optional"] = True  # type: ignore[assignment]
+
     payload: dict[str, Any] = {
         "title": title,
         "ingredients": ingredients,
@@ -1014,6 +1138,27 @@ def normalize_recipe_payload(raw: dict[str, Any]) -> tuple[dict[str, Any] | None
     source_url = raw.get("source_url")
     if isinstance(source_url, str) and source_url.strip():
         payload["source_url"] = source_url.strip()
+    recipe_id = raw.get("id")
+    if isinstance(recipe_id, str) and recipe_id.strip():
+        payload["id"] = recipe_id.strip()
+    tags = raw.get("tags")
+    if isinstance(tags, list):
+        payload["tags"] = [str(t).strip().lower() for t in tags if str(t).strip()]
+    step_optional = raw.get("step_optional")
+    if isinstance(step_optional, list) and len(step_optional) == len(steps):
+        payload["step_optional"] = [bool(v) for v in step_optional]
+    for key in ("calories", "protein_g", "carbs_g", "fat_g"):
+        if key in raw and raw[key] is not None:
+            try:
+                val = float(raw[key])
+            except (TypeError, ValueError):
+                return None, f"error: Invalid recipe payload — {key} must be a number"
+            if val < 0:
+                return None, f"error: Invalid recipe payload — {key} must be >= 0"
+            payload[key] = val
+    timers = raw.get("timers")
+    if isinstance(timers, list):
+        payload["timers"] = timers
     return payload, None
 
 

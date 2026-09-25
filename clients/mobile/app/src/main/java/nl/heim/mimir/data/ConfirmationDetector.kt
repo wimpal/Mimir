@@ -31,6 +31,19 @@ object ConfirmationDetector {
         Regex("(?i)\\b€\\s*\\d"),
         Regex("(?i)\\b(betaald|uitgegeven|gekocht)\\b"),
         Regex("(?i)\\brecord\\b.*\\b(expense|transaction|uitgave)\\b"),
+        Regex("(?i)\\bturn\\s+off\\b.*\\b(tv|television)\\b"),
+        Regex("(?i)\\b(tv|television)\\b.*\\bturn\\s+off\\b"),
+        Regex("(?i)\\bturn\\b.*\\b(tv|television)\\b.*\\boff\\b"),
+        Regex("(?i)\\bswitch\\s+off\\b.*\\b(tv|television)\\b"),
+        Regex("(?i)\\b(tv|televisie)\\b\\s+uit\\b"),
+        Regex("(?i)\\bzet\\b.*\\b(tv|televisie)\\b.*\\buit\\b"),
+        Regex("(?i)\\bwake\\b.*\\b(tv|nas|pc)\\b"),
+        Regex("(?i)\\bwek\\b.*\\b(tv|nas)\\b"),
+        Regex("(?i)\\bturn\\s+on\\b.*\\b(tv|television|nas)\\b"),
+        Regex("(?i)\\bturn\\b.*\\b(tv|television)\\b.*\\bon\\b"),
+        Regex("(?i)\\b(open|go to)\\b.*\\bhome\\b.*\\b(tv|television)\\b"),
+        Regex("(?i)\\bjellyfin\\b.*\\b(tv|television)\\b"),
+        Regex("(?i)\\bhdmi\\b"),
     )
 
     private val readOnlyPatterns = listOf(
@@ -56,6 +69,16 @@ object ConfirmationDetector {
         "get_server_time",
         // Staged add returns awaiting_confirmation — Confirm buttons must still show.
         "homebase.recipes.add",
+        "homebase.devices.add",
+        "homebase.devices.update",
+        "homebase.devices.remove",
+        "homebase.devices.list",
+        "homebase.devices.get",
+        "homebase.devices.wake",
+        "homebase.devices.go_home",
+        "homebase.devices.launch_app",
+        "homebase.devices.set_input",
+        "homebase.devices.power_off",
     )
 
     fun userMessageRequestsWrite(text: String): Boolean {

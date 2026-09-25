@@ -77,8 +77,38 @@ from brain.ollama import (
     ToolCallFunction,
     parse_message,
 )
+from brain.device_inventory import (
+    DEVICE_ADD_TOOL,
+    DEVICE_REMOVE_TOOL,
+    DEVICE_UPDATE_TOOL,
+    DEVICE_WAKE_TOOL,
+    DEVICE_WRITE_TOOLS,
+    PendingDeviceStore,
+    awaiting_device_confirmation_result,
+    build_device_confirm_reply,
+    build_device_success_reply,
+    device_dispatch_args,
+    device_locale_dutch,
+    enrich_device_stage_name,
+    may_stage_device_add,
+    may_stage_device_remove,
+    may_stage_device_update,
+    may_stage_device_wake,
+    may_stage_device_tv,
+    DEVICE_GO_HOME_TOOL,
+    DEVICE_LAUNCH_APP_TOOL,
+    DEVICE_SET_INPUT_TOOL,
+    DEVICE_POWER_OFF_TOOL,
+    DEVICE_TV_TOOLS,
+    should_keep_pending_device,
+    user_message_requests_device_go_home,
+    user_message_requests_device_jellyfin,
+    user_message_requests_device_power_off,
+    user_message_requests_device_wake,
+)
 from brain.recipe_import import (
     RECIPE_ADD_TOOL,
+    RECIPE_UPDATE_TOOL,
     PendingRecipeStore,
     RecipeNormalizeError,
     awaiting_confirmation_result,
@@ -92,6 +122,7 @@ from brain.recipe_import import (
     is_bare_confirm,
     is_soft_followup_offer,
     may_stage_recipe_add,
+    may_stage_recipe_update,
     merge_subsection_ingredients_from_source,
     normalize_recipe_payload,
     parse_recipe_add_success,
@@ -163,6 +194,8 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "homebase.shopping_list.list",
         "homebase.tasks.list",
         "homebase.lights.list",
+        "homebase.devices.list",
+        "homebase.devices.get",
         "homebase.changes.list",
         "homebase.changes.get",
         "budgettracker.transactions.search",
@@ -647,6 +680,7 @@ def run_turn(
     data_dir: Path | None = None,
     conversation_id: str | None = None,
     pending_recipes: PendingRecipeStore | None = None,
+    pending_devices: PendingDeviceStore | None = None,
     settings: Any | None = None,
     unavailable_services: list[str] | None = None,
 ) -> TurnResult:
@@ -672,6 +706,8 @@ def run_turn(
     write_tool_called_this_turn = False
     recipe_staged_this_turn = False
     recipe_gate_handled_this_turn = False
+    device_staged_this_turn = False
+    device_gate_handled_this_turn = False
     lights_list_called_this_turn = False
     write_nudge_count = 0
     calendar_fallback_used = False
@@ -705,6 +741,14 @@ def run_turn(
     ):
         pending_recipes.clear(conversation_id)
 
+    if (
+        pending_devices is not None
+        and conversation_id
+        and pending_devices.has(conversation_id)
+        and not should_keep_pending_device(user_message)
+    ):
+        pending_devices.clear(conversation_id)
+
     # T-048: drop post-save soft-followup state when the user moves on.
     if (
         pending_recipes is not None
@@ -722,6 +766,14 @@ def run_turn(
         and pending_recipes.has(conversation_id)
     ):
         pending_recipes.clear(conversation_id)
+
+    if (
+        pending_devices is not None
+        and conversation_id
+        and is_bare_cancel(user_message)
+        and pending_devices.has(conversation_id)
+    ):
+        pending_devices.clear(conversation_id)
         cancel_reply = "Ok, I won't save that recipe."
         working.append(ChatMessage(role="assistant", content=cancel_reply))
         return TurnResult(
@@ -795,18 +847,99 @@ def run_turn(
                 stopped_reason=StoppedReason.FINAL,
             )
 
-    # T-021: bare yes/ja with confirmable staged candidate → auto-dispatch.
+    # T-021 / T-106: bare yes/ja with confirmable staged candidate → auto-dispatch.
+
+    # T-108: bare ja/yes dispatches staged Network device write.
+    if (
+        pending_devices is not None
+        and conversation_id
+        and is_bare_confirm(user_message)
+        and pending_devices.is_confirmable(conversation_id)
+        and pending_devices.get_tool_name(conversation_id) in registry
+    ):
+        payload = pending_devices.get(conversation_id)
+        pending_tool = pending_devices.get_tool_name(conversation_id)
+        if payload is not None and pending_tool in DEVICE_WRITE_TOOLS:
+            display_payload = dict(payload)
+            dispatch_payload = device_dispatch_args(pending_tool, payload)
+            add_tc = ToolCall(
+                function=ToolCallFunction(
+                    name=pending_tool, arguments=dispatch_payload
+                )
+            )
+            working.append(
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[add_tc],
+                )
+            )
+            if on_tool_start is not None:
+                on_tool_start(pending_tool, dispatch_payload)
+            per_tool = default_tool_timeout_s
+            tool_entry = registry.get(pending_tool)
+            if tool_entry is not None and tool_entry.timeout_s is not None:
+                per_tool = max(per_tool, tool_entry.timeout_s)
+            remaining = _remaining_s(deadline_monotonic)
+            if remaining is not None:
+                per_tool = min(per_tool, remaining)
+            result_text = _dispatch_with_timeout(
+                pending_tool,
+                dispatch_payload,
+                tools=registry,
+                timeout_s=per_tool,
+            )
+            dialog_dutch = pending_devices.is_dutch(conversation_id)
+            pending_devices.clear(conversation_id)
+            ok = not tool_result_is_error(result_text)
+            if ok:
+                try:
+                    saved = json.loads(result_text) if result_text.strip().startswith("{") else {}
+                except Exception:
+                    saved = {}
+                reply_payload = dict(display_payload)
+                if isinstance(saved, dict) and saved.get("name"):
+                    reply_payload = {**reply_payload, "name": saved["name"]}
+                if isinstance(saved, dict) and saved.get("status"):
+                    reply_payload = {**reply_payload, "status": saved["status"]}
+                if isinstance(saved, dict) and saved.get("input"):
+                    reply_payload = {**reply_payload, "input": saved["input"]}
+                if isinstance(saved, dict) and saved.get("target"):
+                    reply_payload = {**reply_payload, "target": saved["target"]}
+                reply = build_device_success_reply(
+                    reply_payload, pending_tool, dutch=dialog_dutch
+                )
+            else:
+                reply = result_text
+            working.append(_tool_result_message(add_tc, result_text))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[pending_tool],
+                    success=ok,
+                    anomaly=None if ok else "tool_error",
+                    content_preview=reply[:200],
+                )
+            )
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
     if (
         pending_recipes is not None
         and conversation_id
         and is_bare_confirm(user_message)
         and pending_recipes.is_confirmable(conversation_id)
-        and RECIPE_ADD_TOOL in registry
+        and pending_recipes.get_tool_name(conversation_id) in registry
     ):
         payload = pending_recipes.get(conversation_id)
         assert payload is not None
+        pending_tool = pending_recipes.get_tool_name(conversation_id)
         add_tc = ToolCall(
-            function=ToolCallFunction(name=RECIPE_ADD_TOOL, arguments=payload)
+            function=ToolCallFunction(name=pending_tool, arguments=payload)
         )
         working.append(
             ChatMessage(
@@ -816,16 +949,16 @@ def run_turn(
             )
         )
         if on_tool_start is not None:
-            on_tool_start(RECIPE_ADD_TOOL, payload)
+            on_tool_start(pending_tool, payload)
         per_tool = default_tool_timeout_s
-        tool_entry = registry.get(RECIPE_ADD_TOOL)
+        tool_entry = registry.get(pending_tool)
         if tool_entry is not None and tool_entry.timeout_s is not None:
             per_tool = max(per_tool, tool_entry.timeout_s)
         remaining = _remaining_s(deadline_monotonic)
         if remaining is not None:
             per_tool = min(per_tool, remaining)
         result = _dispatch_with_timeout(
-            RECIPE_ADD_TOOL,
+            pending_tool,
             payload,
             tools=registry,
             timeout_s=per_tool,
@@ -852,16 +985,16 @@ def run_turn(
         ok = not tool_result_is_error(result)
         if on_tool_end is not None:
             preview = result if len(result) <= 200 else result[:197] + "..."
-            on_tool_end(RECIPE_ADD_TOOL, ok, preview)
+            on_tool_end(pending_tool, ok, preview)
         working.append(_tool_result_message(add_tc, result))
         if after_tool is not None:
-            after_tool(RECIPE_ADD_TOOL, result, working)
+            after_tool(pending_tool, result, working)
         write_tool_called_this_turn = True
-        tools_used_this_turn.append(RECIPE_ADD_TOOL)
+        tools_used_this_turn.append(pending_tool)
         steps.append(
             StepTrace(
                 ollama_latency_ms=0.0,
-                tool_names=[RECIPE_ADD_TOOL],
+                tool_names=[pending_tool],
                 success=ok,
                 anomaly=None if ok else "tool_error",
                 content_preview=(result[:120] if result else ""),
@@ -1023,7 +1156,10 @@ def run_turn(
             )
 
     # T-053: evening wind-down — force tools + brief before Ollama (guarantees lights).
-    if is_evening_wind_down(user_message):
+    # T-113: explicit TV-off in the same message skips this shortcut (M3 power_off).
+    if is_evening_wind_down(user_message) and not user_message_requests_device_power_off(
+        user_message
+    ):
         return _complete_evening_wind_down(
             working=working,
             steps=steps,
@@ -1264,6 +1400,37 @@ def run_turn(
                                 tool_names=[],
                                 success=True,
                                 anomaly="recipe_confirm_forced",
+                                content_preview=confirm[:120],
+                            )
+                        )
+                        working.append(
+                            ChatMessage(role="assistant", content=confirm)
+                        )
+                        return TurnResult(
+                            content=confirm,
+                            messages=working,
+                            steps=steps,
+                            stopped_reason=StoppedReason.FINAL,
+                        )
+                    if (
+                        device_staged_this_turn
+                        and pending_devices is not None
+                        and conversation_id
+                        and pending_devices.has(conversation_id)
+                    ):
+                        payload = pending_devices.get(conversation_id)
+                        assert payload is not None
+                        confirm = build_device_confirm_reply(
+                            payload,
+                            pending_devices.get_tool_name(conversation_id),
+                            user_message=user_message,
+                            dutch=pending_devices.is_dutch(conversation_id),
+                        )
+                        steps.append(
+                            _step(
+                                tool_names=[],
+                                success=True,
+                                anomaly="device_confirm_forced",
                                 content_preview=confirm[:120],
                             )
                         )
@@ -1818,6 +1985,35 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
                 )
+            if (
+                device_staged_this_turn
+                and pending_devices is not None
+                and conversation_id
+                and pending_devices.has(conversation_id)
+            ):
+                payload = pending_devices.get(conversation_id)
+                assert payload is not None
+                confirm = build_device_confirm_reply(
+                    payload,
+                    pending_devices.get_tool_name(conversation_id),
+                    user_message=user_message,
+                    dutch=pending_devices.is_dutch(conversation_id),
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="device_confirm_forced",
+                        content_preview=confirm[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=confirm))
+                return TurnResult(
+                    content=confirm,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             # Dutch light toggle → English confirmation (EN history stickiness).
             if needs_lights_locale_fixup(
                 user_message,
@@ -1940,6 +2136,69 @@ def run_turn(
                 if isinstance(tc.function.arguments, dict)
                 else {}
             )
+            # T-112: force the tool the user actually asked for (Granite invents
+            # set_input=live_tv / input=home for "switch the tv to home").
+            # TV wake / "wake … home" → go_home + wake_if_needed (not bare WoL).
+            # T-113: TV-off → power_off (remap invented wake/home/hdmi/lights).
+            if user_message_requests_device_power_off(user_message) and dispatch_name in {
+                DEVICE_SET_INPUT_TOOL,
+                DEVICE_LAUNCH_APP_TOOL,
+                DEVICE_GO_HOME_TOOL,
+                DEVICE_WAKE_TOOL,
+                DEVICE_POWER_OFF_TOOL,
+                "homebase.lights.set_state",
+                "homebase.lights.party_mode",
+            }:
+                dispatch_name = DEVICE_POWER_OFF_TOOL
+                dispatch_args = {
+                    k: v
+                    for k, v in dispatch_args.items()
+                    if k in {"device_id", "id", "name"}
+                }
+            elif user_message_requests_device_go_home(user_message) and dispatch_name in {
+                DEVICE_SET_INPUT_TOOL,
+                DEVICE_LAUNCH_APP_TOOL,
+                DEVICE_GO_HOME_TOOL,
+                DEVICE_WAKE_TOOL,
+            }:
+                was_wake = dispatch_name == DEVICE_WAKE_TOOL
+                dispatch_name = DEVICE_GO_HOME_TOOL
+                dispatch_args = {
+                    k: v
+                    for k, v in dispatch_args.items()
+                    if k in {"device_id", "id", "name", "wake_if_needed"}
+                }
+                if was_wake or user_message_requests_device_wake(user_message):
+                    dispatch_args["wake_if_needed"] = True
+            elif user_message_requests_device_jellyfin(user_message) and dispatch_name in {
+                DEVICE_SET_INPUT_TOOL,
+                DEVICE_GO_HOME_TOOL,
+                DEVICE_LAUNCH_APP_TOOL,
+            }:
+                dispatch_name = DEVICE_LAUNCH_APP_TOOL
+                kept = {
+                    k: v
+                    for k, v in dispatch_args.items()
+                    if k in {"device_id", "id", "name", "wake_if_needed"}
+                }
+                kept["target"] = "jellyfin"
+                dispatch_args = kept
+            elif dispatch_name == DEVICE_SET_INPUT_TOOL:
+                inp = str(dispatch_args.get("input") or "").strip().lower()
+                if inp in {
+                    "home",
+                    "webos",
+                    "launcher",
+                    "smart_home",
+                    "homescreen",
+                    "smart home",
+                }:
+                    dispatch_name = DEVICE_GO_HOME_TOOL
+                    dispatch_args = {
+                        k: v
+                        for k, v in dispatch_args.items()
+                        if k in {"device_id", "id", "name", "wake_if_needed"}
+                    }
             result_tc = tc
             # T-041: misrouted party_mode → house-wide set_state (never call party_mode).
             if (
@@ -2024,6 +2283,11 @@ def run_turn(
                     and conversation_id
                     and pending_recipes.is_confirmable(conversation_id)
                 ),
+                device_pending=bool(
+                    pending_devices is not None
+                    and conversation_id
+                    and pending_devices.is_confirmable(conversation_id)
+                ),
             )
             if (
                 write_block is None
@@ -2048,6 +2312,72 @@ def run_turn(
                         args=dispatch_args,
                     )
                 result = write_block
+
+            elif dispatch_name in DEVICE_WRITE_TOOLS and (
+                pending_devices is None or not conversation_id
+            ):
+                result = (
+                    "error: write blocked — device write requires a conversation "
+                    f"({dispatch_name})"
+                )
+                device_gate_handled_this_turn = True
+            elif (
+                dispatch_name in DEVICE_WRITE_TOOLS
+                and pending_devices is not None
+                and conversation_id
+                and not is_bare_confirm(user_message)
+            ):
+                has_pending = pending_devices.has(conversation_id)
+                may = False
+                if dispatch_name == DEVICE_ADD_TOOL:
+                    may = may_stage_device_add(user_message, has_pending=has_pending)
+                elif dispatch_name == DEVICE_UPDATE_TOOL:
+                    may = may_stage_device_update(user_message, has_pending=has_pending)
+                elif dispatch_name == DEVICE_REMOVE_TOOL:
+                    may = may_stage_device_remove(user_message, has_pending=has_pending)
+                elif dispatch_name == DEVICE_WAKE_TOOL:
+                    may = may_stage_device_wake(user_message, has_pending=has_pending)
+                elif dispatch_name in DEVICE_TV_TOOLS:
+                    may = may_stage_device_tv(user_message, has_pending=has_pending)
+                if not may:
+                    result = (
+                        "error: write blocked — need explicit device write intent "
+                        f"({dispatch_name})"
+                    )
+                    device_gate_handled_this_turn = True
+                else:
+                    stage_args = dict(dispatch_args)
+                    list_blobs = [
+                        m.content or ""
+                        for m in working
+                        if m.role == "tool"
+                        and (m.tool_name or "") == "homebase.devices.list"
+                    ]
+                    stage_args = enrich_device_stage_name(
+                        stage_args, list_json_candidates=list_blobs
+                    )
+                    pending_devices.set(
+                        conversation_id,
+                        stage_args,
+                        dutch=device_locale_dutch(user_message),
+                        tool_name=dispatch_name,
+                    )
+                    device_staged_this_turn = True
+                    device_gate_handled_this_turn = True
+                    result = awaiting_device_confirmation_result(
+                        stage_args, dispatch_name
+                    )
+            elif (
+                dispatch_name in DEVICE_WRITE_TOOLS
+                and pending_devices is not None
+                and conversation_id
+                and is_bare_confirm(user_message)
+            ):
+                stashed = pending_devices.get(conversation_id)
+                if stashed is not None:
+                    # Keep display fields in pending store; MCP gets schema args only.
+                    dispatch_args = device_dispatch_args(dispatch_name, stashed)
+
             elif dispatch_name == RECIPE_ADD_TOOL and (
                 pending_recipes is None or not conversation_id
             ):
@@ -2101,13 +2431,66 @@ def run_turn(
                             result = awaiting_confirmation_result(normalized)
                             recipe_staged_this_turn = True
                             recipe_gate_handled_this_turn = True
+
+            elif dispatch_name == RECIPE_UPDATE_TOOL and (
+                pending_recipes is None or not conversation_id
+            ):
+                result = (
+                    "error: write blocked — recipe update requires a conversation "
+                    f"({dispatch_name})"
+                )
+                recipe_gate_handled_this_turn = True
+            elif (
+                dispatch_name == RECIPE_UPDATE_TOOL
+                and pending_recipes is not None
+                and conversation_id
+                and not is_bare_confirm(user_message)
+            ):
+                has_pending = pending_recipes.has(conversation_id)
+                if not may_stage_recipe_update(user_message, has_pending=has_pending):
+                    result = (
+                        "error: write blocked — need explicit recipe edit intent "
+                        f"({dispatch_name})"
+                    )
+                    recipe_gate_handled_this_turn = True
+                else:
+                    stage_args = dict(dispatch_args)
+                    try:
+                        normalized, norm_err = normalize_recipe_payload(stage_args)
+                    except RecipeNormalizeError as exc:
+                        result = exc.message
+                        recipe_gate_handled_this_turn = True
+                    else:
+                        if norm_err is not None:
+                            result = norm_err
+                            recipe_gate_handled_this_turn = True
+                        elif not (normalized or {}).get("id"):
+                            result = (
+                                "error: Invalid recipe payload — id is required "
+                                "for recipes.update"
+                            )
+                            recipe_gate_handled_this_turn = True
+                        else:
+                            assert normalized is not None
+                            pending_recipes.set(
+                                conversation_id,
+                                normalized,
+                                dutch=recipe_locale_dutch(user_message),
+                                tool_name=RECIPE_UPDATE_TOOL,
+                            )
+                            result = awaiting_confirmation_result(normalized)
+                            recipe_staged_this_turn = True
+                            recipe_gate_handled_this_turn = True
+
             else:
                 tool_args = dict(dispatch_args)
-                if dispatch_name == RECIPE_ADD_TOOL and is_bare_confirm(user_message):
+                if dispatch_name in {RECIPE_ADD_TOOL, RECIPE_UPDATE_TOOL} and is_bare_confirm(user_message):
                     if pending_recipes is not None and conversation_id:
                         stashed = pending_recipes.get(conversation_id)
                         if stashed is not None:
                             tool_args = dict(stashed)
+                if dispatch_name in DEVICE_WRITE_TOOLS:
+                    tool_args = device_dispatch_args(dispatch_name, tool_args)
                 if dispatch_name == "homebase.lights.set_state":
                     tool_args = build_set_state_args_from_user_message(
                         user_message, tool_args
@@ -2413,6 +2796,38 @@ def run_turn(
                 stopped_reason=StoppedReason.FINAL,
             )
 
+        # T-101 / T-108: same for Network device writes (wake/add/update/remove).
+        if (
+            device_staged_this_turn
+            and pending_devices is not None
+            and conversation_id
+            and pending_devices.has(conversation_id)
+        ):
+            payload = pending_devices.get(conversation_id)
+            assert payload is not None
+            confirm = build_device_confirm_reply(
+                payload,
+                pending_devices.get_tool_name(conversation_id),
+                user_message=user_message,
+                dutch=pending_devices.is_dutch(conversation_id),
+            )
+            working.append(ChatMessage(role="assistant", content=confirm))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="device_confirm_forced",
+                    content_preview=confirm[:120],
+                )
+            )
+            return TurnResult(
+                content=confirm,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
     # Exhausted iterations — still salvage a staged recipe confirm if we have one.
     if (
         recipe_staged_this_turn
@@ -2426,6 +2841,27 @@ def run_turn(
             payload,
             user_message=user_message,
             dutch=pending_recipes.is_dutch(conversation_id),
+        )
+        working.append(ChatMessage(role="assistant", content=confirm))
+        return TurnResult(
+            content=confirm,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+    if (
+        device_staged_this_turn
+        and pending_devices is not None
+        and conversation_id
+        and pending_devices.has(conversation_id)
+    ):
+        payload = pending_devices.get(conversation_id)
+        assert payload is not None
+        confirm = build_device_confirm_reply(
+            payload,
+            pending_devices.get_tool_name(conversation_id),
+            user_message=user_message,
+            dutch=pending_devices.is_dutch(conversation_id),
         )
         working.append(ChatMessage(role="assistant", content=confirm))
         return TurnResult(

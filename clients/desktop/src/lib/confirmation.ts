@@ -25,6 +25,19 @@ const mutationPatterns = [
   /\b€\s*\d/,
   /\b(betaald|uitgegeven|gekocht)\b/i,
   /\brecord\b.*\b(expense|transaction|uitgave)\b/i,
+  /\bturn\s+off\b.*\b(tv|television)\b/i,
+  /\b(tv|television)\b.*\bturn\s+off\b/i,
+  /\bturn\b.*\b(tv|television)\b.*\boff\b/i,
+  /\bswitch\s+off\b.*\b(tv|television)\b/i,
+  /\b(tv|televisie)\b\s+uit\b/i,
+  /\bzet\b.*\b(tv|televisie)\b.*\buit\b/i,
+  /\bwake\b.*\b(tv|nas|pc)\b/i,
+  /\bwek\b.*\b(tv|nas)\b/i,
+  /\bturn\s+on\b.*\b(tv|television|nas)\b/i,
+  /\bturn\b.*\b(tv|television)\b.*\bon\b/i,
+  /\b(open|go to)\b.*\bhome\b.*\b(tv|television)\b/i,
+  /\bjellyfin\b.*\b(tv|television)\b/i,
+  /\bhdmi\b/i,
 ];
 
 const readOnlyPatterns = [
@@ -50,6 +63,16 @@ const readOnlyTools = new Set([
   "get_server_time",
   // Staged add returns awaiting_confirmation — Confirm buttons must still show.
   "homebase.recipes.add",
+  "homebase.devices.add",
+  "homebase.devices.update",
+  "homebase.devices.remove",
+  "homebase.devices.list",
+  "homebase.devices.get",
+  "homebase.devices.wake",
+  "homebase.devices.go_home",
+  "homebase.devices.launch_app",
+  "homebase.devices.set_input",
+  "homebase.devices.power_off",
 ]);
 
 export function userMessageRequestsWrite(text: string): boolean {

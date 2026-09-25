@@ -14,7 +14,8 @@ ollama:
   model: granite4.2:8b
   # Set explicitly — Ollama's default is often smaller and silently truncates
   # system + history + tool schemas + results (looks like "forgot" / dropped tools).
-  num_ctx: 16384
+  # 32k: full Homebase+Budget tool schemas (~16.5k) no longer fit in 16k (T-101).
+  num_ctx: 32768
   # Thinking off for tool loops and voice (latency + formatting).
   think: false
   # Keep model in VRAM between turns (45m default). Env: MIMIR_OLLAMA_KEEP_ALIVE.
@@ -22,7 +23,7 @@ ollama:
   profiles:
     default:
       model: granite4.2:8b
-      num_ctx: 16384
+      num_ctx: 32768
     # Optional trial / rollback profiles (operator must `ollama pull` the tag first).
     # Prefer tags that clear scripts/tool_call_suite.py ≥80% (see T-075 / T-090).
     qwen3_8b:
@@ -30,7 +31,7 @@ ollama:
       num_ctx: 8192
     granite42_8b:
       model: granite4.2:8b
-      num_ctx: 16384
+      num_ctx: 32768
 
 location:
   # Home coords for get_weather (Open-Meteo → KNMI HARMONIE for NL).

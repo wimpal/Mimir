@@ -29,6 +29,7 @@ from brain.prefs import (
     build_system_prompt,
     normalize_preference_value,
 )
+from brain.device_inventory import PendingDeviceStore
 from brain.recipe_import import PendingRecipeStore
 from brain.tools import Tool, build_registry
 from brain.turn_fixup import resolve_turn_locale
@@ -42,6 +43,10 @@ class PreferenceError(ValueError):
     """Unknown key or invalid Preference value (maps to HTTP 400)."""
 
 MSG_OLLAMA_DOWN = "The brain can't reach the language model right now."
+MSG_CONTEXT_OVERFLOW = (
+    "That request is too large for the model's context window. "
+    "Try a new chat, or ask the operator to raise ollama.num_ctx."
+)
 MSG_TURN_TIMEOUT = "That request took too long and was stopped. Please try again."
 MSG_MAX_ITERATIONS = "I got stuck calling tools and had to stop. Please try a simpler request."
 MSG_EMPTY = "I didn't get a usable reply from the model. Please try again."
@@ -78,12 +83,21 @@ class ChatOutcome:
     http_status: int = 200
 
 
+def _is_context_overflow(error: str | None) -> bool:
+    text = (error or "").lower()
+    return "exceed_context_size" in text or "exceeds the available context size" in text
+
+
 def _user_facing_reply(result: TurnResult) -> str:
     from brain.eli5 import sanitize_eli5_reply
 
     if result.stopped_reason == StoppedReason.FINAL and (result.content or "").strip():
         # Always strip emoji — STYLE bans them; Qwen still adds smileys on chitchat.
         return sanitize_eli5_reply(result.content)
+    if result.stopped_reason == StoppedReason.OLLAMA_ERROR and _is_context_overflow(
+        result.error
+    ):
+        return MSG_CONTEXT_OVERFLOW
     mapped = _REPLY_BY_REASON.get(result.stopped_reason)
     if mapped is not None:
         return mapped
@@ -175,6 +189,7 @@ class BrainService:
         self.db = db
         self.unavailable_services = list(unavailable_services or [])
         self.pending_recipes = PendingRecipeStore()
+        self.pending_devices = PendingDeviceStore()
         if tools is not None:
             self.tools = tools
         else:
@@ -273,6 +288,7 @@ class BrainService:
             system=system,
             user_text=user_text,
             pending_recipes=self.pending_recipes,
+            pending_devices=self.pending_devices,
             deadline_monotonic=deadline,
         )
 
@@ -290,6 +306,7 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            pending_devices=self.pending_devices,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -357,6 +374,7 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            pending_devices=self.pending_devices,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -406,6 +424,7 @@ class BrainService:
             data_dir=self.data_dir,
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
+            pending_devices=self.pending_devices,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -590,6 +609,8 @@ class BrainService:
             return None
         if self.pending_recipes.is_confirmable(conversation_id):
             return self.pending_recipes.is_dutch(conversation_id)
+        if self.pending_devices.is_confirmable(conversation_id):
+            return self.pending_devices.is_dutch(conversation_id)
         post = self.pending_recipes.get_post_save(conversation_id)
         if post is not None:
             return bool(post.dutch)
@@ -656,6 +677,7 @@ class BrainService:
                 system=system,
                 user_text=user_text,
                 pending_recipes=self.pending_recipes,
+            pending_devices=self.pending_devices,
                 deadline_monotonic=turn_deadline,
             )
         else:

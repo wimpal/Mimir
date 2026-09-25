@@ -257,6 +257,25 @@ def test_chat_ollama_down_clear_message(settings: Settings) -> None:
     assert resp.json()["stopped_reason"] == "ollama_error"
 
 
+def test_chat_context_overflow_clear_message(settings: Settings) -> None:
+    from brain.service import MSG_CONTEXT_OVERFLOW
+
+    ollama = ScriptedOllama(
+        [
+            OllamaError(
+                'Ollama HTTP 400: {"error":"{\\"error\\":{\\"code\\":400,'
+                '\\"message\\":\\"request (16505 tokens) exceeds the available '
+                'context size (16384 tokens)\\",\\"type\\":\\"exceed_context_size_error\\"}}"}'
+            )
+        ]
+    )
+    with _client(settings, ollama) as tc:
+        resp = tc.post("/v1/chat", json={"message": "wake the tv"})
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == MSG_CONTEXT_OVERFLOW
+    assert resp.json()["stopped_reason"] == "ollama_error"
+
+
 def _parse_sse_events(body: str) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     for block in body.split("\n\n"):

@@ -80,7 +80,7 @@ Lock choices before code so schema and APIs don’t thrash later.
 | Language/tooling | **Locked:** Python 3.12+, uv, ruff; config = `config/config.yaml` (non-secrets) + `.env` secrets, `MIMIR_`* env overrides YAML         |
 | “Uncensored”     | **Locked:** self-hosted / no cloud moderation — not an abliterated finetune as silent daily driver (tool-calling tradeoff; see Concept). Default = Granite after measured suite |
 | Thinking mode    | **Locked:** `ollama.think: false` for tool loops and voice                                                                             |
-| Context          | **Locked default:** `ollama.num_ctx: 8192` (set explicitly; never rely on Ollama’s silent default)                                     |
+| Context          | **Locked default:** `ollama.num_ctx: 32768` (set explicitly; 16k was too small once Homebase device tools landed — never rely on Ollama’s silent default) |
 
 
 **Deliverables**

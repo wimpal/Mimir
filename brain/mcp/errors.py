@@ -15,6 +15,11 @@ _WRITE_SEGMENTS = (
     ".append",
     ".set_state",
     ".party_mode",
+    ".wake",
+    ".go_home",
+    ".launch_app",
+    ".set_input",
+    ".power_off",
 )
 
 

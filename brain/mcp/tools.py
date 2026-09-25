@@ -10,6 +10,14 @@ from brain.config import Settings
 from brain.mcp.bridge import McpBridge
 from brain.mcp.errors import tool_result_is_error
 from brain.mcp.log import append_mcp_tool_log
+from brain.mcp.devices import (
+    device_ambiguous_error,
+    device_not_found_error,
+    device_resolve_error,
+    parse_devices_list,
+    resolve_wake_device_id,
+    resolve_tv_device_id,
+)
 from brain.mcp.tasks import (
     chore_not_found_error,
     chore_resolve_error,
@@ -45,6 +53,12 @@ from brain.tools import Tool
 def _mcp_tool_timeout_s(name: str, settings: Settings) -> float:
     if name == "homebase.lights.party_mode":
         return settings.timeouts.mcp_party_s
+    if name in {
+        "homebase.devices.go_home",
+        "homebase.devices.launch_app",
+        "homebase.devices.set_input",
+    }:
+        return settings.timeouts.mcp_tv_s
     if name.endswith(".search"):
         return settings.timeouts.mcp_search_s
     return settings.timeouts.mcp_default_s
@@ -74,6 +88,116 @@ def mcp_tool_to_local(
 
     def execute(**kwargs: Any) -> str:
         args = dict(kwargs)
+
+        if name == "homebase.devices.wake":
+            raw_id = str(
+                args.get("device_id") or args.get("id") or args.get("name") or ""
+            ).strip()
+            if not raw_id:
+                return device_not_found_error("?")
+            list_raw = bridge.call_tool_sync(
+                "homebase.devices.list",
+                {},
+                timeout_s=timeout_s,
+            )
+            devices = parse_devices_list(list_raw)
+            if devices is None:
+                detail = list_raw[:200] if list_raw else "empty list response"
+                return device_resolve_error(
+                    "unavailable",
+                    f"Could not list network devices before wake ({detail}).",
+                )
+            # Ambiguous name → refuse (resolve returns None for multi-match)
+            lower = raw_id.lower()
+            exact = [
+                d
+                for d in devices
+                if (d.get("name") or "").strip().lower() == lower
+            ]
+            partial = [
+                d
+                for d in devices
+                if lower in (d.get("name") or "").strip().lower()
+            ]
+            if raw_id not in {str(d.get("id")) for d in devices}:
+                if len(exact) > 1 or (not exact and len(partial) > 1):
+                    capable = [
+                        d
+                        for d in (exact or partial)
+                        if d.get("wake_capable") is True
+                    ]
+                    if len(capable) != 1:
+                        return device_ambiguous_error(raw_id)
+            resolved = resolve_wake_device_id(devices, raw_id)
+            if not resolved:
+                names = [
+                    str(d.get("name") or "")
+                    for d in devices
+                    if (d.get("name") or "").strip()
+                ]
+                return device_not_found_error(raw_id, names=names)
+            args = {"device_id": resolved}
+
+
+        if name in {
+            "homebase.devices.go_home",
+            "homebase.devices.launch_app",
+            "homebase.devices.set_input",
+            "homebase.devices.power_off",
+        }:
+            raw_id = str(
+                args.get("device_id") or args.get("id") or args.get("name") or ""
+            ).strip()
+            if not raw_id:
+                return device_not_found_error("?")
+            list_raw = bridge.call_tool_sync(
+                "homebase.devices.list",
+                {},
+                timeout_s=timeout_s,
+            )
+            devices = parse_devices_list(list_raw)
+            if devices is None:
+                detail = list_raw[:200] if list_raw else "empty list response"
+                return device_resolve_error(
+                    "unavailable",
+                    f"Could not list network devices before TV control ({detail}).",
+                )
+            lower = raw_id.lower()
+            exact = [
+                d
+                for d in devices
+                if (d.get("name") or "").strip().lower() == lower
+            ]
+            partial = [
+                d
+                for d in devices
+                if lower in (d.get("name") or "").strip().lower()
+            ]
+            if len(exact) > 1 or (not exact and len(partial) > 1):
+                capable = [
+                    d
+                    for d in (exact or partial)
+                    if d.get("tv_capable") is True
+                ]
+                if len(capable) != 1:
+                    return device_ambiguous_error(raw_id)
+            resolved = resolve_tv_device_id(devices, raw_id)
+            if not resolved:
+                names = [
+                    str(d.get("name") or "")
+                    for d in devices
+                    if (d.get("name") or "").strip()
+                ]
+                return device_not_found_error(raw_id, names=names)
+            cleaned: dict[str, Any] = {"device_id": resolved}
+            if name == "homebase.devices.launch_app":
+                cleaned["target"] = str(args.get("target") or "").strip()
+            if name == "homebase.devices.set_input":
+                cleaned["input"] = str(args.get("input") or "").strip()
+            if name != "homebase.devices.power_off" and args.get("wake_if_needed") is True:
+                cleaned["wake_if_needed"] = True
+            args = cleaned
+
         if name == "homebase.tasks.complete":
             raw_id = str(args.get("id", "")).strip()
             if not raw_id:
