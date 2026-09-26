@@ -200,10 +200,12 @@ _DEVICE_TV_NUDGE = (
     "THIS turn is LG webOS TV control (SSAP) via homebase.devices.go_home / "
     "launch_app / set_input / power_off — not CEC and not Home Assistant. "
     "Call homebase.devices.list, prefer tv_capable, M3-confirm, then the tool. "
-    "Use wake_if_needed when the set may be off (not for power_off); do not invent "
-    "fixed sleeps. Console / PlayStation → input hdmi1. TV-off phrases → "
-    "homebase.devices.power_off with device_id only. Never ask for SSAP client "
-    "key or MAC."
+    "Jellyfin (start/run/open/launch/switch to; turn on TV and run jellyfin) → "
+    "launch_app target jellyfin — beats bare Home/wake. Use wake_if_needed for "
+    "start/run/open/launch and compound wake (not for switch-to; not for "
+    "power_off); do not invent fixed sleeps. Console / PlayStation → input hdmi1. "
+    "TV-off phrases → homebase.devices.power_off with device_id only. Never ask "
+    "for SSAP client key or MAC."
 )
 _PROTOCOL_RUN_NUDGE = (
     "System correction (do not repeat to the user): the user asked for a "

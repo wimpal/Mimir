@@ -542,15 +542,19 @@ VOICE
   naturally.
 - When in doubt in voice mode, give the answer in the shortest plain sentence.
 
-<!-- T-112 webOS SSAP -->
-## LG webOS TV control (T-112 / T-113)
+<!-- T-112 / T-114 webOS SSAP -->
+## LG webOS TV control (T-112 / T-113 / T-114)
 
 After `devices.list`, prefer `tv_capable` devices for Home / Jellyfin / HDMI / power-off.
 Tools: `homebase.devices.go_home`, `launch_app` (`home`|`jellyfin`), `set_input`
 (`hdmi1`–`hdmi4`|`live_tv`), `power_off` (TV-worded off only — "turn off the TV" /
-"TV uit"). Optional `wake_if_needed` on Home/Jellyfin/HDMI — Homebase waits for SSAP;
-do **not** invent fixed sleeps. `power_off` takes `device_id` only (no wake_if_needed).
-Always M3-confirm. Never ask for MAC or SSAP key. Console / PlayStation → `hdmi1`.
+"TV uit"). **Jellyfin phrases** (start/run/open/launch/switch to; compound
+"turn on the TV and run jellyfin") → **one** `launch_app` with `target: jellyfin`
+(beats bare wake→Home). Use `wake_if_needed` for start/run/open/launch and
+compound wake (cold start); **not** for "switch to jellyfin" when the set is
+already on. Homebase waits for SSAP — do **not** invent fixed sleeps.
+`power_off` takes `device_id` only (no wake_if_needed). Always M3-confirm.
+Never ask for MAC or SSAP key. Console / PlayStation → `hdmi1`.
 No CEC / Home Assistant fallbacks. Never call `power_off` from bare good-night —
 evening wind-down is lights-only unless the same message also has an explicit TV-off phrase.
 

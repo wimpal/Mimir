@@ -100,9 +100,11 @@ from brain.device_inventory import (
     DEVICE_SET_INPUT_TOOL,
     DEVICE_POWER_OFF_TOOL,
     DEVICE_TV_TOOLS,
+    jellyfin_wants_wake,
     should_keep_pending_device,
     user_message_requests_device_go_home,
     user_message_requests_device_jellyfin,
+    user_message_requests_device_jellyfin_switch,
     user_message_requests_device_power_off,
     user_message_requests_device_wake,
 )
@@ -1130,6 +1132,31 @@ def run_turn(
             pending_devices.clear(conversation_id)
             ok = not tool_result_is_error(result_text)
             if ok:
+                if (
+                    pending_tool in DEVICE_TV_TOOLS
+                    and dispatch_payload.get("wake_if_needed") is True
+                ):
+                    try:
+                        saved_wake = (
+                            json.loads(result_text)
+                            if result_text.strip().startswith("{")
+                            else {}
+                        )
+                    except Exception:
+                        saved_wake = {}
+                    status = (
+                        str(saved_wake.get("status") or "").strip().lower()
+                        if isinstance(saved_wake, dict)
+                        else ""
+                    )
+                    if status != "dry_run":
+                        pending_devices.record_tv_wake(
+                            conversation_id,
+                            device_id=str(
+                                dispatch_payload.get("device_id") or ""
+                            ).strip()
+                            or None,
+                        )
                 try:
                     saved = json.loads(result_text) if result_text.strip().startswith("{") else {}
                 except Exception:
@@ -2468,6 +2495,37 @@ def run_turn(
                     for k, v in dispatch_args.items()
                     if k in {"device_id", "id", "name"}
                 }
+            # T-114: jellyfin (run/switch/compound) beats bare wake→Home.
+            elif user_message_requests_device_jellyfin(user_message) and dispatch_name in {
+                DEVICE_SET_INPUT_TOOL,
+                DEVICE_GO_HOME_TOOL,
+                DEVICE_LAUNCH_APP_TOOL,
+                DEVICE_WAKE_TOOL,
+                DEVICE_POWER_OFF_TOOL,
+                "homebase.lights.set_state",
+                "homebase.lights.party_mode",
+            }:
+                dispatch_name = DEVICE_LAUNCH_APP_TOOL
+                kept = {
+                    k: v
+                    for k, v in dispatch_args.items()
+                    if k in {"device_id", "id", "name"}
+                }
+                kept["target"] = "jellyfin"
+                device_id = str(
+                    kept.get("device_id") or kept.get("id") or ""
+                ).strip()
+                want_wake = jellyfin_wants_wake(user_message) and not (
+                    pending_devices is not None
+                    and pending_devices.tv_wake_recent(
+                        conversation_id, device_id=device_id or None
+                    )
+                )
+                if want_wake and not user_message_requests_device_jellyfin_switch(
+                    user_message
+                ):
+                    kept["wake_if_needed"] = True
+                dispatch_args = kept
             elif user_message_requests_device_go_home(user_message) and dispatch_name in {
                 DEVICE_SET_INPUT_TOOL,
                 DEVICE_LAUNCH_APP_TOOL,
@@ -2483,19 +2541,6 @@ def run_turn(
                 }
                 if was_wake or user_message_requests_device_wake(user_message):
                     dispatch_args["wake_if_needed"] = True
-            elif user_message_requests_device_jellyfin(user_message) and dispatch_name in {
-                DEVICE_SET_INPUT_TOOL,
-                DEVICE_GO_HOME_TOOL,
-                DEVICE_LAUNCH_APP_TOOL,
-            }:
-                dispatch_name = DEVICE_LAUNCH_APP_TOOL
-                kept = {
-                    k: v
-                    for k, v in dispatch_args.items()
-                    if k in {"device_id", "id", "name", "wake_if_needed"}
-                }
-                kept["target"] = "jellyfin"
-                dispatch_args = kept
             elif dispatch_name == DEVICE_SET_INPUT_TOOL:
                 inp = str(dispatch_args.get("input") or "").strip().lower()
                 if inp in {
@@ -2890,6 +2935,33 @@ def run_turn(
                 )
                 if is_write_tool(dispatch_name):
                     write_tool_called_this_turn = True
+                if (
+                    dispatch_name in DEVICE_TV_TOOLS
+                    and tool_args.get("wake_if_needed") is True
+                    and not tool_result_is_error(result)
+                    and pending_devices is not None
+                    and conversation_id
+                ):
+                    try:
+                        saved_mid = (
+                            json.loads(result)
+                            if isinstance(result, str)
+                            and result.strip().startswith("{")
+                            else {}
+                        )
+                    except Exception:
+                        saved_mid = {}
+                    mid_status = (
+                        str(saved_mid.get("status") or "").strip().lower()
+                        if isinstance(saved_mid, dict)
+                        else ""
+                    )
+                    if mid_status != "dry_run":
+                        pending_devices.record_tv_wake(
+                            conversation_id,
+                            device_id=str(tool_args.get("device_id") or "").strip()
+                            or None,
+                        )
                 if dispatch_name in PROTOCOL_WRITE_TOOLS:
                     protocol_dispatched_this_turn = True
                     if pending_protocols is not None and conversation_id:

@@ -1,16 +1,21 @@
-"""T-112 / T-113 TV / SSAP phrase + resolve smoke (extend like test_device_wake.py)."""
+"""T-112 / T-113 / T-114 TV / SSAP phrase + resolve smoke (extend like test_device_wake.py)."""
 
 from __future__ import annotations
 
 from brain.device_inventory import (
     DEVICE_GO_HOME_TOOL,
+    DEVICE_LAUNCH_APP_TOOL,
     DEVICE_POWER_OFF_TOOL,
+    DEVICE_WAKE_TOOL,
+    PendingDeviceStore,
     build_device_confirm_reply,
     device_dispatch_args,
     device_locale_dutch,
+    jellyfin_wants_wake,
     user_message_requests_device_go_home,
     user_message_requests_device_hdmi,
     user_message_requests_device_jellyfin,
+    user_message_requests_device_jellyfin_switch,
     user_message_requests_device_power_off,
 )
 from brain.mcp.devices import resolve_tv_device_id
@@ -250,6 +255,352 @@ def test_power_off_remaps_lights_set_state() -> None:
 
 def test_jellyfin_phrases():
     assert user_message_requests_device_jellyfin("Start Jellyfin on the TV")
+    assert user_message_requests_device_jellyfin("run jellyfin")
+    assert user_message_requests_device_jellyfin("run jellyfin on the tv")
+    assert user_message_requests_device_jellyfin("Run jellyfin on the TV")
+    assert user_message_requests_device_jellyfin("switch to jellyfin")
+    assert user_message_requests_device_jellyfin("Switch to Jellyfin")
+    assert user_message_requests_device_jellyfin(
+        "turn on the tv and run jellyfin"
+    )
+    assert user_message_requests_device_jellyfin("schakel naar jellyfin")
+    assert user_message_requests_device_jellyfin("zet jellyfin aan")
+    assert not user_message_requests_device_jellyfin("don't switch to jellyfin")
+    assert not user_message_requests_device_jellyfin("don't run jellyfin")
+    # Compound: jellyfin wins over bare wake→Home
+    assert not user_message_requests_device_go_home(
+        "turn on the tv and run jellyfin"
+    )
+    assert user_message_requests_device_jellyfin_switch("switch to jellyfin")
+    assert not user_message_requests_device_jellyfin_switch(
+        "run jellyfin on the tv"
+    )
+    assert not user_message_requests_device_jellyfin_switch(
+        "turn on the tv and switch to jellyfin"
+    )
+    assert jellyfin_wants_wake("run jellyfin on the tv")
+    assert jellyfin_wants_wake("start Jellyfin on the TV")
+    assert jellyfin_wants_wake("turn on the tv and run jellyfin")
+    assert not jellyfin_wants_wake("switch to jellyfin")
+
+
+def test_tv_wake_recent_suppress():
+    store = PendingDeviceStore()
+    cid = "conv-wake-recent"
+    assert store.tv_wake_recent(cid) is False
+    store.record_tv_wake(cid, device_id="c1tv")
+    assert store.tv_wake_recent(cid, device_id="c1tv") is True
+    assert store.tv_wake_recent("other-conv", device_id="c1tv") is True
+    # Force outside window without sleeping.
+    store._tv_wake_at["d:c1tv"] = store._tv_wake_at["d:c1tv"] - 61.0
+    assert store.tv_wake_recent(cid, device_id="c1tv") is False
+
+
+def test_jellyfin_compound_remaps_go_home_to_launch() -> None:
+    """turn on + run jellyfin: model invents go_home → stage launch_app + wake."""
+    import json
+
+    from brain.agent import StoppedReason, run_turn
+    from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
+    from brain.tools import Tool
+
+    class _ScriptedClient:
+        def __init__(self, responses: list[ChatMessage]) -> None:
+            self._responses = list(responses)
+
+        def chat(self, messages, tools=None, *, think=False, stream=False) -> ChatResponse:
+            return ChatResponse(message=self._responses.pop(0))
+
+    store = PendingDeviceStore()
+    cid = "conv-jf-compound"
+    registry = {
+        "homebase.devices.list": Tool(
+            name="homebase.devices.list",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: json.dumps(
+                [{"id": "c1tv", "name": "TV", "tv_capable": True}]
+            ),
+            service="homebase",
+        ),
+        DEVICE_GO_HOME_TOOL: Tool(
+            name=DEVICE_GO_HOME_TOOL,
+            description="home",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: '{"ok":true}',
+            service="homebase",
+        ),
+        DEVICE_LAUNCH_APP_TOOL: Tool(
+            name=DEVICE_LAUNCH_APP_TOOL,
+            description="launch",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: '{"ok":true}',
+            service="homebase",
+        ),
+        DEVICE_WAKE_TOOL: Tool(
+            name=DEVICE_WAKE_TOOL,
+            description="wake",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: '{"ok":true}',
+            service="homebase",
+        ),
+    }
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.devices.list", arguments={}
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name=DEVICE_GO_HOME_TOOL,
+                            arguments={"device_id": "c1tv", "wake_if_needed": True},
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="should not run"),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="turn on the tv and run jellyfin")],
+        tools=registry,
+        conversation_id=cid,
+        pending_devices=store,
+        max_iterations=3,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert store.get_tool_name(cid) == DEVICE_LAUNCH_APP_TOOL
+    staged = store.get(cid) or {}
+    assert staged.get("target") == "jellyfin"
+    assert staged.get("wake_if_needed") is True
+
+
+def test_jellyfin_switch_strips_wake() -> None:
+    """switch to jellyfin: no wake_if_needed even if model sets it."""
+    import json
+
+    from brain.agent import StoppedReason, run_turn
+    from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
+    from brain.tools import Tool
+
+    class _ScriptedClient:
+        def __init__(self, responses: list[ChatMessage]) -> None:
+            self._responses = list(responses)
+
+        def chat(self, messages, tools=None, *, think=False, stream=False) -> ChatResponse:
+            return ChatResponse(message=self._responses.pop(0))
+
+    store = PendingDeviceStore()
+    cid = "conv-jf-switch"
+    registry = {
+        "homebase.devices.list": Tool(
+            name="homebase.devices.list",
+            description="list",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: json.dumps(
+                [{"id": "c1tv", "name": "TV", "tv_capable": True}]
+            ),
+            service="homebase",
+        ),
+        DEVICE_GO_HOME_TOOL: Tool(
+            name=DEVICE_GO_HOME_TOOL,
+            description="home",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: '{"ok":true}',
+            service="homebase",
+        ),
+        DEVICE_LAUNCH_APP_TOOL: Tool(
+            name=DEVICE_LAUNCH_APP_TOOL,
+            description="launch",
+            parameters={"type": "object", "properties": {}},
+            execute=lambda **_: '{"ok":true}',
+            service="homebase",
+        ),
+    }
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.devices.list", arguments={}
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name=DEVICE_LAUNCH_APP_TOOL,
+                            arguments={
+                                "device_id": "c1tv",
+                                "target": "jellyfin",
+                                "wake_if_needed": True,
+                            },
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="should not run"),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="switch to jellyfin")],
+        tools=registry,
+        conversation_id=cid,
+        pending_devices=store,
+        max_iterations=3,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    assert store.get_tool_name(cid) == DEVICE_LAUNCH_APP_TOOL
+    staged = store.get(cid) or {}
+    assert staged.get("target") == "jellyfin"
+    assert staged.get("wake_if_needed") is not True
+
+
+def test_jellyfin_run_wake_and_recent_suppress() -> None:
+    """run jellyfin on the tv: wake when cold; omit after recent wake."""
+    import json
+
+    from brain.agent import StoppedReason, run_turn
+    from brain.ollama import ChatMessage, ChatResponse, ToolCall, ToolCallFunction
+    from brain.tools import Tool
+
+    class _ScriptedClient:
+        def __init__(self, responses: list[ChatMessage]) -> None:
+            self._responses = list(responses)
+
+        def chat(self, messages, tools=None, *, think=False, stream=False) -> ChatResponse:
+            return ChatResponse(message=self._responses.pop(0))
+
+    def _registry() -> dict:
+        return {
+            "homebase.devices.list": Tool(
+                name="homebase.devices.list",
+                description="list",
+                parameters={"type": "object", "properties": {}},
+                execute=lambda **_: json.dumps(
+                    [{"id": "c1tv", "name": "TV", "tv_capable": True}]
+                ),
+                service="homebase",
+            ),
+            DEVICE_LAUNCH_APP_TOOL: Tool(
+                name=DEVICE_LAUNCH_APP_TOOL,
+                description="launch",
+                parameters={"type": "object", "properties": {}},
+                execute=lambda **_: '{"ok":true}',
+                service="homebase",
+            ),
+        }
+
+    store = PendingDeviceStore()
+    cid = "conv-jf-run"
+    client = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.devices.list", arguments={}
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name=DEVICE_LAUNCH_APP_TOOL,
+                            arguments={"device_id": "c1tv", "target": "home"},
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="should not run"),
+        ]
+    )
+    result = run_turn(
+        client,
+        [ChatMessage(role="user", content="run jellyfin on the tv")],
+        tools=_registry(),
+        conversation_id=cid,
+        pending_devices=store,
+        max_iterations=3,
+    )
+    assert result.stopped_reason == StoppedReason.FINAL
+    staged = store.get(cid) or {}
+    assert staged.get("target") == "jellyfin"
+    assert staged.get("wake_if_needed") is True
+
+    store.clear(cid)
+    store.record_tv_wake(cid, device_id="c1tv")
+    client2 = _ScriptedClient(
+        [
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name="homebase.devices.list", arguments={}
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        function=ToolCallFunction(
+                            name=DEVICE_LAUNCH_APP_TOOL,
+                            arguments={
+                                "device_id": "c1tv",
+                                "target": "jellyfin",
+                                "wake_if_needed": True,
+                            },
+                        )
+                    )
+                ],
+            ),
+            ChatMessage(role="assistant", content="should not run"),
+        ]
+    )
+    result2 = run_turn(
+        client2,
+        [ChatMessage(role="user", content="run jellyfin on the tv")],
+        tools=_registry(),
+        conversation_id=cid,
+        pending_devices=store,
+        max_iterations=3,
+    )
+    assert result2.stopped_reason == StoppedReason.FINAL
+    staged2 = store.get(cid) or {}
+    assert staged2.get("target") == "jellyfin"
+    assert staged2.get("wake_if_needed") is not True
 
 
 def test_hdmi_phrases_map_console():

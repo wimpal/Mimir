@@ -124,14 +124,41 @@ _DEVICE_TV_WAKE_HOME_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     )
 )
 
-_DEVICE_JELLYFIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+# T-114: start/run/open/launch (+ NL) imply cold-start wake; switch-to does not.
+_DEVICE_JELLYFIN_LAUNCH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\b(start|open|launch)\b.*\bjellyfin\b",
-        r"\bjellyfin\b.*\b(tv|television)\b",
+        r"\b(start|open|launch|run)\b.*\bjellyfin\b",
         r"\bstart jellyfin\b",
+        r"\bzet\b.*\bjellyfin\b.*\baan\b",
+        r"\bjellyfin\b.*\baanzetten\b",
     )
 )
+
+_DEVICE_JELLYFIN_SWITCH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(switch\s+to|switch\s+over\s+to)\b.*\bjellyfin\b",
+        r"\bschakel\b.*\b(naar\s+)?jellyfin\b",
+        r"\b(tv|television|televisie)\b.*\b(naar|to)\b.*\bjellyfin\b",
+    )
+)
+
+_DEVICE_JELLYFIN_TV_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bjellyfin\b.*\b(tv|television|televisie)\b",
+        r"\bjellyfin\b.*\bop de\b.*(tv|televisie)\b",
+    )
+)
+
+_DEVICE_JELLYFIN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    *_DEVICE_JELLYFIN_LAUNCH_PATTERNS,
+    *_DEVICE_JELLYFIN_SWITCH_PATTERNS,
+    *_DEVICE_JELLYFIN_TV_PATTERNS,
+)
+
+TV_WAKE_RECENT_WINDOW_S = 60.0
 
 _DEVICE_HDMI_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -172,7 +199,8 @@ _DEVICE_POWER_OFF_STATUS = re.compile(
 
 _DEVICE_WRITE_NEGATION = re.compile(
     r"\b(don'?t|do\s+not|niet|geen)\b.*\b(add|enroll|remove|retire|move|wake|wek|"
-    r"voeg|verwijder|verplaats|registreer|turn\s+off|turn\s+on|uitzetten|uit)\b|"
+    r"voeg|verwijder|verplaats|registreer|turn\s+off|turn\s+on|uitzetten|uit|"
+    r"switch|jellyfin|run|launch|start|open|schakel)\b|"
     r"\b(don'?t|do\s+not|niet|geen)\b.*\bturn\b.*\b(off|on)\b",
     re.IGNORECASE,
 )
@@ -198,6 +226,10 @@ class PendingDeviceStore:
     def __init__(self, *, ttl_s: float = PENDING_TTL_S) -> None:
         self._ttl_s = ttl_s
         self._by_conversation: dict[str, PendingDevice] = {}
+        # Last successful TV tool with wake_if_needed (T-114 rate-limit suppress).
+        # Keyed by device_id when known (matches Homebase per-device WoL window),
+        # else by conversation id.
+        self._tv_wake_at: dict[str, float] = {}
 
     def _purge_expired(self) -> None:
         now = time.monotonic()
@@ -208,6 +240,57 @@ class PendingDeviceStore:
         ]
         for key in expired:
             del self._by_conversation[key]
+        wake_expired = [
+            key
+            for key, at in self._tv_wake_at.items()
+            if now - at > TV_WAKE_RECENT_WINDOW_S * 2
+        ]
+        for key in wake_expired:
+            del self._tv_wake_at[key]
+
+    @staticmethod
+    def _tv_wake_key(
+        conversation_id: str | None, *, device_id: str | None = None
+    ) -> str | None:
+        did = (device_id or "").strip()
+        if did:
+            return f"d:{did}"
+        if conversation_id:
+            return f"c:{conversation_id}"
+        return None
+
+    def record_tv_wake(
+        self,
+        conversation_id: str | None,
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        """Mark a successful wake_if_needed TV dispatch (not dry_run)."""
+        key = self._tv_wake_key(conversation_id, device_id=device_id)
+        if not key:
+            return
+        self._tv_wake_at[key] = time.monotonic()
+
+    def tv_wake_recent(
+        self,
+        conversation_id: str | None,
+        *,
+        device_id: str | None = None,
+        window_s: float = TV_WAKE_RECENT_WINDOW_S,
+    ) -> bool:
+        """True if this device/conversation woke with wake_if_needed within window_s."""
+        now = time.monotonic()
+        keys: list[str] = []
+        did = (device_id or "").strip()
+        if did:
+            keys.append(f"d:{did}")
+        if conversation_id:
+            keys.append(f"c:{conversation_id}")
+        for key in keys:
+            at = self._tv_wake_at.get(key)
+            if at is not None and (now - at) <= window_s:
+                return True
+        return False
 
     def set(
         self,
@@ -382,6 +465,33 @@ def user_message_requests_device_jellyfin(text: str) -> bool:
     if _device_write_negated(text) or _lights_carveout(text):
         return False
     return any(p.search(text) for p in _DEVICE_JELLYFIN_PATTERNS)
+
+
+def user_message_requests_device_jellyfin_switch(text: str) -> bool:
+    """Switch-to Jellyfin (TV already on) — no wake_if_needed."""
+    if not (text or "").strip():
+        return False
+    if _device_write_negated(text) or _lights_carveout(text):
+        return False
+    if not any(p.search(text) for p in _DEVICE_JELLYFIN_SWITCH_PATTERNS):
+        return False
+    # Launch/wake verbs in the same message still count as cold-start, not switch-only.
+    if any(p.search(text) for p in _DEVICE_JELLYFIN_LAUNCH_PATTERNS):
+        return False
+    if user_message_requests_device_wake(text):
+        return False
+    return True
+
+
+def jellyfin_wants_wake(text: str) -> bool:
+    """Whether jellyfin remap should set wake_if_needed (before recent-wake suppress)."""
+    if not user_message_requests_device_jellyfin(text):
+        return False
+    if user_message_requests_device_jellyfin_switch(text):
+        return False
+    if user_message_requests_device_wake(text):
+        return True
+    return any(p.search(text) for p in _DEVICE_JELLYFIN_LAUNCH_PATTERNS)
 
 
 def user_message_requests_device_hdmi(text: str) -> bool:
