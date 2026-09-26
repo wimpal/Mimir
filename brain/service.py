@@ -30,6 +30,7 @@ from brain.prefs import (
     normalize_preference_value,
 )
 from brain.device_inventory import PendingDeviceStore
+from brain.mcp.protocols import PendingProtocolStore
 from brain.recipe_import import PendingRecipeStore
 from brain.tools import Tool, build_registry
 from brain.turn_fixup import resolve_turn_locale
@@ -190,6 +191,7 @@ class BrainService:
         self.unavailable_services = list(unavailable_services or [])
         self.pending_recipes = PendingRecipeStore()
         self.pending_devices = PendingDeviceStore()
+        self.pending_protocols = PendingProtocolStore()
         if tools is not None:
             self.tools = tools
         else:
@@ -289,6 +291,7 @@ class BrainService:
             user_text=user_text,
             pending_recipes=self.pending_recipes,
             pending_devices=self.pending_devices,
+            pending_protocols=self.pending_protocols,
             deadline_monotonic=deadline,
         )
 
@@ -307,6 +310,7 @@ class BrainService:
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
             pending_devices=self.pending_devices,
+            pending_protocols=self.pending_protocols,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -375,6 +379,7 @@ class BrainService:
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
             pending_devices=self.pending_devices,
+            pending_protocols=self.pending_protocols,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -425,6 +430,7 @@ class BrainService:
             conversation_id=conversation_id,
             pending_recipes=self.pending_recipes,
             pending_devices=self.pending_devices,
+            pending_protocols=self.pending_protocols,
             settings=self.settings,
             unavailable_services=self.unavailable_services,
         )
@@ -611,6 +617,8 @@ class BrainService:
             return self.pending_recipes.is_dutch(conversation_id)
         if self.pending_devices.is_confirmable(conversation_id):
             return self.pending_devices.is_dutch(conversation_id)
+        if self.pending_protocols.is_confirmable(conversation_id):
+            return self.pending_protocols.is_dutch(conversation_id)
         post = self.pending_recipes.get_post_save(conversation_id)
         if post is not None:
             return bool(post.dutch)
@@ -677,7 +685,8 @@ class BrainService:
                 system=system,
                 user_text=user_text,
                 pending_recipes=self.pending_recipes,
-            pending_devices=self.pending_devices,
+                pending_devices=self.pending_devices,
+                pending_protocols=self.pending_protocols,
                 deadline_monotonic=turn_deadline,
             )
         else:

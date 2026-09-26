@@ -205,7 +205,12 @@ _DEVICE_TV_NUDGE = (
     "homebase.devices.power_off with device_id only. Never ask for SSAP client "
     "key or MAC."
 )
-
+_PROTOCOL_RUN_NUDGE = (
+    "System correction (do not repeat to the user): the user asked for a "
+    "household Protocol THIS turn (cinema/bioscoop protocol). Call "
+    "homebase.protocols.run once with name Cinema now — do not ask for "
+    "confirm; do not call devices.* or lights.set_state or party_mode."
+)
 
 
 def user_message_requests_write(text: str) -> bool:
@@ -220,6 +225,7 @@ def user_message_requests_write(text: str) -> bool:
         user_message_requests_party_mode,
     )
     from brain.device_inventory import user_message_requests_device_write
+    from brain.mcp.protocols import user_message_requests_protocol_run
     from brain.recipe_import import (
         recipe_save_negated,
         user_message_renames_pending_recipe,
@@ -241,6 +247,8 @@ def user_message_requests_write(text: str) -> bool:
     if user_message_requests_recipe_to_shopping(normalized):
         return True
     if user_message_renames_pending_recipe(normalized):
+        return True
+    if user_message_requests_protocol_run(normalized):
         return True
     if user_message_requests_device_write(normalized):
         return True
@@ -283,12 +291,15 @@ def write_retry_nudge(user_message: str) -> str:
         user_message_requests_device_tv,
         user_message_requests_device_wake,
     )
+    from brain.mcp.protocols import user_message_requests_protocol_run
     from brain.recipe_import import (
         user_message_requests_recipe_edit,
         user_message_requests_recipe_save,
     )
 
     normalized = message_for_hints(user_message)
+    if user_message_requests_protocol_run(normalized):
+        return _PROTOCOL_RUN_NUDGE
     if user_message_requests_device_tv(normalized):
         return _DEVICE_TV_NUDGE
     if user_message_requests_device_wake(normalized):
@@ -338,6 +349,7 @@ def check_write_allowed(
     *,
     recipe_pending: bool = False,
     device_pending: bool = False,
+    protocol_pending: bool = False,
 ) -> str | None:
     """Return an error string when a write tool must be blocked, else None."""
     if not is_write_tool(tool_name):
@@ -351,8 +363,18 @@ def check_write_allowed(
         user_message_requests_device_power_off,
         user_message_requests_device_wake,
     )
+    from brain.mcp.protocols import (
+        user_message_requests_protocol_run,
+    )
     from brain.recipe_import import is_bare_confirm
 
+    if user_message_requests_protocol_run(user_message):
+        if tool_name != "homebase.protocols.run":
+            return (
+                "error: write blocked — cinema/bioscoop protocol uses "
+                "homebase.protocols.run only (not freestyle TV/lights/party_mode "
+                "or other writes)"
+            )
     if user_message_requests_device_wake(user_message) and tool_name in {
         "homebase.lights.set_state",
         "homebase.lights.party_mode",
@@ -414,6 +436,13 @@ def check_write_allowed(
             "homebase.devices.power_off",
         }
         and device_pending
+        and is_bare_confirm(user_message)
+    ):
+        return None
+    # T-115: bare ja/yes unlocks staged protocols.run.
+    if (
+        tool_name == "homebase.protocols.run"
+        and protocol_pending
         and is_bare_confirm(user_message)
     ):
         return None

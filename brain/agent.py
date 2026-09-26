@@ -106,6 +106,25 @@ from brain.device_inventory import (
     user_message_requests_device_power_off,
     user_message_requests_device_wake,
 )
+from brain.mcp.protocols import (
+    CINEMA_CANONICAL_NAME,
+    PROTOCOL_LIST_TOOL,
+    PROTOCOL_RUN_TOOL,
+    PROTOCOL_WRITE_TOOLS,
+    PendingProtocolStore,
+    build_protocol_cancel_reply,
+    build_protocol_confirm_reply,
+    build_protocol_failure_reply,
+    build_protocol_success_reply,
+    build_protocol_unavailable_reply,
+    is_freestyle_tool_on_protocol,
+    protocol_dispatch_args,
+    protocol_locale_dutch,
+    protocol_run_succeeded,
+    resolve_protocol_name_from_message,
+    should_keep_pending_protocol,
+    user_message_requests_protocol_run,
+)
 from brain.recipe_import import (
     RECIPE_ADD_TOOL,
     RECIPE_UPDATE_TOOL,
@@ -196,6 +215,7 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "homebase.lights.list",
         "homebase.devices.list",
         "homebase.devices.get",
+        PROTOCOL_LIST_TOOL,
         "homebase.changes.list",
         "homebase.changes.get",
         "budgettracker.transactions.search",
@@ -480,6 +500,83 @@ def _call_ollama(
     return ChatResponse(message=msg, raw=final_raw, timings=timings)
 
 
+def _complete_protocol_run(
+    *,
+    user_message: str,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    registry: dict[str, Tool],
+    deadline_monotonic: float | None,
+    default_tool_timeout_s: float,
+    on_tool_start: OnToolStartCallback | None,
+    on_tool_end: OnToolEndCallback | None,
+    pending_protocols: PendingProtocolStore | None,
+    conversation_id: str | None,
+) -> TurnResult:
+    """Force one protocols.run — phrase is the ask (no M3 confirm)."""
+    dutch = protocol_locale_dutch(user_message)
+    dispatch_payload = protocol_dispatch_args(
+        {
+            "name": resolve_protocol_name_from_message(user_message)
+            or CINEMA_CANONICAL_NAME
+        }
+    )
+    add_tc = ToolCall(
+        function=ToolCallFunction(
+            name=PROTOCOL_RUN_TOOL, arguments=dispatch_payload
+        )
+    )
+    working.append(
+        ChatMessage(role="assistant", content="", tool_calls=[add_tc])
+    )
+    if on_tool_start is not None:
+        on_tool_start(PROTOCOL_RUN_TOOL, dispatch_payload)
+    per_tool = default_tool_timeout_s
+    tool_entry = registry.get(PROTOCOL_RUN_TOOL)
+    if tool_entry is not None and tool_entry.timeout_s is not None:
+        per_tool = max(per_tool, tool_entry.timeout_s)
+    remaining = _remaining_s(deadline_monotonic)
+    if remaining is not None:
+        per_tool = min(per_tool, remaining)
+    result_text = _dispatch_with_timeout(
+        PROTOCOL_RUN_TOOL,
+        dispatch_payload,
+        tools=registry,
+        timeout_s=per_tool,
+    )
+    if pending_protocols is not None and conversation_id:
+        pending_protocols.clear(conversation_id)
+    ok = protocol_run_succeeded(result_text) and not tool_result_is_error(result_text)
+    if on_tool_end is not None:
+        preview = (
+            result_text if len(result_text) <= 200 else result_text[:197] + "..."
+        )
+        on_tool_end(PROTOCOL_RUN_TOOL, ok, preview)
+    if ok:
+        reply = build_protocol_success_reply(
+            dispatch_payload, result_text, dutch=dutch
+        )
+    else:
+        reply = build_protocol_failure_reply(result_text, dutch=dutch)
+    working.append(_tool_result_message(add_tc, result_text))
+    working.append(ChatMessage(role="assistant", content=reply))
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=[PROTOCOL_RUN_TOOL],
+            success=ok,
+            anomaly=None if ok else "tool_error",
+            content_preview=reply[:200],
+        )
+    )
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
+
+
 def _complete_evening_wind_down(
     *,
     working: list[ChatMessage],
@@ -681,6 +778,7 @@ def run_turn(
     conversation_id: str | None = None,
     pending_recipes: PendingRecipeStore | None = None,
     pending_devices: PendingDeviceStore | None = None,
+    pending_protocols: PendingProtocolStore | None = None,
     settings: Any | None = None,
     unavailable_services: list[str] | None = None,
 ) -> TurnResult:
@@ -708,6 +806,9 @@ def run_turn(
     recipe_gate_handled_this_turn = False
     device_staged_this_turn = False
     device_gate_handled_this_turn = False
+    protocol_staged_this_turn = False
+    protocol_gate_handled_this_turn = False
+    protocol_dispatched_this_turn = False
     lights_list_called_this_turn = False
     write_nudge_count = 0
     calendar_fallback_used = False
@@ -749,6 +850,14 @@ def run_turn(
     ):
         pending_devices.clear(conversation_id)
 
+    if (
+        pending_protocols is not None
+        and conversation_id
+        and pending_protocols.has(conversation_id)
+        and not should_keep_pending_protocol(user_message)
+    ):
+        pending_protocols.clear(conversation_id)
+
     # T-048: drop post-save soft-followup state when the user moves on.
     if (
         pending_recipes is not None
@@ -781,6 +890,60 @@ def run_turn(
             messages=working,
             steps=steps,
             stopped_reason=StoppedReason.FINAL,
+        )
+
+    if (
+        pending_protocols is not None
+        and conversation_id
+        and is_bare_cancel(user_message)
+        and pending_protocols.has(conversation_id)
+    ):
+        dutch = pending_protocols.is_dutch(conversation_id)
+        pending_protocols.clear(conversation_id)
+        cancel_reply = build_protocol_cancel_reply(dutch=dutch)
+        working.append(ChatMessage(role="assistant", content=cancel_reply))
+        return TurnResult(
+            content=cancel_reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    # T-115: Protocol phrase but Homebase tool absent → deterministic unavailable.
+    if user_message_requests_protocol_run(user_message) and PROTOCOL_RUN_TOOL not in registry:
+        unavailable = build_protocol_unavailable_reply(
+            dutch=protocol_locale_dutch(user_message)
+        )
+        working.append(ChatMessage(role="assistant", content=unavailable))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=[],
+                success=False,
+                anomaly="protocol_unavailable",
+                content_preview=unavailable[:120],
+            )
+        )
+        return TurnResult(
+            content=unavailable,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    # T-115: Protocol phrase is the ask — run immediately (no M3 confirm).
+    if user_message_requests_protocol_run(user_message) and PROTOCOL_RUN_TOOL in registry:
+        return _complete_protocol_run(
+            user_message=user_message,
+            working=working,
+            steps=steps,
+            registry=registry,
+            deadline_monotonic=deadline_monotonic,
+            default_tool_timeout_s=default_tool_timeout_s,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+            pending_protocols=pending_protocols,
+            conversation_id=conversation_id,
         )
 
     # T-048: post-save soft follow-up — bare ja/nee before Ollama (after pending cancel).
@@ -848,6 +1011,80 @@ def run_turn(
             )
 
     # T-021 / T-106: bare yes/ja with confirmable staged candidate → auto-dispatch.
+
+    # T-115: bare ja/yes dispatches staged Protocol run.
+    if (
+        pending_protocols is not None
+        and conversation_id
+        and is_bare_confirm(user_message)
+        and pending_protocols.is_confirmable(conversation_id)
+        and pending_protocols.get_tool_name(conversation_id) in registry
+    ):
+        payload = pending_protocols.get(conversation_id)
+        pending_tool = pending_protocols.get_tool_name(conversation_id)
+        if payload is not None and pending_tool in PROTOCOL_WRITE_TOOLS:
+            dispatch_payload = protocol_dispatch_args(payload)
+            add_tc = ToolCall(
+                function=ToolCallFunction(
+                    name=pending_tool, arguments=dispatch_payload
+                )
+            )
+            working.append(
+                ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[add_tc],
+                )
+            )
+            if on_tool_start is not None:
+                on_tool_start(pending_tool, dispatch_payload)
+            per_tool = default_tool_timeout_s
+            tool_entry = registry.get(pending_tool)
+            if tool_entry is not None and tool_entry.timeout_s is not None:
+                per_tool = max(per_tool, tool_entry.timeout_s)
+            remaining = _remaining_s(deadline_monotonic)
+            if remaining is not None:
+                per_tool = min(per_tool, remaining)
+            result_text = _dispatch_with_timeout(
+                pending_tool,
+                dispatch_payload,
+                tools=registry,
+                timeout_s=per_tool,
+            )
+            dialog_dutch = pending_protocols.is_dutch(conversation_id)
+            pending_protocols.clear(conversation_id)
+            ok = protocol_run_succeeded(result_text) and not tool_result_is_error(
+                result_text
+            )
+            if on_tool_end is not None:
+                preview = (
+                    result_text if len(result_text) <= 200 else result_text[:197] + "..."
+                )
+                on_tool_end(pending_tool, ok, preview)
+            if ok:
+                reply = build_protocol_success_reply(
+                    payload, result_text, dutch=dialog_dutch
+                )
+            else:
+                reply = build_protocol_failure_reply(
+                    result_text, dutch=dialog_dutch
+                )
+            working.append(_tool_result_message(add_tc, result_text))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[pending_tool],
+                    success=ok,
+                    anomaly=None if ok else "tool_error",
+                    content_preview=reply[:200],
+                )
+            )
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
 
     # T-108: bare ja/yes dispatches staged Network device write.
     if (
@@ -1443,6 +1680,36 @@ def run_turn(
                             steps=steps,
                             stopped_reason=StoppedReason.FINAL,
                         )
+                    if (
+                        protocol_staged_this_turn
+                        and pending_protocols is not None
+                        and conversation_id
+                        and pending_protocols.has(conversation_id)
+                    ):
+                        payload = pending_protocols.get(conversation_id)
+                        assert payload is not None
+                        confirm = build_protocol_confirm_reply(
+                            payload,
+                            user_message=user_message,
+                            dutch=pending_protocols.is_dutch(conversation_id),
+                        )
+                        steps.append(
+                            _step(
+                                tool_names=[],
+                                success=True,
+                                anomaly="protocol_confirm_forced",
+                                content_preview=confirm[:120],
+                            )
+                        )
+                        working.append(
+                            ChatMessage(role="assistant", content=confirm)
+                        )
+                        return TurnResult(
+                            content=confirm,
+                            messages=working,
+                            steps=steps,
+                            stopped_reason=StoppedReason.FINAL,
+                        )
                     anomaly = "empty_response"
                     steps.append(
                         _step(
@@ -1460,7 +1727,10 @@ def run_turn(
                     )
             # T-021: after staging / gating a recipe, confirm or refuse text is expected.
             recipe_confirm_pause = (
-                recipe_staged_this_turn or recipe_gate_handled_this_turn
+                recipe_staged_this_turn
+                or recipe_gate_handled_this_turn
+                or protocol_staged_this_turn
+                or protocol_gate_handled_this_turn
             )
             if (
                 user_message_requests_write(user_message)
@@ -2014,6 +2284,34 @@ def run_turn(
                     steps=steps,
                     stopped_reason=StoppedReason.FINAL,
                 )
+            if (
+                protocol_staged_this_turn
+                and pending_protocols is not None
+                and conversation_id
+                and pending_protocols.has(conversation_id)
+            ):
+                payload = pending_protocols.get(conversation_id)
+                assert payload is not None
+                confirm = build_protocol_confirm_reply(
+                    payload,
+                    user_message=user_message,
+                    dutch=pending_protocols.is_dutch(conversation_id),
+                )
+                steps.append(
+                    _step(
+                        tool_names=[],
+                        success=True,
+                        anomaly="protocol_confirm_forced",
+                        content_preview=confirm[:120],
+                    )
+                )
+                working.append(ChatMessage(role="assistant", content=confirm))
+                return TurnResult(
+                    content=confirm,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
             # Dutch light toggle → English confirmation (EN history stickiness).
             if needs_lights_locale_fixup(
                 user_message,
@@ -2136,11 +2434,26 @@ def run_turn(
                 if isinstance(tc.function.arguments, dict)
                 else {}
             )
+            protocol_latch_block: str | None = None
+            # T-115: cinema/bioscoop protocol → one protocols.run (never freestyle).
+            if user_message_requests_protocol_run(user_message) and (
+                dispatch_name == PROTOCOL_RUN_TOOL
+                or is_freestyle_tool_on_protocol(dispatch_name)
+            ):
+                if protocol_staged_this_turn or protocol_dispatched_this_turn:
+                    protocol_latch_block = (
+                        "error: write blocked — Protocol already staged/run this turn "
+                        f"({dispatch_name})"
+                    )
+                    protocol_gate_handled_this_turn = True
+                resolved = resolve_protocol_name_from_message(user_message)
+                dispatch_name = PROTOCOL_RUN_TOOL
+                dispatch_args = {"name": resolved or CINEMA_CANONICAL_NAME}
             # T-112: force the tool the user actually asked for (Granite invents
             # set_input=live_tv / input=home for "switch the tv to home").
             # TV wake / "wake … home" → go_home + wake_if_needed (not bare WoL).
             # T-113: TV-off → power_off (remap invented wake/home/hdmi/lights).
-            if user_message_requests_device_power_off(user_message) and dispatch_name in {
+            elif user_message_requests_device_power_off(user_message) and dispatch_name in {
                 DEVICE_SET_INPUT_TOOL,
                 DEVICE_LAUNCH_APP_TOOL,
                 DEVICE_GO_HOME_TOOL,
@@ -2200,6 +2513,17 @@ def run_turn(
                         if k in {"device_id", "id", "name", "wake_if_needed"}
                     }
             result_tc = tc
+            if dispatch_name != tc.function.name or dispatch_args != (
+                dict(tc.function.arguments)
+                if isinstance(tc.function.arguments, dict)
+                else {}
+            ):
+                result_tc = ToolCall(
+                    function=ToolCallFunction(
+                        name=dispatch_name,
+                        arguments=dispatch_args,
+                    )
+                )
             # T-041: misrouted party_mode → house-wide set_state (never call party_mode).
             if (
                 dispatch_name == "homebase.lights.party_mode"
@@ -2218,7 +2542,12 @@ def run_turn(
 
             # T-090: never dispatch tools that were not offered this Ollama round
             # (empty offered_names means the model was given no tools).
-            if dispatch_name not in offered_names:
+            # T-115: allow remapped protocols.run even if the model named a freestyle tool.
+            protocol_remap_ok = (
+                dispatch_name == PROTOCOL_RUN_TOOL
+                and user_message_requests_protocol_run(user_message)
+            )
+            if dispatch_name not in offered_names and not protocol_remap_ok:
                 skip_msg = (
                     f"error: tool '{dispatch_name}' was not offered this turn"
                 )
@@ -2288,7 +2617,14 @@ def run_turn(
                     and conversation_id
                     and pending_devices.is_confirmable(conversation_id)
                 ),
+                protocol_pending=bool(
+                    pending_protocols is not None
+                    and conversation_id
+                    and pending_protocols.is_confirmable(conversation_id)
+                ),
             )
+            if protocol_latch_block is not None:
+                write_block = protocol_latch_block
             if (
                 write_block is None
                 and dispatch_name == "homebase.recipes.search"
@@ -2312,6 +2648,51 @@ def run_turn(
                         args=dispatch_args,
                     )
                 result = write_block
+
+            elif dispatch_name in PROTOCOL_WRITE_TOOLS:
+                # T-115: phrase is the ask — dispatch immediately (no M3 stage).
+                # (Primary path is early short-circuit; this covers remapped mid-loop calls.)
+                if user_message_requests_protocol_run(user_message):
+                    tool_args = protocol_dispatch_args(
+                        {
+                            "name": resolve_protocol_name_from_message(user_message)
+                            or CINEMA_CANONICAL_NAME
+                        }
+                    )
+                    result = _dispatch_with_timeout(
+                        dispatch_name,
+                        tool_args,
+                        tools=registry,
+                        timeout_s=per_tool,
+                    )
+                    write_tool_called_this_turn = True
+                    protocol_dispatched_this_turn = True
+                    if pending_protocols is not None and conversation_id:
+                        pending_protocols.clear(conversation_id)
+                elif (
+                    pending_protocols is not None
+                    and conversation_id
+                    and is_bare_confirm(user_message)
+                    and pending_protocols.has(conversation_id)
+                ):
+                    stashed = pending_protocols.get(conversation_id) or {}
+                    tool_args = protocol_dispatch_args(stashed)
+                    result = _dispatch_with_timeout(
+                        dispatch_name,
+                        tool_args,
+                        tools=registry,
+                        timeout_s=per_tool,
+                    )
+                    write_tool_called_this_turn = True
+                    protocol_dispatched_this_turn = True
+                    pending_protocols.clear(conversation_id)
+                else:
+                    result = (
+                        "error: write blocked — need explicit Protocol phrase "
+                        f"({dispatch_name}; require 'cinema protocol' / "
+                        "'bioscoop protocol')"
+                    )
+                    protocol_gate_handled_this_turn = True
 
             elif dispatch_name in DEVICE_WRITE_TOOLS and (
                 pending_devices is None or not conversation_id
@@ -2491,6 +2872,8 @@ def run_turn(
                             tool_args = dict(stashed)
                 if dispatch_name in DEVICE_WRITE_TOOLS:
                     tool_args = device_dispatch_args(dispatch_name, tool_args)
+                if dispatch_name in PROTOCOL_WRITE_TOOLS:
+                    tool_args = protocol_dispatch_args(tool_args)
                 if dispatch_name == "homebase.lights.set_state":
                     tool_args = build_set_state_args_from_user_message(
                         user_message, tool_args
@@ -2507,6 +2890,10 @@ def run_turn(
                 )
                 if is_write_tool(dispatch_name):
                     write_tool_called_this_turn = True
+                if dispatch_name in PROTOCOL_WRITE_TOOLS:
+                    protocol_dispatched_this_turn = True
+                    if pending_protocols is not None and conversation_id:
+                        pending_protocols.clear(conversation_id)
                 if (
                     dispatch_name == RECIPE_ADD_TOOL
                     and pending_recipes is not None
@@ -2594,7 +2981,10 @@ def run_turn(
                 after_tool(dispatch_name, result, working)
             if dispatch_name == "homebase.lights.list":
                 lights_list_called_this_turn = True
-            if dispatch_name != tc.function.name:
+            # Record effective tool name (remaps replace freestyle names for Confirm UI).
+            if idx < len(tool_names):
+                tool_names[idx] = dispatch_name
+            elif dispatch_name not in tool_names:
                 tool_names.append(dispatch_name)
             if dispatch_name == "get_calendar" and not tool_result_is_error(result):
                 try:
@@ -2828,6 +3218,37 @@ def run_turn(
                 stopped_reason=StoppedReason.FINAL,
             )
 
+        # T-115: same for Protocol runs.
+        if (
+            protocol_staged_this_turn
+            and pending_protocols is not None
+            and conversation_id
+            and pending_protocols.has(conversation_id)
+        ):
+            payload = pending_protocols.get(conversation_id)
+            assert payload is not None
+            confirm = build_protocol_confirm_reply(
+                payload,
+                user_message=user_message,
+                dutch=pending_protocols.is_dutch(conversation_id),
+            )
+            working.append(ChatMessage(role="assistant", content=confirm))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="protocol_confirm_forced",
+                    content_preview=confirm[:120],
+                )
+            )
+            return TurnResult(
+                content=confirm,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+
     # Exhausted iterations — still salvage a staged recipe confirm if we have one.
     if (
         recipe_staged_this_turn
@@ -2862,6 +3283,26 @@ def run_turn(
             pending_devices.get_tool_name(conversation_id),
             user_message=user_message,
             dutch=pending_devices.is_dutch(conversation_id),
+        )
+        working.append(ChatMessage(role="assistant", content=confirm))
+        return TurnResult(
+            content=confirm,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+    if (
+        protocol_staged_this_turn
+        and pending_protocols is not None
+        and conversation_id
+        and pending_protocols.has(conversation_id)
+    ):
+        payload = pending_protocols.get(conversation_id)
+        assert payload is not None
+        confirm = build_protocol_confirm_reply(
+            payload,
+            user_message=user_message,
+            dutch=pending_protocols.is_dutch(conversation_id),
         )
         working.append(ChatMessage(role="assistant", content=confirm))
         return TurnResult(

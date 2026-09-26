@@ -53,6 +53,8 @@ from brain.tools import Tool
 def _mcp_tool_timeout_s(name: str, settings: Settings) -> float:
     if name == "homebase.lights.party_mode":
         return settings.timeouts.mcp_party_s
+    if name == "homebase.protocols.run":
+        return settings.timeouts.mcp_protocol_s
     if name in {
         "homebase.devices.go_home",
         "homebase.devices.launch_app",

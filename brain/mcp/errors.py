@@ -20,6 +20,7 @@ _WRITE_SEGMENTS = (
     ".launch_app",
     ".set_input",
     ".power_off",
+    ".run",
 )
 
 

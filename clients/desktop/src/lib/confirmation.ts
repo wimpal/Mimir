@@ -38,6 +38,10 @@ const mutationPatterns = [
   /\b(open|go to)\b.*\bhome\b.*\b(tv|television)\b/i,
   /\bjellyfin\b.*\b(tv|television)\b/i,
   /\bhdmi\b/i,
+  /\bcinema\b.*\bprotocol\b/i,
+  /\bprotocol\b.*\bcinema\b/i,
+  /\bbioscoop\b.*\bprotocol\b/i,
+  /\bprotocol\b.*\bbioscoop\b/i,
 ];
 
 const readOnlyPatterns = [
@@ -73,6 +77,7 @@ const readOnlyTools = new Set([
   "homebase.devices.launch_app",
   "homebase.devices.set_input",
   "homebase.devices.power_off",
+  "homebase.protocols.list",
 ]);
 
 export function userMessageRequestsWrite(text: string): boolean {

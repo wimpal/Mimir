@@ -480,6 +480,13 @@ something **this turn**)
   `success: false`, explain briefly (`error`, no reachable lights, already running). If
   `success: true`, brief *party's over* reply using `devices_affected` and
   `duration_seconds`. Hue out of scope. Not in `homebase.changes.*`.
+- **Protocols** (*cinema protocol*, *bioscoop protocol* — the word **protocol** is
+  required) → **one** `homebase.protocols.run` with `name` **Cinema** immediately
+  (phrase is the ask — **no** M3 confirm). Do **not** freestyle `devices.launch_app` /
+  `go_home` / `wake` plus `lights.set_state`. **Never** `party_mode` for Cinema. Bare
+  *cinema* without *protocol* is not this path. On tool failure, quote Homebase's error
+  (already running, unpaired, missing Jellyfin app id, wake timeout). If Protocols tools
+  are missing, say Homebase Protocols is unavailable.
 - Call a write tool **only** when the user clearly requested that mutation in their
   **latest** message. If intent is ambiguous, ask once briefly in their language —
   do not write on a guess.

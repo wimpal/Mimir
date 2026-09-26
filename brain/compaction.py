@@ -110,8 +110,11 @@ def should_bypass_compaction(
     pending_recipes: PendingRecipeStore | None,
     conversation_id: str,
     pending_devices: Any | None = None,
+    pending_protocols: Any | None = None,
 ) -> bool:
     """True when mid-confirm / recipe staging must keep a full verbatim window."""
+    if pending_protocols is not None and pending_protocols.is_confirmable(conversation_id):
+        return True
     if pending_devices is not None and pending_devices.is_confirmable(conversation_id):
         return True
     if pending_recipes is None:
@@ -340,6 +343,7 @@ def assemble_persist_messages(
     user_text: str,
     pending_recipes: PendingRecipeStore | None = None,
     pending_devices: Any | None = None,
+    pending_protocols: Any | None = None,
     deadline_monotonic: float | None = None,
 ) -> list[ChatMessage]:
     """Build system + optional summary + verbatim tail + current user for a persist turn."""
@@ -347,6 +351,7 @@ def assemble_persist_messages(
     bypass = should_bypass_compaction(
         user_text, pending_recipes, conversation_id,
         pending_devices=pending_devices,
+        pending_protocols=pending_protocols,
     )
     snapshot = db.list_messages_with_ids(conversation_id)
     existing = db.get_compaction(conversation_id) if memory.compaction_enabled else None

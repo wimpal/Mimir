@@ -235,6 +235,8 @@ def test_write_tool_not_retried() -> None:
     assert is_write_tool("homebase.devices.set_input")
     assert is_write_tool("homebase.devices.power_off")
     assert is_write_tool("homebase.devices.wake")
+    assert is_write_tool("homebase.protocols.run")
+    assert not is_write_tool("homebase.protocols.list")
 
 
 def test_parse_conventions_error() -> None:

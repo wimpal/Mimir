@@ -73,6 +73,8 @@ timeouts:
   mcp_default_s: 10
   mcp_search_s: 30
   mcp_party_s: 70  # homebase.lights.party_mode (blocks up to 60s)
+  mcp_tv_s: 120  # go_home / launch_app / set_input (+ wake_if_needed ≤90s)
+  mcp_protocol_s: 150  # homebase.protocols.run (TV wake ≤90s + gated lights)
   # Voice endpoints (T-023).
   stt_s: 60
   tts_s: 30

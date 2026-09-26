@@ -44,6 +44,10 @@ object ConfirmationDetector {
         Regex("(?i)\\b(open|go to)\\b.*\\bhome\\b.*\\b(tv|television)\\b"),
         Regex("(?i)\\bjellyfin\\b.*\\b(tv|television)\\b"),
         Regex("(?i)\\bhdmi\\b"),
+        Regex("(?i)\\bcinema\\b.*\\bprotocol\\b"),
+        Regex("(?i)\\bprotocol\\b.*\\bcinema\\b"),
+        Regex("(?i)\\bbioscoop\\b.*\\bprotocol\\b"),
+        Regex("(?i)\\bprotocol\\b.*\\bbioscoop\\b"),
     )
 
     private val readOnlyPatterns = listOf(
@@ -79,6 +83,7 @@ object ConfirmationDetector {
         "homebase.devices.launch_app",
         "homebase.devices.set_input",
         "homebase.devices.power_off",
+        "homebase.protocols.list",
     )
 
     fun userMessageRequestsWrite(text: String): Boolean {
