@@ -204,8 +204,9 @@ _DEVICE_TV_NUDGE = (
     "launch_app target jellyfin — beats bare Home/wake. Use wake_if_needed for "
     "start/run/open/launch and compound wake (not for switch-to; not for "
     "power_off); do not invent fixed sleeps. Console / PlayStation → input hdmi1. "
-    "TV-off phrases → homebase.devices.power_off with device_id only. Never ask "
-    "for SSAP client key or MAC."
+    "TV-off phrases → homebase.devices.power_off with device_id only. "
+    "Play <title> on the TV is brain-orchestrated (catalogue + Sessions) — do not "
+    "invent a bare launch_app for that. Never ask for SSAP client key or MAC."
 )
 _PROTOCOL_RUN_NUDGE = (
     "System correction (do not repeat to the user): the user asked for a "
@@ -293,6 +294,7 @@ def write_retry_nudge(user_message: str) -> str:
         user_message_requests_device_tv,
         user_message_requests_device_wake,
     )
+    from brain.tv_play import user_message_requests_play_on_tv
     from brain.mcp.protocols import user_message_requests_protocol_run
     from brain.recipe_import import (
         user_message_requests_recipe_edit,
@@ -302,6 +304,13 @@ def write_retry_nudge(user_message: str) -> str:
     normalized = message_for_hints(user_message)
     if user_message_requests_protocol_run(normalized):
         return _PROTOCOL_RUN_NUDGE
+    if user_message_requests_play_on_tv(normalized):
+        return (
+            "System correction (do not repeat to the user): the user asked to play "
+            "a movie on the TV THIS turn. The brain stages play-on-TV (catalogue "
+            "resolve + M3 + launch_app + Jellyfin Sessions). Do not invent a bare "
+            "launch_app or a fictional play tool call."
+        )
     if user_message_requests_device_tv(normalized):
         return _DEVICE_TV_NUDGE
     if user_message_requests_device_wake(normalized):

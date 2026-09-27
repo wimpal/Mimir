@@ -127,6 +127,25 @@ from brain.mcp.protocols import (
     should_keep_pending_protocol,
     user_message_requests_protocol_run,
 )
+from brain.tv_play import (
+    PendingPlayDisambiguation,
+    PendingPlayStore,
+    build_play_ambiguous_reply,
+    build_play_confirm_reply,
+    build_play_missing_reply,
+    build_play_failure_reply,
+    execute_play_on_tv,
+    extract_play_title,
+    list_devices_via_dispatch,
+    pick_tv_device,
+    play_locale_dutch,
+    resolve_disambiguation_pick,
+    resolve_movie_for_play,
+    should_keep_pending_play,
+    stage_play_from_movie,
+    user_message_requests_play_on_tv,
+    _candidate_dicts,
+)
 from brain.recipe_import import (
     RECIPE_ADD_TOOL,
     RECIPE_UPDATE_TOOL,
@@ -579,6 +598,217 @@ def _complete_protocol_run(
     )
 
 
+def _stage_or_ask_play_on_tv(
+    *,
+    user_message: str,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    registry: dict[str, Tool],
+    deadline_monotonic: float | None,
+    default_tool_timeout_s: float,
+    pending_play: PendingPlayStore,
+    pending_devices: PendingDeviceStore | None,
+    conversation_id: str,
+    db: Any,
+    movie_override: Any | None = None,
+    title_override: str | None = None,
+) -> TurnResult:
+    """Resolve catalogue title + TV device, then M3-stage play-on-TV."""
+    dutch = play_locale_dutch(user_message)
+    title = title_override or extract_play_title(user_message)
+    if not title and movie_override is None:
+        reply = build_play_failure_reply(
+            "Which movie should I play on the TV?"
+            if not dutch
+            else "Welke film moet ik op de TV afspelen?",
+            dutch=dutch,
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    movie = movie_override
+    if movie is None:
+        assert title is not None
+        movie, ambiguous, missing = resolve_movie_for_play(db, title)
+        if missing or (movie is None and not ambiguous):
+            reply = build_play_missing_reply(title, dutch=dutch)
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        if ambiguous:
+            pending_play.set_ambiguous(
+                conversation_id,
+                PendingPlayDisambiguation(
+                    query=title,
+                    candidates=_candidate_dicts(ambiguous),
+                    dutch=dutch,
+                ),
+            )
+            reply = build_play_ambiguous_reply(title, ambiguous, dutch=dutch)
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        assert movie is not None
+
+    if DEVICE_LAUNCH_APP_TOOL not in registry:
+        reply = build_play_failure_reply(
+            "TV control is unavailable right now."
+            if not dutch
+            else "TV-bediening is nu niet beschikbaar.",
+            dutch=dutch,
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    def _dispatch(name: str, args: dict[str, Any], timeout_s: float) -> str:
+        return _dispatch_with_timeout(
+            name, args, tools=registry, timeout_s=timeout_s
+        )
+
+    list_timeout = default_tool_timeout_s
+    remaining = _remaining_s(deadline_monotonic)
+    if remaining is not None:
+        list_timeout = min(list_timeout, remaining)
+    devices = list_devices_via_dispatch(_dispatch, list_timeout)
+    device = pick_tv_device(devices)
+    if device is None or not str(device.get("id") or "").strip():
+        reply = build_play_failure_reply(
+            "No paired TV found (need one tv_capable device)."
+            if not dutch
+            else "Geen gekoppelde TV gevonden (één tv_capable apparaat nodig).",
+            dutch=dutch,
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    wake = True
+    if (
+        pending_devices is not None
+        and pending_devices.tv_wake_recent(
+            conversation_id, device_id=str(device.get("id") or "")
+        )
+    ):
+        wake = False
+
+    pending = stage_play_from_movie(
+        movie=movie,
+        device=device,
+        wake_if_needed=wake,
+        dutch=dutch,
+        db=db,
+    )
+    if not pending.device_id:
+        reply = build_play_failure_reply(
+            "TV device id missing.",
+            dutch=dutch,
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    pending_play.set_play(conversation_id, pending)
+    reply = build_play_confirm_reply(pending)
+    working.append(ChatMessage(role="assistant", content=reply))
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
+
+
+def _complete_play_on_tv_confirm(
+    *,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    registry: dict[str, Tool],
+    deadline_monotonic: float | None,
+    default_tool_timeout_s: float,
+    on_tool_start: OnToolStartCallback | None,
+    on_tool_end: OnToolEndCallback | None,
+    pending_play: PendingPlayStore,
+    pending_devices: PendingDeviceStore | None,
+    conversation_id: str,
+    settings: Any,
+    db: Any,
+) -> TurnResult:
+    pending = pending_play.clear_play(conversation_id)
+    if pending is None:
+        reply = "Nothing pending to confirm."
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    def _dispatch(name: str, args: dict[str, Any], timeout_s: float) -> str:
+        if on_tool_start is not None:
+            on_tool_start(name, args)
+        result = _dispatch_with_timeout(
+            name, args, tools=registry, timeout_s=timeout_s
+        )
+        if on_tool_end is not None:
+            ok = not tool_result_is_error(result)
+            preview = result if len(result) <= 200 else result[:197] + "..."
+            on_tool_end(name, ok, preview)
+        return result
+
+    ok, reply = execute_play_on_tv(
+        pending,
+        settings=settings,
+        db=db,
+        dispatch=_dispatch,
+        deadline_monotonic=deadline_monotonic,
+        pending_devices=pending_devices,
+        conversation_id=conversation_id,
+    )
+    working.append(ChatMessage(role="assistant", content=reply))
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=[DEVICE_LAUNCH_APP_TOOL, "jellyfin.sessions.play"],
+            success=ok,
+            anomaly=None if ok else "tool_error",
+            content_preview=reply[:200],
+        )
+    )
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
+
+
 def _complete_evening_wind_down(
     *,
     working: list[ChatMessage],
@@ -781,6 +1011,8 @@ def run_turn(
     pending_recipes: PendingRecipeStore | None = None,
     pending_devices: PendingDeviceStore | None = None,
     pending_protocols: PendingProtocolStore | None = None,
+    pending_play: PendingPlayStore | None = None,
+    db: Any | None = None,
     settings: Any | None = None,
     unavailable_services: list[str] | None = None,
 ) -> TurnResult:
@@ -860,6 +1092,17 @@ def run_turn(
     ):
         pending_protocols.clear(conversation_id)
 
+    if (
+        pending_play is not None
+        and conversation_id
+        and (pending_play.has_play(conversation_id) or pending_play.has_ambiguous(conversation_id))
+        and not should_keep_pending_play(
+            user_message,
+            has_ambiguous=pending_play.has_ambiguous(conversation_id),
+        )
+    ):
+        pending_play.clear(conversation_id)
+
     # T-048: drop post-save soft-followup state when the user moves on.
     if (
         pending_recipes is not None
@@ -911,6 +1154,27 @@ def run_turn(
             stopped_reason=StoppedReason.FINAL,
         )
 
+    if (
+        pending_play is not None
+        and conversation_id
+        and is_bare_cancel(user_message)
+        and (pending_play.has_play(conversation_id) or pending_play.has_ambiguous(conversation_id))
+    ):
+        dutch = pending_play.is_dutch(conversation_id)
+        pending_play.clear(conversation_id)
+        cancel_reply = (
+            "Ok, ik speel die film niet af."
+            if dutch
+            else "Ok, I won't play that movie."
+        )
+        working.append(ChatMessage(role="assistant", content=cancel_reply))
+        return TurnResult(
+            content=cancel_reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
     # T-115: Protocol phrase but Homebase tool absent → deterministic unavailable.
     if user_message_requests_protocol_run(user_message) and PROTOCOL_RUN_TOOL not in registry:
         unavailable = build_protocol_unavailable_reply(
@@ -946,6 +1210,119 @@ def run_turn(
             on_tool_end=on_tool_end,
             pending_protocols=pending_protocols,
             conversation_id=conversation_id,
+        )
+
+    # T-116: bare yes/ja with staged play-on-TV → launch + Sessions PlayNow.
+    if (
+        pending_play is not None
+        and conversation_id
+        and db is not None
+        and settings is not None
+        and is_bare_confirm(user_message)
+        and pending_play.is_confirmable(conversation_id)
+    ):
+        return _complete_play_on_tv_confirm(
+            working=working,
+            steps=steps,
+            registry=registry,
+            deadline_monotonic=deadline_monotonic,
+            default_tool_timeout_s=default_tool_timeout_s,
+            on_tool_start=on_tool_start,
+            on_tool_end=on_tool_end,
+            pending_play=pending_play,
+            pending_devices=pending_devices,
+            conversation_id=conversation_id,
+            settings=settings,
+            db=db,
+        )
+
+    # T-116: disambiguation pick → stage M3 play.
+    if (
+        pending_play is not None
+        and conversation_id
+        and db is not None
+        and pending_play.has_ambiguous(conversation_id)
+        and not is_bare_confirm(user_message)
+        and not is_bare_cancel(user_message)
+    ):
+        amb = pending_play.get_ambiguous(conversation_id)
+        assert amb is not None
+        pick = resolve_disambiguation_pick(user_message, amb)
+        if pick is not None:
+            jid = str(pick.get("jellyfin_id") or "")
+            movie = next(
+                (m for m in db.list_active_movies() if m.jellyfin_id == jid),
+                None,
+            )
+            if movie is not None:
+                return _stage_or_ask_play_on_tv(
+                    user_message=user_message,
+                    working=working,
+                    steps=steps,
+                    registry=registry,
+                    deadline_monotonic=deadline_monotonic,
+                    default_tool_timeout_s=default_tool_timeout_s,
+                    pending_play=pending_play,
+                    pending_devices=pending_devices,
+                    conversation_id=conversation_id,
+                    db=db,
+                    movie_override=movie,
+                    title_override=movie.name,
+                )
+            dutch = amb.dutch
+            reply = build_play_missing_reply(
+                str(pick.get("title") or jid), dutch=dutch
+            )
+            pending_play.clear(conversation_id)
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        dutch = amb.dutch
+        reply = (
+            "Welke van de lijst? Zeg het nummer of de titel."
+            if dutch
+            else "Which one from the list? Say the number or the title."
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    # T-116: play <title> on the TV — deterministic resolve + M3 (no Ollama).
+    if db is not None and user_message_requests_play_on_tv(user_message):
+        if pending_play is None or not conversation_id:
+            dutch = play_locale_dutch(user_message)
+            reply = build_play_failure_reply(
+                "Play on TV needs an active conversation (confirm flow)."
+                if not dutch
+                else "Afspelen op TV heeft een actief gesprek nodig (bevestiging).",
+                dutch=dutch,
+            )
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        return _stage_or_ask_play_on_tv(
+            user_message=user_message,
+            working=working,
+            steps=steps,
+            registry=registry,
+            deadline_monotonic=deadline_monotonic,
+            default_tool_timeout_s=default_tool_timeout_s,
+            pending_play=pending_play,
+            pending_devices=pending_devices,
+            conversation_id=conversation_id,
+            db=db,
         )
 
     # T-048: post-save soft follow-up — bare ja/nee before Ollama (after pending cancel).

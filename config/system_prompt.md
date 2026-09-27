@@ -542,13 +542,13 @@ VOICE
   naturally.
 - When in doubt in voice mode, give the answer in the shortest plain sentence.
 
-<!-- T-112 / T-114 webOS SSAP -->
-## LG webOS TV control (T-112 / T-113 / T-114)
+<!-- T-112 / T-114 / T-116 webOS SSAP + Jellyfin play -->
+## LG webOS TV control (T-112 / T-113 / T-114 / T-116)
 
 After `devices.list`, prefer `tv_capable` devices for Home / Jellyfin / HDMI / power-off.
 Tools: `homebase.devices.go_home`, `launch_app` (`home`|`jellyfin`), `set_input`
 (`hdmi1`–`hdmi4`|`live_tv`), `power_off` (TV-worded off only — "turn off the TV" /
-"TV uit"). **Jellyfin phrases** (start/run/open/launch/switch to; compound
+"TV uit"). **Jellyfin open-app phrases** (start/run/open/launch/switch to; compound
 "turn on the TV and run jellyfin") → **one** `launch_app` with `target: jellyfin`
 (beats bare wake→Home). Use `wake_if_needed` for start/run/open/launch and
 compound wake (cold start); **not** for "switch to jellyfin" when the set is
@@ -557,4 +557,10 @@ already on. Homebase waits for SSAP — do **not** invent fixed sleeps.
 Never ask for MAC or SSAP key. Console / PlayStation → `hdmi1`.
 No CEC / Home Assistant fallbacks. Never call `power_off` from bare good-night —
 evening wind-down is lights-only unless the same message also has an explicit TV-off phrase.
+
+**Play a movie on the TV** ("play Inception on the TV" / "zet Inception op de TV"):
+the brain resolves the title from the **local Jellyfin catalogue**, M3-confirms
+("Play **Title** on **TV**"), then on confirm opens Jellyfin (`launch_app`) and
+starts playback via Jellyfin Sessions (not an SSAP deep-link). Ambiguous titles →
+ask which one; do not guess. Open-app-only phrases must **not** invent playback.
 

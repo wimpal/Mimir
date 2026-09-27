@@ -395,12 +395,15 @@ def user_message_requests_device_wake(text: str) -> bool:
 
 
 def user_message_requests_device_write(text: str) -> bool:
+    from brain.tv_play import user_message_requests_play_on_tv
+
     return (
         user_message_requests_device_add(text)
         or user_message_requests_device_update(text)
         or user_message_requests_device_tv(text)
         or user_message_requests_device_remove(text)
         or user_message_requests_device_wake(text)
+        or user_message_requests_play_on_tv(text)
     )
 
 
@@ -463,6 +466,11 @@ def user_message_requests_device_jellyfin(text: str) -> bool:
     if not (text or "").strip():
         return False
     if _device_write_negated(text) or _lights_carveout(text):
+        return False
+    # T-116 play-title-on-TV is a separate flow (not open-app remap).
+    from brain.tv_play import user_message_requests_play_on_tv
+
+    if user_message_requests_play_on_tv(text):
         return False
     return any(p.search(text) for p in _DEVICE_JELLYFIN_PATTERNS)
 

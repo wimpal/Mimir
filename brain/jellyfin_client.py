@@ -41,7 +41,15 @@ class JellyfinClient:
         self._owns_client = client is None
         self._client = client or httpx.Client(
             base_url=self.base_url,
-            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            headers={
+                "X-Emby-Token": api_key,
+                "Accept": "application/json",
+                # Identify API client so Sessions matching can ignore it.
+                "X-Emby-Authorization": (
+                    'MediaBrowser Client="MimirBrain", Device="Mimir", '
+                    'DeviceId="mimir-brain", Version="1.0"'
+                ),
+            },
             timeout=request_timeout_s,
         )
         self._warned_missing_userdata = False
@@ -213,6 +221,53 @@ class JellyfinClient:
                 break
             if got < self.page_size:
                 break
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """Active Jellyfin sessions (for remote PlayNow targeting)."""
+        try:
+            resp = self._client.get("Sessions")
+        except httpx.TimeoutException as exc:
+            raise JellyfinError("jellyfin unavailable (timeout)") from exc
+        except httpx.HTTPError as exc:
+            raise JellyfinError("jellyfin unavailable (network)") from exc
+        if resp.status_code >= 400:
+            raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise JellyfinError("jellyfin unavailable (bad JSON)") from exc
+        if not isinstance(payload, list):
+            raise JellyfinError("jellyfin unavailable (bad JSON)")
+        return [s for s in payload if isinstance(s, dict)]
+
+    def play_items(
+        self,
+        session_id: str,
+        item_ids: list[str],
+        *,
+        play_command: str = "PlayNow",
+    ) -> None:
+        """Instruct a session to play items (POST /Sessions/{id}/Playing)."""
+        sid = (session_id or "").strip()
+        ids = [i.strip() for i in item_ids if (i or "").strip()]
+        if not sid:
+            raise JellyfinError("jellyfin play missing session id")
+        if not ids:
+            raise JellyfinError("jellyfin play missing item ids")
+        try:
+            resp = self._client.post(
+                f"Sessions/{sid}/Playing",
+                params={
+                    "playCommand": play_command,
+                    "itemIds": ",".join(ids),
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise JellyfinError("jellyfin unavailable (timeout)") from exc
+        except httpx.HTTPError as exc:
+            raise JellyfinError("jellyfin unavailable (network)") from exc
+        if resp.status_code >= 400:
+            raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
 
     def _get_items(self, params: dict[str, Any]) -> dict[str, Any]:
         path = f"Users/{self.user_id}/Items"
