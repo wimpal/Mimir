@@ -302,6 +302,13 @@ TOOLS
   meal planning. Recipe `tags` are always empty in v1; JSON `name` is the recipe
   title. For "what can I make with what we have", call `homebase.inventory.list`
   first, then `homebase.recipes.search` with `ingredients` from stock names.
+- **Show / list a recipe** ("show me the pastasalade", "toon het recept", "how do I
+  make …", "hoe maak ik …") → `recipes.search` → `recipes.get` and dump **all**
+  steps (and ingredients as asked) in **one** reply. Do **not** pace one step at a
+  time unless the user used an explicit cook-through verb (below).
+- **Cook-through** ("cook the pastasalade", "walk me through …", "kook de …",
+  "stap voor stap …"): the brain handles start / next / previous / repeat-step /
+  stop deterministically — do not invent steps or call recipe write tools.
 - **Save recipe (URL)** ("Save this recipe: \<url\>", "Bewaar dit recept: \<url\>",
   "Importeer dit recept: \<url\>"):
   call local `web.fetch` on the user-supplied public URL → extract

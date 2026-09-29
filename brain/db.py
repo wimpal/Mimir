@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 RECENT_WATCHED_CAP = 50
 BOX_SET_HEAD_CAP = 3
@@ -103,6 +103,29 @@ class ConversationCompaction:
     summary_text: str
     covered_through_message_id: int
     updated_at: str
+
+
+@dataclass(frozen=True)
+class CookProgress:
+    """Pinned cook-through snapshot for one conversation + recipe (T-095)."""
+
+    conversation_id: str
+    recipe_id: str
+    title: str
+    steps_json: str
+    step_index: int
+    locale: str
+    updated_at: str
+
+    @property
+    def steps(self) -> list[str]:
+        try:
+            raw = json.loads(self.steps_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [str(s) for s in raw if str(s).strip()]
 
 
 @dataclass(frozen=True)
@@ -526,6 +549,211 @@ class Database:
                 return False
             conn.commit()
             return True
+
+    def get_cook_progress(
+        self, conversation_id: str, recipe_id: str
+    ) -> CookProgress | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT conversation_id, recipe_id, title, steps_json,
+                       step_index, locale, updated_at
+                FROM cook_progress
+                WHERE conversation_id = ? AND recipe_id = ?
+                """,
+                (conversation_id, recipe_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return CookProgress(
+            conversation_id=row["conversation_id"],
+            recipe_id=row["recipe_id"],
+            title=row["title"],
+            steps_json=row["steps_json"],
+            step_index=int(row["step_index"]),
+            locale=row["locale"],
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_cook_progress(
+        self,
+        conversation_id: str,
+        recipe_id: str,
+        *,
+        title: str,
+        steps: Sequence[str],
+        step_index: int,
+        locale: str,
+    ) -> CookProgress:
+        now = _utc_now()
+        steps_json = json.dumps(list(steps), ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cook_progress (
+                    conversation_id, recipe_id, title, steps_json,
+                    step_index, locale, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id, recipe_id) DO UPDATE SET
+                    title = excluded.title,
+                    steps_json = excluded.steps_json,
+                    step_index = excluded.step_index,
+                    locale = excluded.locale,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    conversation_id,
+                    recipe_id,
+                    title,
+                    steps_json,
+                    int(step_index),
+                    locale,
+                    now,
+                ),
+            )
+            conn.commit()
+        return CookProgress(
+            conversation_id=conversation_id,
+            recipe_id=recipe_id,
+            title=title,
+            steps_json=steps_json,
+            step_index=int(step_index),
+            locale=locale,
+            updated_at=now,
+        )
+
+    def clear_cook_progress(
+        self, conversation_id: str, recipe_id: str | None = None
+    ) -> None:
+        with self._connect() as conn:
+            if recipe_id is None:
+                conn.execute(
+                    "DELETE FROM cook_progress WHERE conversation_id = ?",
+                    (conversation_id,),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM cook_progress
+                    WHERE conversation_id = ? AND recipe_id = ?
+                    """,
+                    (conversation_id, recipe_id),
+                )
+            conn.commit()
+
+    def get_cook_active_recipe_id(self, conversation_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT recipe_id FROM cook_active
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        rid = row["recipe_id"]
+        return str(rid) if rid else None
+
+    def set_cook_active(self, conversation_id: str, recipe_id: str) -> None:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cook_active (conversation_id, recipe_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    recipe_id = excluded.recipe_id,
+                    updated_at = excluded.updated_at
+                """,
+                (conversation_id, recipe_id, now),
+            )
+            conn.commit()
+
+    def clear_cook_active(self, conversation_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM cook_active WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.commit()
+
+    def clear_cook_session(self, conversation_id: str) -> None:
+        """Stop cook-through: drop active pointer and all progress for the conversation."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM cook_active WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                "DELETE FROM cook_progress WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.commit()
+
+    def start_cook_session(
+        self,
+        conversation_id: str,
+        recipe_id: str,
+        *,
+        title: str,
+        steps: Sequence[str],
+        locale: str,
+    ) -> CookProgress:
+        """Atomically clear prior session and seed progress + active pointer."""
+        now = _utc_now()
+        steps_json = json.dumps(list(steps), ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversations (id, created_at, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at
+                """,
+                (conversation_id, now, now),
+            )
+            conn.execute(
+                "DELETE FROM cook_active WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                "DELETE FROM cook_progress WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO cook_progress (
+                    conversation_id, recipe_id, title, steps_json,
+                    step_index, locale, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    recipe_id,
+                    title,
+                    steps_json,
+                    0,
+                    locale,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO cook_active (conversation_id, recipe_id, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (conversation_id, recipe_id, now),
+            )
+            conn.commit()
+        return CookProgress(
+            conversation_id=conversation_id,
+            recipe_id=recipe_id,
+            title=title,
+            steps_json=steps_json,
+            step_index=0,
+            locale=locale,
+            updated_at=now,
+        )
 
     def list_conversations(
         self, *, limit: int = CONVERSATIONS_LIST_DEFAULT
@@ -1038,10 +1266,35 @@ def _migrate_4_to_5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_5_to_6(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS cook_progress (
+            conversation_id TEXT NOT NULL
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            recipe_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            locale TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, recipe_id)
+        );
+        CREATE TABLE IF NOT EXISTS cook_active (
+            conversation_id TEXT PRIMARY KEY
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            recipe_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     0: _migrate_0_to_1,
     1: _migrate_1_to_2,
     2: _migrate_2_to_3,
     3: _migrate_3_to_4,
     4: _migrate_4_to_5,
+    5: _migrate_5_to_6,
 }

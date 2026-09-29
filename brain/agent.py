@@ -18,6 +18,33 @@ from brain.capability_discovery import (
     probe_unavailable_services,
     should_short_circuit_capability,
 )
+from brain.cook_through import (
+    RECIPES_GET_TOOL,
+    RECIPES_SEARCH_TOOL,
+    advance_step,
+    ambiguous_reply,
+    cook_locale,
+    empty_steps_reply,
+    extract_cook_recipe_query,
+    format_step_reply,
+    get_active_progress,
+    is_cook_nav,
+    is_cook_next,
+    is_cook_prev,
+    is_cook_repeat_step,
+    is_cook_start,
+    is_cook_stop,
+    no_active_reply,
+    not_found_reply,
+    parse_recipe_detail,
+    parse_search_hits,
+    repeat_current_step,
+    resolve_recipe_from_hits,
+    seed_cook_session,
+    steps_from_detail,
+    stop_cook_session,
+    unavailable_reply,
+)
 from brain.eli5 import apply_eli5_system_append, is_eli5_intent, sanitize_eli5_reply
 from brain.evening_wind_down import (
     HOUSE_ALL_OFF_ARGS,
@@ -600,6 +627,216 @@ def _complete_protocol_run(
     )
 
 
+def _complete_cook_start(
+    *,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    registry: dict[str, Tool],
+    user_message: str,
+    conversation_id: str,
+    db: Any,
+    deadline_monotonic: float | None,
+    default_tool_timeout_s: float,
+    on_tool_start: OnToolStartCallback | None,
+    on_tool_end: OnToolEndCallback | None,
+    after_tool: AfterToolCallback | None,
+) -> TurnResult:
+    """Force recipes.search → get, seed cook progress, reply with step 1."""
+    locale = cook_locale(user_message)
+    query = extract_cook_recipe_query(user_message) or ""
+    tool_names: list[str] = []
+
+    if RECIPES_SEARCH_TOOL not in registry or RECIPES_GET_TOOL not in registry:
+        reply = unavailable_reply(locale)
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=[],
+                success=False,
+                anomaly="cook_through_unavailable",
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    def _run_tool(name: str, args: dict[str, Any]) -> str:
+        tc = ToolCall(
+            function=ToolCallFunction(name=name, arguments=dict(args))
+        )
+        working.append(
+            ChatMessage(role="assistant", content="", tool_calls=[tc])
+        )
+        if on_tool_start is not None:
+            on_tool_start(name, dict(args))
+        per_tool = default_tool_timeout_s
+        tool_entry = registry.get(name)
+        if tool_entry is not None and tool_entry.timeout_s is not None:
+            per_tool = max(per_tool, tool_entry.timeout_s)
+        remaining = _remaining_s(deadline_monotonic)
+        if remaining is not None:
+            per_tool = min(per_tool, remaining)
+        result_text = _dispatch_with_timeout(
+            name,
+            dict(args),
+            tools=registry,
+            timeout_s=per_tool,
+        )
+        ok = not tool_result_is_error(result_text)
+        if on_tool_end is not None:
+            preview = (
+                result_text
+                if len(result_text) <= 200
+                else result_text[:197] + "..."
+            )
+            on_tool_end(name, ok, preview)
+        working.append(_tool_result_message(tc, result_text))
+        tool_names.append(name)
+        if after_tool is not None:
+            after_tool(name, result_text, working)
+        return result_text
+
+    search_raw = _run_tool(RECIPES_SEARCH_TOOL, {"query": query})
+    if tool_result_is_error(search_raw):
+        reply = unavailable_reply(locale)
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=tool_names,
+                success=False,
+                anomaly="cook_through_unavailable",
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    hits = parse_search_hits(search_raw)
+    resolved = resolve_recipe_from_hits(hits, query)
+    recipe_id_for_get: str | None = None
+    title_hint = query
+    if isinstance(resolved, str):
+        if resolved == "ambiguous":
+            reply = ambiguous_reply(query, locale)
+            working.append(ChatMessage(role="assistant", content=reply))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=tool_names,
+                    success=True,
+                    anomaly="cook_through_ambiguous",
+                    content_preview=reply[:120],
+                )
+            )
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        # not_found by title — try direct get by id (task: title or id).
+        recipe_id_for_get = query.strip()
+    else:
+        recipe_id_for_get = resolved.recipe_id
+        title_hint = resolved.title
+
+    get_raw = _run_tool(RECIPES_GET_TOOL, {"id": recipe_id_for_get})
+    if tool_result_is_error(get_raw):
+        # Direct-id fallback failed, or get failed after search resolve.
+        if isinstance(resolved, str):
+            reply = not_found_reply(query, locale)
+            anomaly = "cook_through_not_found"
+            ok = True
+        else:
+            reply = unavailable_reply(locale)
+            anomaly = "cook_through_unavailable"
+            ok = False
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=tool_names,
+                success=ok,
+                anomaly=anomaly,
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    detail = parse_recipe_detail(get_raw) or {}
+    steps_list = steps_from_detail(detail)
+    title = str(
+        detail.get("name") or detail.get("title") or title_hint
+    ).strip() or title_hint
+    recipe_id = str(detail.get("id") or recipe_id_for_get).strip()
+
+    if not steps_list:
+        reply = empty_steps_reply(title, locale)
+        working.append(ChatMessage(role="assistant", content=reply))
+        steps.append(
+            StepTrace(
+                ollama_latency_ms=0.0,
+                tool_names=tool_names,
+                success=True,
+                anomaly="cook_through_empty",
+                content_preview=reply[:120],
+            )
+        )
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
+    progress, switched = seed_cook_session(
+        db,
+        conversation_id,
+        recipe_id=recipe_id,
+        title=title,
+        steps=steps_list,
+        locale=locale,
+    )
+    reply = format_step_reply(
+        title=progress.title,
+        index=0,
+        steps=steps_list,
+        locale=locale,
+        switched=switched,
+    )
+    working.append(ChatMessage(role="assistant", content=reply))
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=tool_names,
+            success=True,
+            anomaly="cook_through_start",
+            content_preview=reply[:120],
+        )
+    )
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
+
+
 def _stage_or_ask_play_on_tv(
     *,
     user_message: str,
@@ -1062,6 +1299,33 @@ def run_turn(
     # Greeting / search detours burn the default 3 rounds; URL import needs headroom.
     iteration_budget = (
         max(max_iterations, 5) if recipe_save_turn else max_iterations
+    )
+
+    # Snapshot before cancel handlers clear pending — cook bare-stop must defer.
+    pending_m3_at_turn_start = bool(
+        (
+            pending_recipes is not None
+            and conversation_id
+            and pending_recipes.is_confirmable(conversation_id)
+        )
+        or (
+            pending_devices is not None
+            and conversation_id
+            and pending_devices.is_confirmable(conversation_id)
+        )
+        or (
+            pending_protocols is not None
+            and conversation_id
+            and pending_protocols.is_confirmable(conversation_id)
+        )
+        or (
+            pending_play is not None
+            and conversation_id
+            and (
+                pending_play.is_confirmable(conversation_id)
+                or pending_play.has_ambiguous(conversation_id)
+            )
+        )
     )
 
     # T-055: ELI5 — strengthen system constraints this turn (model often ignores base prompt).
@@ -1698,6 +1962,92 @@ def run_turn(
                 messages=working,
                 steps=steps,
                 stopped_reason=StoppedReason.FINAL,
+            )
+
+    # T-095: cook-through navigate / stop / start — before T-054 and Ollama.
+    # Bare "stop" with pending M3 defer to cancel handlers; explicit stop cooking wins.
+    if db is not None and conversation_id:
+        bare_stop_defers_to_m3 = (
+            pending_m3_at_turn_start
+            and is_bare_cancel(user_message)
+            and is_cook_stop(user_message)
+        )
+        active = get_active_progress(db, conversation_id)
+        if (
+            active is not None
+            and is_cook_nav(user_message)
+            and not bare_stop_defers_to_m3
+        ):
+            locale = cook_locale(user_message)
+            if is_cook_stop(user_message):
+                reply, anomaly = stop_cook_session(
+                    db, conversation_id, locale=locale
+                )
+            elif is_cook_next(user_message):
+                reply, anomaly = advance_step(db, conversation_id, delta=1)
+            elif is_cook_prev(user_message):
+                reply, anomaly = advance_step(db, conversation_id, delta=-1)
+            elif is_cook_repeat_step(user_message):
+                reply, anomaly = repeat_current_step(db, conversation_id)
+            else:
+                reply, anomaly = "", ""
+            if reply:
+                working.append(ChatMessage(role="assistant", content=reply))
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=0.0,
+                        tool_names=[],
+                        success=True,
+                        anomaly=anomaly,
+                        content_preview=reply[:120],
+                    )
+                )
+                return TurnResult(
+                    content=reply,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
+        # Nav without an active session → deterministic refuse (not Ollama).
+        if (
+            active is None
+            and (
+                is_cook_next(user_message)
+                or is_cook_prev(user_message)
+                or is_cook_repeat_step(user_message)
+            )
+        ):
+            locale = cook_locale(user_message)
+            reply = no_active_reply(locale)
+            working.append(ChatMessage(role="assistant", content=reply))
+            steps.append(
+                StepTrace(
+                    ollama_latency_ms=0.0,
+                    tool_names=[],
+                    success=True,
+                    anomaly="cook_through_no_active",
+                    content_preview=reply[:120],
+                )
+            )
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        if is_cook_start(user_message) and not pending_m3_at_turn_start:
+            return _complete_cook_start(
+                working=working,
+                steps=steps,
+                registry=registry,
+                user_message=user_message,
+                conversation_id=conversation_id,
+                db=db,
+                deadline_monotonic=deadline_monotonic,
+                default_tool_timeout_s=default_tool_timeout_s,
+                on_tool_start=on_tool_start,
+                on_tool_end=on_tool_end,
+                after_tool=after_tool,
             )
 
     # T-054: repeat last final assistant reply — no Ollama / no tools.
