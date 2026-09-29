@@ -21,6 +21,9 @@ _TOOLISH = re.compile(
     r"busy|druk|usage|stats|hoe druk|"
     r"voorkeur|preference|genres?|tone|"
     r"pakket|package|parcel|delivery|bezorging|levering|"
+    r"meterkast|fuse.?box|zekering(?:en)?(?:kast)?|huis.?handboek|house.?manual|"
+    r"huisdocument|wifi.?kast|wifi.?closet|"
+    r"note|notes|notitie|notities|aantekening|aantekeningen|"
     r"wat kun je|what can you|capabilities|uitleg jezelf|explain yourself"
     r")\b"
 )
@@ -47,6 +50,9 @@ _LIVE_FACT = re.compile(
     r"jellyfin|film|movie|"
     r"recept|recipe|"
     r"pakket|package|parcel|delivery|bezorging|levering|"
+    r"meterkast|fuse.?box|zekering(?:en)?(?:kast)?|huis.?handboek|house.?manual|"
+    r"huisdocument|wifi.?kast|wifi.?closet|"
+    r"note|notes|notitie|notities|aantekening|aantekeningen|"
     r"wikipedia|valuta|currency|weetje|random.?fact"
     r")\b"
 )

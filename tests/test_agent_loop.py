@@ -467,3 +467,64 @@ def test_schemas_after_delivery_list_keeps_tools() -> None:
         has_tool_results=True,
     )
     assert cleared == []
+
+
+def test_schemas_after_house_manual_search_keeps_tools() -> None:
+    """search→get needs schemas retained after house_manual.search (T-098)."""
+    from brain.agent import _schemas_after_tools
+
+    schemas = [
+        {"type": "function", "function": {"name": "homebase.house_manual.search"}},
+        {"type": "function", "function": {"name": "homebase.house_manual.get"}},
+        {"type": "function", "function": {"name": "homebase.devices.list"}},
+    ]
+    kept = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=["homebase.house_manual.search"],
+        has_tool_results=True,
+    )
+    assert [s["function"]["name"] for s in kept] == [
+        "homebase.house_manual.search",
+        "homebase.house_manual.get",
+        "homebase.devices.list",
+    ]
+    after_get = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=[
+            "homebase.house_manual.search",
+            "homebase.house_manual.get",
+        ],
+        has_tool_results=True,
+    )
+    assert [s["function"]["name"] for s in after_get] == [
+        "homebase.house_manual.search",
+        "homebase.house_manual.get",
+        "homebase.devices.list",
+    ]
+
+
+def test_schemas_after_notes_list_keeps_tools() -> None:
+    """list→remove needs schemas retained after notes.list (T-099)."""
+    from brain.agent import _schemas_after_tools
+
+    schemas = [
+        {"type": "function", "function": {"name": "homebase.notes.list"}},
+        {"type": "function", "function": {"name": "homebase.notes.add"}},
+        {"type": "function", "function": {"name": "homebase.notes.remove"}},
+    ]
+    kept = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=["homebase.notes.list"],
+        has_tool_results=True,
+    )
+    assert [s["function"]["name"] for s in kept] == [
+        "homebase.notes.list",
+        "homebase.notes.add",
+        "homebase.notes.remove",
+    ]
+    cleared = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=["homebase.notes.remove"],
+        has_tool_results=True,
+    )
+    assert cleared == []

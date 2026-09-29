@@ -26,7 +26,17 @@ def test_should_offer_tools_chat_facts() -> None:
     assert should_offer_tools("Where's my package?")
     assert should_offer_tools("Waar staat mijn pakket?")
     assert should_offer_tools("Add a delivery: Amazon order")
-
+    assert should_offer_tools("Where's the fuse box?")
+    assert should_offer_tools("Waar zit de meterkast?")
+    assert should_offer_tools("Waar staat de meterkast?")
+    assert should_offer_tools("Add a note: guest parking is behind the shed")
+    assert should_offer_tools("Maak een notitie: meterstand")
+    assert should_offer_tools("Welke notities?")
+    assert should_offer_tools("List notes")
+    assert should_offer_tools("Where's the NAS?")
+    assert should_offer_tools("Where's my package?")  # delivery still toolish
+    # Chat-memory "waar staat" drills stay off tools when no live noun matches.
+    assert not should_offer_tools("Waar staat de plant?")
 
 def test_run_turn_omits_tools_for_chat_recall() -> None:
     calls: list[dict[str, Any]] = []

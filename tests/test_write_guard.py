@@ -156,6 +156,53 @@ def test_delivery_read_only_does_not_request_write() -> None:
     assert not user_message_requests_write("Welke pakketten komen er aan?")
 
 
+def test_notes_mutation_phrases_request_write() -> None:
+    assert user_message_requests_write(
+        "Add a note: guest parking is behind the shed"
+    )
+    assert user_message_requests_write("Maak een notitie: meterstand 12345")
+    assert user_message_requests_write("Noteer dat de gastparkeerplaats achter de schuur is")
+    assert user_message_requests_write("Forget the note about guest parking")
+    assert user_message_requests_write("Delete the note about parking")
+    assert user_message_requests_write("Remove the note about the meter")
+    assert user_message_requests_write("Verwijder notitie over parking")
+    assert user_message_requests_write("Vergeet de notitie over de meterstand")
+    assert user_message_requests_write(
+        "List notes and delete the note about parking"
+    )
+    assert check_write_allowed(
+        "homebase.notes.add",
+        "Add a note: guest parking is behind the shed",
+    ) is None
+    assert check_write_allowed(
+        "homebase.notes.remove",
+        "Forget the note about guest parking",
+    ) is None
+    assert check_write_allowed(
+        "homebase.notes.remove",
+        "Verwijder notitie over parking",
+    ) is None
+    # Expense noteer still unlocks write (BudgetTracker path)
+    assert user_message_requests_write("Noteer een uitgave: boodschappen €12")
+    # Bare chat remember does not unlock a notes write
+    assert check_write_allowed(
+        "homebase.notes.add",
+        "Onthoud voor deze chat: codewoord=zebra",
+    ) is not None
+    assert check_write_allowed(
+        "homebase.notes.add",
+        "Remember that the plant is Mona",
+    ) is not None
+
+
+def test_notes_read_only_does_not_request_write() -> None:
+    assert not user_message_requests_write("List notes")
+    assert not user_message_requests_write("What notes do we have?")
+    assert not user_message_requests_write("What did we note about parking?")
+    assert not user_message_requests_write("Welke notities?")
+    assert not user_message_requests_write("Toon notities")
+
+
 def test_task_read_only_does_not_request_write() -> None:
     assert not user_message_requests_write("What tasks are due this week?")
     assert not user_message_requests_write("Welke taken zijn deze week?")

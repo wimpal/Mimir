@@ -108,6 +108,13 @@ _READ_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"^(?=.*\bwhat\s+(colour|color)\s+is\b)(?!.*(make|maak|zet|doe|dim))",
         r"^(?=.*\bwelke\s+kleur\b)(?!.*(make|maak|zet|doe|dim))",
         r"^(?=.*\bhoe\s+fel\b)(?!.*(make|maak|zet|doe|dim))",
+        # Notes reads (T-099) — before add/remove/forget; skip if mutation verbs present
+        r"^(?!.*(add|remove|delete|forget|verwijder|vergeet|noteer|maak|voeg))\b.*\b"
+        r"(list|show)\s+(the\s+)?notes?\b",
+        r"^(?!.*(add|remove|delete|forget|verwijder|vergeet|noteer|maak|voeg))\b.*\b"
+        r"what\s+(notes?\s+do\s+we\s+have|did\s+we\s+note)\b",
+        r"^(?!.*(add|remove|delete|forget|verwijder|vergeet|noteer|maak|voeg))\b.*\b"
+        r"(welke|toon|laat)\s+(de\s+)?notities?\b",
     )
 )
 
@@ -151,6 +158,12 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(taak|karwee)\b.*\b(afvinken|klaar|gedaan)\b",
         r"\bafvinken\b.*\b(taak|karwee)\b",
         r"\bmarkeer\b.*\b(compleet|klaar|af|gedaan|voltooid)\b",
+        # Notes (T-099) — non-secret household facts (not uitgave / chat remember)
+        r"\badd\b.*\b(a\s+)?note\b",
+        r"\b(maak|voeg)\b.*\b(een\s+)?notitie\b",
+        r"\bnoteer\s+dat\b",
+        r"\b(forget|remove|delete)\b.*\b(the\s+)?notes?\b",
+        r"\b(verwijder|vergeet)\b.*\b(de\s+)?notitie\b",
         # Delivery / packages (T-096) — manual Homebase tracking
         r"\badd\b.*\b(a\s+)?(delivery|package|parcel)\b",
         r"\btrack\b.*\b(package|parcel|delivery|shipment)\b",
