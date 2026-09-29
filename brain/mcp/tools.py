@@ -18,6 +18,16 @@ from brain.mcp.devices import (
     resolve_wake_device_id,
     resolve_tv_device_id,
 )
+from brain.mcp.delivery import (
+    confirm_reply_from_set_status_result,
+    delivery_ambiguous_error,
+    delivery_not_found_error,
+    delivery_resolve_error,
+    normalize_delivery_status,
+    parse_delivery_list,
+    present_delivery_set_status_json,
+    resolve_delivery_ids,
+)
 from brain.mcp.tasks import (
     chore_not_found_error,
     chore_resolve_error,
@@ -242,6 +252,79 @@ def mcp_tool_to_local(
                 if tool_result_is_error(last_result):
                     return last_result
             return present_task_complete_json(last_result)
+        if name == "homebase.delivery.set_status":
+            raw_id = str(args.get("id", "")).strip()
+            raw_status = str(args.get("status", "")).strip()
+            if not raw_id:
+                return delivery_not_found_error("?")
+            status = normalize_delivery_status(raw_status)
+            if status is None:
+                return delivery_resolve_error(
+                    "invalid_input",
+                    f"Unknown delivery status {raw_status!r}. "
+                    "Use PENDING, IN_TRANSIT, OUT_FOR_DELIVERY, DELIVERED, or EXCEPTION.",
+                )
+            list_raw = bridge.call_tool_sync(
+                "homebase.delivery.list",
+                {},
+                timeout_s=timeout_s,
+            )
+            packages = parse_delivery_list(list_raw)
+            if packages is None:
+                detail = list_raw[:200] if list_raw else "empty list response"
+                return delivery_resolve_error(
+                    "list_failed",
+                    f"Could not parse deliveries before set_status ({detail}).",
+                )
+            pkg_ids, resolve_err = resolve_delivery_ids(packages, raw_id)
+            if resolve_err == "ambiguous":
+                labels = [
+                    (p.get("description") or p.get("tracking_number") or p.get("id") or "?")
+                    for p in packages
+                    if raw_id.lower()
+                    in (
+                        (p.get("description") or "")
+                        + " "
+                        + (p.get("tracking_number") or "")
+                    ).lower()
+                ]
+                append_mcp_tool_log(
+                    bridge.data_dir,
+                    service=service_id,
+                    tool=name,
+                    args=args,
+                    latency_ms=0.0,
+                    outcome="error",
+                    error_code="ambiguous",
+                    detail=f"ambiguous {raw_id!r}; matches={labels}",
+                )
+                return delivery_ambiguous_error(raw_id, [str(x) for x in labels])
+            if not pkg_ids:
+                known = [
+                    str(p.get("description") or p.get("tracking_number") or p.get("id") or "?")
+                    for p in packages
+                ]
+                append_mcp_tool_log(
+                    bridge.data_dir,
+                    service=service_id,
+                    tool=name,
+                    args=args,
+                    latency_ms=0.0,
+                    outcome="error",
+                    error_code="not_found",
+                    detail=f"no delivery for {raw_id!r}; known={known}",
+                )
+                return delivery_not_found_error(raw_id, known=known)
+            last_result = ""
+            for pkg_id in pkg_ids:
+                last_result = bridge.call_tool_sync(
+                    name,
+                    {"id": pkg_id, "status": status},
+                    timeout_s=timeout_s,
+                )
+                if tool_result_is_error(last_result):
+                    return last_result
+            return present_delivery_set_status_json(last_result)
         if name == "homebase.lights.list":
             list_raw = bridge.call_tool_sync(name, args, timeout_s=timeout_s)
             if tool_result_is_error(list_raw):

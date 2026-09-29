@@ -14,6 +14,7 @@ _WRITE_SEGMENTS = (
     ".create",
     ".append",
     ".set_state",
+    ".set_status",
     ".party_mode",
     ".wake",
     ".go_home",

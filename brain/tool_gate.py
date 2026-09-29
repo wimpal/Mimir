@@ -20,6 +20,7 @@ _TOOLISH = re.compile(
     r"wikipedia|weetje|random.?fact|valuta|currency|dollar|yen|"
     r"busy|druk|usage|stats|hoe druk|"
     r"voorkeur|preference|genres?|tone|"
+    r"pakket|package|parcel|delivery|bezorging|levering|"
     r"wat kun je|what can you|capabilities|uitleg jezelf|explain yourself"
     r")\b"
 )
@@ -45,6 +46,7 @@ _LIVE_FACT = re.compile(
     r"budget|euro|uitgave|expense|"
     r"jellyfin|film|movie|"
     r"recept|recipe|"
+    r"pakket|package|parcel|delivery|bezorging|levering|"
     r"wikipedia|valuta|currency|weetje|random.?fact"
     r")\b"
 )

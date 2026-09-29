@@ -49,6 +49,7 @@ from brain.mcp.party_mode import (
     party_mode_tool_succeeded,
     should_reroute_party_to_house_wide,
 )
+from brain.mcp.delivery import confirm_reply_from_set_status_result
 from brain.mcp.tasks import complete_tool_succeeded
 from brain.mcp.write_guard import (
     MAX_WRITE_TOOL_NUDGES,
@@ -233,6 +234,7 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "homebase.inventory.list",
         "homebase.shopping_list.list",
         "homebase.tasks.list",
+        "homebase.delivery.list",
         "homebase.lights.list",
         "homebase.devices.list",
         "homebase.devices.get",
@@ -3814,6 +3816,32 @@ def run_turn(
                 steps=steps,
                 stopped_reason=StoppedReason.FINAL,
             )
+
+    # T-096: set_status often follows two list filters and burns the 3-iter budget
+    # after a successful write — salvage a confirm from the last tool result.
+    if tools_used_this_turn and tools_used_this_turn[-1] == "homebase.delivery.set_status":
+        for msg in reversed(working):
+            if msg.role != "tool" or msg.tool_name != "homebase.delivery.set_status":
+                continue
+            confirm = confirm_reply_from_set_status_result(msg.content or "")
+            if confirm:
+                working.append(ChatMessage(role="assistant", content=confirm))
+                steps.append(
+                    StepTrace(
+                        ollama_latency_ms=0.0,
+                        tool_names=[],
+                        success=True,
+                        anomaly="delivery_set_status_confirm_forced",
+                        content_preview=confirm[:120],
+                    )
+                )
+                return TurnResult(
+                    content=confirm,
+                    messages=working,
+                    steps=steps,
+                    stopped_reason=StoppedReason.FINAL,
+                )
+            break
 
     return TurnResult(
         content=last_content,

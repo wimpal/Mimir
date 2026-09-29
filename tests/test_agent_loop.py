@@ -440,3 +440,30 @@ def test_stream_disabled_without_callback() -> None:
     run_turn(client, [ChatMessage(role="user", content="hi")])
     assert len(client.calls) == 1
     assert len(client.stream_calls) == 0
+
+
+def test_schemas_after_delivery_list_keeps_tools() -> None:
+    """list→set_status needs schemas retained after delivery.list (T-096)."""
+    from brain.agent import _schemas_after_tools
+
+    schemas = [
+        {"type": "function", "function": {"name": "homebase.delivery.list"}},
+        {"type": "function", "function": {"name": "homebase.delivery.set_status"}},
+        {"type": "function", "function": {"name": "homebase.delivery.add"}},
+    ]
+    kept = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=["homebase.delivery.list"],
+        has_tool_results=True,
+    )
+    assert [s["function"]["name"] for s in kept] == [
+        "homebase.delivery.list",
+        "homebase.delivery.set_status",
+        "homebase.delivery.add",
+    ]
+    cleared = _schemas_after_tools(
+        schemas,
+        tools_used_this_turn=["homebase.delivery.set_status"],
+        has_tool_results=True,
+    )
+    assert cleared == []

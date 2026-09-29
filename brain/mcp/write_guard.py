@@ -151,6 +151,18 @@ _MUTATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\b(taak|karwee)\b.*\b(afvinken|klaar|gedaan)\b",
         r"\bafvinken\b.*\b(taak|karwee)\b",
         r"\bmarkeer\b.*\b(compleet|klaar|af|gedaan|voltooid)\b",
+        # Delivery / packages (T-096) — manual Homebase tracking
+        r"\badd\b.*\b(a\s+)?(delivery|package|parcel)\b",
+        r"\btrack\b.*\b(package|parcel|delivery|shipment)\b",
+        r"\b(voeg|registreer)\b.*\b(pakket|bezorging|levering)\b",
+        r"\bmark\b.*\b(as\s+)?(delivered|out\s+for\s+delivery|in\s+transit|pending|exception)\b",
+        r"\bmarkeer\b.*\b(als\s+)?(bezorgd|onderweg|uit\s+voor\s+bezorging|in\s+afwachting|uitzondering)\b",
+        r"\bzet\b.*\b(pakket|bezorging)\b.*\bop\b",
+        r"\bzet\b.*\bop\b.*\b(onderweg|bezorgd|in\s+afwachting|uitzondering|"
+        r"uit\s+voor\s+bezorging)\b",
+        r"\b(set|zet)\b.*\b(status|pakket|bezorging)\b.*\b(to\s+|op\s+)?"
+        r"(pending|exception|delivered|in\s+transit|out\s+for\s+delivery|"
+        r"onderweg|bezorgd|in\s+afwachting|uitzondering|uit\s+voor\s+bezorging)\b",
         # Lights / smart home (IKEA Dirigera via Homebase)
         r"\bturn\s+(on|off)\b",
         # Particle-final: "turn the office light on" / "turn Ballon off"

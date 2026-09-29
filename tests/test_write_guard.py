@@ -112,6 +112,50 @@ def test_task_mutation_phrases_request_write() -> None:
     ) is None
 
 
+def test_delivery_mutation_phrases_request_write() -> None:
+    assert user_message_requests_write("Add a delivery: Amazon order")
+    assert user_message_requests_write("Track package from PostNL")
+    assert user_message_requests_write("Voeg een pakket toe: IKEA")
+    assert user_message_requests_write("Registreer bezorging Bol.com")
+    assert user_message_requests_write("Mark the Amazon package delivered")
+    assert user_message_requests_write("Markeer het IKEA pakket als bezorgd")
+    assert user_message_requests_write("Zet het pakket op onderweg")
+    assert user_message_requests_write("Mark the package as pending")
+    assert user_message_requests_write("Mark the package as exception")
+    assert user_message_requests_write("Markeer het pakket als in afwachting")
+    assert user_message_requests_write("Zet status op uitzondering")
+    assert user_message_requests_write("Zet status op onderweg")
+    assert check_write_allowed(
+        "homebase.delivery.add", "Add a delivery: Amazon order"
+    ) is None
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Mark the Amazon package delivered"
+    ) is None
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Markeer het IKEA pakket als bezorgd"
+    ) is None
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Mark the package as pending"
+    ) is None
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Mark the package as exception"
+    ) is None
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Zet status op onderweg"
+    ) is None
+    assert user_message_requests_write("Zet T096 probe Amazon box op onderweg")
+    assert check_write_allowed(
+        "homebase.delivery.set_status", "Zet T096 probe Amazon box op onderweg"
+    ) is None
+
+
+def test_delivery_read_only_does_not_request_write() -> None:
+    assert not user_message_requests_write("Where's my package?")
+    assert not user_message_requests_write("Waar is mijn pakket?")
+    assert not user_message_requests_write("Any packages coming?")
+    assert not user_message_requests_write("Welke pakketten komen er aan?")
+
+
 def test_task_read_only_does_not_request_write() -> None:
     assert not user_message_requests_write("What tasks are due this week?")
     assert not user_message_requests_write("Welke taken zijn deze week?")

@@ -23,6 +23,9 @@ def test_should_offer_tools_chat_facts() -> None:
     assert should_offer_tools("How busy have you been?")
     assert should_offer_tools("Hoe druk ben je geweest?")
     assert should_offer_tools("Show me usage stats")
+    assert should_offer_tools("Where's my package?")
+    assert should_offer_tools("Waar staat mijn pakket?")
+    assert should_offer_tools("Add a delivery: Amazon order")
 
 
 def test_run_turn_omits_tools_for_chat_recall() -> None:
