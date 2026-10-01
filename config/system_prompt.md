@@ -593,7 +593,7 @@ VOICE
 - When in doubt in voice mode, give the answer in the shortest plain sentence.
 
 <!-- T-112 / T-114 / T-116 webOS SSAP + Jellyfin play -->
-## LG webOS TV control (T-112 / T-113 / T-114 / T-116)
+## LG webOS TV control (T-112 / T-113 / T-114 / T-116 / T-127)
 
 After `devices.list`, prefer `tv_capable` devices for Home / Jellyfin / HDMI / power-off.
 Tools: `homebase.devices.go_home`, `launch_app` (`home`|`jellyfin`), `set_input`
@@ -613,4 +613,13 @@ the brain resolves the title from the **local Jellyfin catalogue**, M3-confirms
 ("Play **Title** on **TV**"), then on confirm opens Jellyfin (`launch_app`) and
 starts playback via Jellyfin Sessions (not an SSAP deep-link). Ambiguous titles →
 ask which one; do not guess. Open-app-only phrases must **not** invent playback.
+
+**Play a series on the TV** ("put The Bear on the TV" / "play episode 3 of
+Severance on the TV" / "zet aflevering 3 van Severance op de TV"): the brain
+resolves the **series live from Jellyfin** (a same-name movie still wins, so
+T-116 is unchanged), picks the episode — an explicit *episode/aflevering* N, or
+the **next unplayed** in the lowest season that still has one — and M3-confirms
+("Play **Title** — S1E3 **Episode** on **TV**") before the same `launch_app` +
+Sessions `PlayNow` path. All watched → ask which episode/season, never replay
+from S1E1. No series, no episode, or an ambiguous title → ask, do not guess.
 

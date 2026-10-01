@@ -15,6 +15,8 @@ from brain.db import BoxSetRef, Movie, parse_jellyfin_datetime
 logger = logging.getLogger("mimir.jellyfin")
 
 _FIELDS = "Overview,Genres,People,CommunityRating,OfficialRating,ProductionYear"
+_SERIES_FIELDS = "Overview,Genres,ProductionYear"
+_EPISODE_FIELDS = "Overview,ProductionYear"
 
 
 class JellyfinError(RuntimeError):
@@ -268,6 +270,79 @@ class JellyfinClient:
             raise JellyfinError("jellyfin unavailable (network)") from exc
         if resp.status_code >= 400:
             raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
+
+    def find_series(self, title: str, *, libraries: list[str]) -> list[dict[str, Any]]:
+        """Series items matching ``title`` across the configured libraries."""
+        needle = (title or "").strip()
+        if not needle:
+            return []
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for library_id in libraries:
+            if not str(library_id or "").strip():
+                continue
+            params: dict[str, Any] = {
+                "ParentId": library_id,
+                "IncludeItemTypes": "Series",
+                "Recursive": "true",
+                "SearchTerm": needle,
+                "Fields": _SERIES_FIELDS,
+                "EnableUserData": "true",
+            }
+            payload = self._get_items(params)
+            items = payload.get("Items") or []
+            if not isinstance(items, list):
+                raise JellyfinError("jellyfin unavailable (bad Items)")
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                item_id = str(raw.get("Id") or "").strip()
+                if not item_id or item_id in seen:
+                    continue
+                seen.add(item_id)
+                out.append(raw)
+        return out
+
+    def list_episodes(self, series_id: str) -> list[dict[str, Any]]:
+        """Episodes of one series (raw items, user data included)."""
+        sid = (series_id or "").strip()
+        if not sid:
+            return []
+        params: dict[str, Any] = {
+            "ParentId": sid,
+            "IncludeItemTypes": "Episode",
+            "Recursive": "true",
+            "EnableUserData": "true",
+            "Fields": _EPISODE_FIELDS,
+        }
+        payload = self._get_items(params)
+        items = payload.get("Items") or []
+        if not isinstance(items, list):
+            raise JellyfinError("jellyfin unavailable (bad Items)")
+        return [raw for raw in items if isinstance(raw, dict)]
+
+    def get_item(self, item_id: str) -> dict[str, Any] | None:
+        """One item by id; None when the server reports 404."""
+        iid = (item_id or "").strip()
+        if not iid:
+            return None
+        try:
+            resp = self._client.get(f"Users/{self.user_id}/Items/{iid}")
+        except httpx.TimeoutException as exc:
+            raise JellyfinError("jellyfin unavailable (timeout)") from exc
+        except httpx.HTTPError as exc:
+            raise JellyfinError("jellyfin unavailable (network)") from exc
+        if resp.status_code == 404:
+            return None
+        if resp.status_code >= 400:
+            raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise JellyfinError("jellyfin unavailable (bad JSON)") from exc
+        if not isinstance(payload, dict):
+            raise JellyfinError("jellyfin unavailable (bad JSON)")
+        return payload
 
     def _get_items(self, params: dict[str, Any]) -> dict[str, Any]:
         path = f"Users/{self.user_id}/Items"

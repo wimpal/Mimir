@@ -230,8 +230,9 @@ _DEVICE_TV_NUDGE = (
     "start/run/open/launch and compound wake (not for switch-to; not for "
     "power_off); do not invent fixed sleeps. Console / PlayStation → input hdmi1. "
     "TV-off phrases → homebase.devices.power_off with device_id only. "
-    "Play <title> on the TV is brain-orchestrated (catalogue + Sessions) — do not "
-    "invent a bare launch_app for that. Never ask for SSAP client key or MAC."
+    "Play <title> on the TV is brain-orchestrated (catalogue + Sessions, movies and "
+    "series) — do not invent a bare launch_app for that. Never ask for SSAP client key "
+    "or MAC."
 )
 _PROTOCOL_RUN_NUDGE = (
     "System correction (do not repeat to the user): the user asked for a "
@@ -332,9 +333,10 @@ def write_retry_nudge(user_message: str) -> str:
     if user_message_requests_play_on_tv(normalized):
         return (
             "System correction (do not repeat to the user): the user asked to play "
-            "a movie on the TV THIS turn. The brain stages play-on-TV (catalogue "
-            "resolve + M3 + launch_app + Jellyfin Sessions). Do not invent a bare "
-            "launch_app or a fictional play tool call."
+            "a movie or series on the TV THIS turn. The brain stages play-on-TV "
+            "(catalogue / live Series resolve + M3 + launch_app + Jellyfin "
+            "Sessions). Do not invent a bare launch_app or a fictional play tool "
+            "call."
         )
     if user_message_requests_device_tv(normalized):
         return _DEVICE_TV_NUDGE

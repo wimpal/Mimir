@@ -136,6 +136,7 @@ from brain.device_inventory import (
     user_message_requests_device_power_off,
     user_message_requests_device_wake,
 )
+from brain.jellyfin_client import JellyfinError
 from brain.mcp.protocols import (
     CINEMA_CANONICAL_NAME,
     PROTOCOL_LIST_TOOL,
@@ -156,23 +157,35 @@ from brain.mcp.protocols import (
     user_message_requests_protocol_run,
 )
 from brain.tv_play import (
+    SESSION_POLL_DEFAULT_MAX_S,
     PendingPlayDisambiguation,
     PendingPlayStore,
+    Playable,
+    SeriesRequest,
     build_play_ambiguous_reply,
     build_play_confirm_reply,
+    build_play_episode_failure_reply,
     build_play_missing_reply,
     build_play_failure_reply,
+    build_play_series_missing_reply,
+    episode_availability,
     execute_play_on_tv,
     extract_play_title,
+    extract_series_request,
+    jellyfin_client_from_settings,
     list_devices_via_dispatch,
+    pick_episode,
     pick_tv_device,
     play_locale_dutch,
     resolve_disambiguation_pick,
     resolve_movie_for_play,
+    resolve_series_for_play,
     should_keep_pending_play,
     stage_play_from_movie,
+    stage_play_from_series,
     user_message_requests_play_on_tv,
     _candidate_dicts,
+    _series_candidate_dicts,
 )
 from brain.recipe_import import (
     RECIPE_ADD_TOOL,
@@ -840,6 +853,89 @@ def _complete_cook_start(
     )
 
 
+def _resolve_series_for_stage(
+    *,
+    settings: Any,
+    title: str,
+    season: int | None,
+    episode: int | None,
+    series: Playable | None,
+    deadline_monotonic: float | None,
+    dutch: bool,
+    pending_play: PendingPlayStore,
+    conversation_id: str,
+) -> tuple[Playable | None, dict[str, Any] | None, str | None, str | None]:
+    """Live Jellyfin Series/Episode resolve.
+
+    Returns (series, episode, user_reply, reason). Exactly one of
+    series / user_reply is set; reason is missing | ambiguous | episode |
+    unconfigured | timeout | error.
+    """
+    remaining = _remaining_s(deadline_monotonic)
+    if remaining is not None and remaining < SESSION_POLL_DEFAULT_MAX_S + 10.0:
+        return None, None, build_play_failure_reply(
+            "Not enough time left in this turn to start playback — try again."
+            if not dutch
+            else "Te weinig tijd over in deze beurt om af te spelen — probeer opnieuw.",
+            dutch=dutch,
+        ), "timeout"
+    client = jellyfin_client_from_settings(settings)
+    if client is None:
+        return None, None, build_play_failure_reply(
+            "Jellyfin is not configured."
+            if not dutch
+            else "Jellyfin is niet geconfigureerd.",
+            dutch=dutch,
+        ), "unconfigured"
+    episodes: list[dict[str, Any]] = []
+    try:
+        if series is None:
+            found, candidates, missing = resolve_series_for_play(
+                client,
+                title=title,
+                libraries=list(settings.jellyfin.library_ids),
+            )
+            if missing or (found is None and not candidates):
+                return None, None, None, "missing"
+            if candidates:
+                pending_play.set_ambiguous(
+                    conversation_id,
+                    PendingPlayDisambiguation(
+                        query=title,
+                        candidates=_series_candidate_dicts(candidates),
+                        dutch=dutch,
+                        kind="series",
+                        season=season,
+                        episode=episode,
+                    ),
+                )
+                return None, None, build_play_ambiguous_reply(
+                    title, candidates, dutch=dutch, kind="series"
+                ), "ambiguous"
+            series = found
+        assert series is not None
+        episodes = client.list_episodes(series.jellyfin_id)
+    except JellyfinError as exc:
+        return None, None, build_play_failure_reply(
+            f"Jellyfin lookup failed: {exc}"
+            if not dutch
+            else f"Jellyfin-opzoeking mislukt: {exc}",
+            dutch=dutch,
+        ), "error"
+    finally:
+        client.close()
+
+    picked, reason = pick_episode(episodes, season=season, episode=episode)
+    if picked is None:
+        return None, None, build_play_episode_failure_reply(
+            reason,
+            series.title,
+            dutch=dutch,
+            available=episode_availability(episodes),
+        ), "episode"
+    return series, picked, None, None
+
+
 def _stage_or_ask_play_on_tv(
     *,
     user_message: str,
@@ -852,13 +948,21 @@ def _stage_or_ask_play_on_tv(
     pending_devices: PendingDeviceStore | None,
     conversation_id: str,
     db: Any,
+    settings: Any = None,
     movie_override: Any | None = None,
     title_override: str | None = None,
+    series_req: SeriesRequest | None = None,
+    series_override: Playable | None = None,
 ) -> TurnResult:
     """Resolve catalogue title + TV device, then M3-stage play-on-TV."""
     dutch = play_locale_dutch(user_message)
-    title = title_override or extract_play_title(user_message)
-    if not title and movie_override is None:
+    req = series_req if series_req is not None else extract_series_request(user_message)
+    series = series_override
+    is_series = req is not None or series is not None
+    title = title_override or (
+        req.title if (is_series and req is not None) else extract_play_title(user_message)
+    )
+    if not title and movie_override is None and series is None:
         reply = build_play_failure_reply(
             "Which movie should I play on the TV?"
             if not dutch
@@ -873,37 +977,65 @@ def _stage_or_ask_play_on_tv(
             stopped_reason=StoppedReason.FINAL,
         )
 
+    def _final(reply: str) -> TurnResult:
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
     movie = movie_override
-    if movie is None:
+    episode: dict[str, Any] | None = None
+
+    if movie is None and episode is None:
         assert title is not None
-        movie, ambiguous, missing = resolve_movie_for_play(db, title)
-        if missing or (movie is None and not ambiguous):
-            reply = build_play_missing_reply(title, dutch=dutch)
-            working.append(ChatMessage(role="assistant", content=reply))
-            return TurnResult(
-                content=reply,
-                messages=working,
-                steps=steps,
-                stopped_reason=StoppedReason.FINAL,
+        if series is None and not is_series:
+            # Movie first (T-116): a same-name movie always wins.
+            movie, ambiguous, missing = resolve_movie_for_play(db, title)
+            if ambiguous:
+                pending_play.set_ambiguous(
+                    conversation_id,
+                    PendingPlayDisambiguation(
+                        query=title,
+                        candidates=_candidate_dicts(ambiguous),
+                        dutch=dutch,
+                    ),
+                )
+                return _final(build_play_ambiguous_reply(title, ambiguous, dutch=dutch))
+            # No movie matched → try the live series resolve (T-127).
+            is_series = movie is None
+        if is_series or series is not None:
+            if settings is None:
+                return _final(
+                    build_play_failure_reply(
+                        "Jellyfin is not configured."
+                        if not dutch
+                        else "Jellyfin is niet geconfigureerd.",
+                        dutch=dutch,
+                    )
+                )
+            series, episode, series_reply, reason = _resolve_series_for_stage(
+                settings=settings,
+                title=title,
+                season=req.season if req is not None else None,
+                episode=req.episode if req is not None else None,
+                series=series,
+                deadline_monotonic=deadline_monotonic,
+                dutch=dutch,
+                pending_play=pending_play,
+                conversation_id=conversation_id,
             )
-        if ambiguous:
-            pending_play.set_ambiguous(
-                conversation_id,
-                PendingPlayDisambiguation(
-                    query=title,
-                    candidates=_candidate_dicts(ambiguous),
-                    dutch=dutch,
-                ),
-            )
-            reply = build_play_ambiguous_reply(title, ambiguous, dutch=dutch)
-            working.append(ChatMessage(role="assistant", content=reply))
-            return TurnResult(
-                content=reply,
-                messages=working,
-                steps=steps,
-                stopped_reason=StoppedReason.FINAL,
-            )
-        assert movie is not None
+            if series is None:
+                if series_reply is not None:
+                    return _final(series_reply)
+                if reason == "missing" and req is None:
+                    # Movie resolve already missed; nothing in Jellyfin either.
+                    return _final(build_play_missing_reply(title, dutch=dutch))
+                return _final(build_play_series_missing_reply(title, dutch=dutch))
+        else:
+            assert movie is not None
 
     if DEVICE_LAUNCH_APP_TOOL not in registry:
         reply = build_play_failure_reply(
@@ -955,13 +1087,25 @@ def _stage_or_ask_play_on_tv(
     ):
         wake = False
 
-    pending = stage_play_from_movie(
-        movie=movie,
-        device=device,
-        wake_if_needed=wake,
-        dutch=dutch,
-        db=db,
-    )
+    if is_series:
+        assert series is not None and episode is not None
+        pending = stage_play_from_series(
+            series=series,
+            episode=episode,
+            device=device,
+            wake_if_needed=wake,
+            dutch=dutch,
+            db=db,
+        )
+    else:
+        assert movie is not None
+        pending = stage_play_from_movie(
+            movie=movie,
+            device=device,
+            wake_if_needed=wake,
+            dutch=dutch,
+            db=db,
+        )
     if not pending.device_id:
         reply = build_play_failure_reply(
             "TV device id missing.",
@@ -1519,6 +1663,47 @@ def run_turn(
         pick = resolve_disambiguation_pick(user_message, amb)
         if pick is not None:
             jid = str(pick.get("jellyfin_id") or "")
+            if str(pick.get("kind") or "movie") == "series":
+                # T-127: candidates are live series — never a catalogue read.
+                series = Playable(
+                    jellyfin_id=jid,
+                    title=str(pick.get("title") or jid),
+                    year=pick.get("year") if isinstance(pick.get("year"), int) else None,
+                )
+                if settings is None:
+                    reply = build_play_failure_reply(
+                        "Jellyfin is not configured."
+                        if not amb.dutch
+                        else "Jellyfin is niet geconfigureerd.",
+                        dutch=amb.dutch,
+                    )
+                    working.append(ChatMessage(role="assistant", content=reply))
+                    return TurnResult(
+                        content=reply,
+                        messages=working,
+                        steps=steps,
+                        stopped_reason=StoppedReason.FINAL,
+                    )
+                return _stage_or_ask_play_on_tv(
+                    user_message=user_message,
+                    working=working,
+                    steps=steps,
+                    registry=registry,
+                    deadline_monotonic=deadline_monotonic,
+                    default_tool_timeout_s=default_tool_timeout_s,
+                    pending_play=pending_play,
+                    pending_devices=pending_devices,
+                    conversation_id=conversation_id,
+                    db=db,
+                    settings=settings,
+                    series_override=series,
+                    title_override=series.title,
+                    series_req=SeriesRequest(
+                        title=series.title,
+                        season=amb.season,
+                        episode=amb.episode,
+                    ),
+                )
             movie = next(
                 (m for m in db.list_active_movies() if m.jellyfin_id == jid),
                 None,
@@ -1592,6 +1777,7 @@ def run_turn(
             pending_devices=pending_devices,
             conversation_id=conversation_id,
             db=db,
+            settings=settings,
         )
 
     # T-048: post-save soft follow-up — bare ja/nee before Ollama (after pending cancel).

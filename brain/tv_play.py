@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from brain.config import Settings, jellyfin_sync_configured
@@ -35,6 +35,7 @@ _PLAY_EXTRACT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         r"\bplay\s+(.+?)\s+on\s+(?:the\s+)?(?:tv|television)\b",
+        r"\bput\s+(.+?)\s+on\s+(?:the\s+)?(?:tv|television)\b",
         r"\bzet\s+(.+?)\s+op\s+de\s+(?:tv|televisie)\b",
         r"\bspeel\s+(.+?)\s+op\s+(?:de\s+)?(?:tv|televisie)\b",
     )
@@ -44,9 +45,63 @@ _PLAY_DETECT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         r"\bplay\b.+\bon\s+(?:the\s+)?(?:tv|television)\b",
+        r"\bput\b.+\bon\s+(?:the\s+)?(?:tv|television)\b",
         r"\bzet\b.+\bop\s+de\s+(?:tv|televisie)\b",
         r"\bspeel\b.+\bop\s+(?:de\s+)?(?:tv|televisie)\b",
     )
+)
+
+# A marker word in the utterance means "series", even when a movie shares the title.
+SERIES_MARKER = re.compile(
+    r"\b(episode|aflevering|season|seizoen|serie|series|"
+    r"next\s+episode|volgende\s+aflevering)\b",
+    re.IGNORECASE,
+)
+
+# Season / episode / "next" qualifiers stripped off the captured title (T-127).
+_SERIES_EXTRACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"^season\s+(\d{1,2})\s+episode\s+(\d{1,3})\s+(?:of|van)\s+(.+)$",
+            re.IGNORECASE,
+        ),
+        "season_episode",
+    ),
+    (
+        re.compile(
+            r"^seizoen\s+(\d{1,2})\s+aflevering\s+(\d{1,3})\s+van\s+(.+)$",
+            re.IGNORECASE,
+        ),
+        "season_episode",
+    ),
+    (
+        re.compile(r"^episode\s+(\d{1,3})\s+(?:of|van)\s+(.+)$", re.IGNORECASE),
+        "episode",
+    ),
+    (
+        re.compile(r"^aflevering\s+(\d{1,3})\s+van\s+(.+)$", re.IGNORECASE),
+        "episode",
+    ),
+    (
+        re.compile(r"^season\s+(\d{1,2})\s+(?:of|van)\s+(.+)$", re.IGNORECASE),
+        "season",
+    ),
+    (
+        re.compile(r"^seizoen\s+(\d{1,2})\s+van\s+(.+)$", re.IGNORECASE),
+        "season",
+    ),
+    (
+        re.compile(
+            r"^(?:the\s+)?next\s+episode\s+(?:of|van)\s+(.+)$", re.IGNORECASE
+        ),
+        "next",
+    ),
+    (
+        re.compile(
+            r"^(?:de\s+)?volgende\s+aflevering\s+van\s+(.+)$", re.IGNORECASE
+        ),
+        "next",
+    ),
 )
 
 _PLAY_NEGATION = re.compile(
@@ -63,6 +118,48 @@ _PLAY_QUESTION = re.compile(
 
 _OPEN_APP_ONLY_TITLE = frozenset({"jellyfin"})
 
+# A captured "title" that is only a device word is never a media resolve.
+_DEVICE_WORD_TITLE = frozenset(
+    {
+        "tv",
+        "the tv",
+        "de tv",
+        "television",
+        "the television",
+        "televisie",
+        "home",
+        "the home",
+        "hdmi1",
+        "hdmi 1",
+        "hdmi2",
+        "hdmi 2",
+        "hdmi3",
+        "hdmi 3",
+        "hdmi4",
+        "hdmi 4",
+    }
+)
+
+
+@dataclass
+class SeriesRequest:
+    """Series title + optional episode numbers parsed from one utterance."""
+
+    title: str
+    season: int | None = None
+    episode: int | None = None
+    next_episode: bool = False
+
+
+@dataclass
+class Playable:
+    """A resolved media item (series) usable in the disambiguation list."""
+
+    jellyfin_id: str
+    title: str
+    year: int | None = None
+    kind: str = "series"
+
 
 @dataclass
 class PendingPlayOnTv:
@@ -76,6 +173,12 @@ class PendingPlayOnTv:
     created_monotonic: float = field(default_factory=time.monotonic)
     confirmable: bool = True
     dutch: bool = False
+    media_kind: str = "movie"
+    series_id: str | None = None
+    episode_id: str | None = None
+    episode_number: int | None = None
+    season_number: int | None = None
+    episode_title: str | None = None
 
 
 @dataclass
@@ -84,6 +187,9 @@ class PendingPlayDisambiguation:
     candidates: list[dict[str, Any]]
     created_monotonic: float = field(default_factory=time.monotonic)
     dutch: bool = False
+    kind: str = "movie"
+    season: int | None = None
+    episode: int | None = None
 
 
 class PendingPlayStore:
@@ -170,6 +276,8 @@ def user_message_requests_play_on_tv(text: str) -> bool:
         return False
     if title.casefold().strip() in _OPEN_APP_ONLY_TITLE:
         return False
+    if title.casefold().strip() in _DEVICE_WORD_TITLE:
+        return False
     return any(p.search(text) for p in _PLAY_DETECT_PATTERNS)
 
 
@@ -186,6 +294,167 @@ def extract_play_title(text: str) -> str | None:
         if title:
             return title
     return None
+
+
+_SERIES_TITLE_PREFIX = re.compile(r"^(?:the\s+|de\s+)?(?:series|serie)\s+", re.IGNORECASE)
+
+
+def extract_series_request(text: str) -> SeriesRequest | None:
+    """Series + optional season/episode from a play-on-TV phrase (T-127).
+
+    None unless the utterance carries a series marker, so a plain
+    "play <title> on the TV" still resolves as a movie first.
+    """
+    if not user_message_requests_play_on_tv(text):
+        return None
+    if not SERIES_MARKER.search(text):
+        return None
+    raw = extract_play_title(text)
+    if raw is None:
+        return None
+    for pat, kind in _SERIES_EXTRACT_PATTERNS:
+        m = pat.match(raw)
+        if not m:
+            continue
+        title = re.sub(r"\s+", " ", m.groups()[-1].strip(" \t\"'`.,"))
+        if not title:
+            return None
+        if kind == "season_episode":
+            return SeriesRequest(
+                title=title, season=int(m.group(1)), episode=int(m.group(2))
+            )
+        if kind == "episode":
+            return SeriesRequest(title=title, episode=int(m.group(1)))
+        if kind == "season":
+            return SeriesRequest(title=title, season=int(m.group(1)))
+        return SeriesRequest(title=title, next_episode=True)
+    title = _SERIES_TITLE_PREFIX.sub("", raw).strip(" \t\"'`.,")
+    return SeriesRequest(title=title) if title else None
+
+
+def _playable_from_item(raw: dict[str, Any]) -> Playable | None:
+    item_id = str(raw.get("Id") or "").strip()
+    name = str(raw.get("Name") or "").strip()
+    if not item_id or not name:
+        return None
+    year_raw = raw.get("ProductionYear")
+    try:
+        year = int(year_raw) if year_raw is not None else None
+    except (TypeError, ValueError):
+        year = None
+    return Playable(jellyfin_id=item_id, title=name, year=year)
+
+
+def resolve_series_for_play(
+    client: JellyfinClient,
+    *,
+    title: str,
+    libraries: list[str],
+) -> tuple[Playable | None, list[Playable] | None, bool]:
+    """Same match order as resolve_seed: exact, unique contains, else ambiguous."""
+    needle = (title or "").strip()
+    if not needle:
+        return None, None, True
+    raws = client.find_series(needle, libraries=list(libraries))
+    items = [p for p in (_playable_from_item(r) for r in raws) if p is not None]
+    lower = needle.casefold()
+
+    exact = [i for i in items if i.title.casefold() == lower]
+    if len(exact) == 1:
+        return exact[0], None, False
+    if len(exact) > 1:
+        return None, exact, False
+
+    contains = [i for i in items if lower in i.title.casefold()]
+    if len(contains) == 1:
+        return contains[0], None, False
+    if len(contains) > 1:
+        return None, contains, False
+    return None, None, True
+
+
+def _episode_numbers(raw: dict[str, Any]) -> tuple[int, int]:
+    def _int(key: str) -> int:
+        value = raw.get(key)
+        try:
+            return int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    return _int("ParentIndexNumber"), _int("IndexNumber")
+
+
+def _episode_played(raw: dict[str, Any]) -> bool:
+    user_data = raw.get("UserData")
+    if not isinstance(user_data, dict):
+        # Unknown user data must not hide the only unplayed episode.
+        return False
+    return bool(user_data.get("Played"))
+
+
+def _playable_episodes(
+    episodes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Episodes with a real season and episode number, season 0 = specials."""
+    numbered = [e for e in episodes if all(n > 0 for n in _episode_numbers(e))]
+    real_seasons = [e for e in numbered if _episode_numbers(e)[0] >= 1]
+    return real_seasons or numbered
+
+
+def pick_episode(
+    episodes: list[dict[str, Any]],
+    *,
+    season: int | None = None,
+    episode: int | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Pick the episode to play. Returns (episode_item | None, reason).
+
+    Reasons: requested | unplayed | no-episodes | season-not-found |
+    episode-not-found | all-played.
+    """
+    usable = _playable_episodes(episodes)
+    if not usable:
+        return None, "no-episodes"
+
+    if season is not None:
+        in_season = [e for e in usable if _episode_numbers(e)[0] == season]
+        if not in_season:
+            return None, "season-not-found"
+        seasons: list[list[dict[str, Any]]] = [in_season]
+    else:
+        seasons = []
+        for season_no in sorted({_episode_numbers(e)[0] for e in usable}):
+            bucket = [e for e in usable if _episode_numbers(e)[0] == season_no]
+            if any(not _episode_played(e) for e in bucket):
+                seasons.append(bucket)
+        if not seasons:
+            return None, "all-played"
+        seasons = [seasons[0]]
+
+    bucket = seasons[0]
+    if episode is not None:
+        for e in bucket:
+            if _episode_numbers(e)[1] == episode:
+                return e, "requested"
+        return None, "episode-not-found"
+    unplayed = [e for e in bucket if not _episode_played(e)]
+    if not unplayed:
+        return None, "all-played"
+    unplayed.sort(key=lambda e: _episode_numbers(e))
+    return unplayed[0], "unplayed"
+
+
+def episode_availability(episodes: list[dict[str, Any]]) -> str:
+    """Short 'what does exist' summary for the loud episode failures."""
+    usable = _playable_episodes(episodes)
+    if not usable:
+        return ""
+    seasons = sorted({_episode_numbers(e)[0] for e in usable})
+    if len(seasons) == 1:
+        season = seasons[0]
+        last = max(_episode_numbers(e)[1] for e in usable)
+        return f"(S{season} has episodes 1-{last})"
+    return f"(seasons {seasons[0]}-{seasons[-1]})"
 
 
 def should_keep_pending_play(
@@ -217,7 +486,18 @@ def play_locale_dutch(user_message: str, *, prefer_dutch: bool | None = None) ->
     msg = (user_message or "").lower()
     return any(
         w in msg
-        for w in ("zet", "speel", "televisie", "op de tv", "film", "afspelen")
+        for w in (
+            "zet",
+            "speel",
+            "televisie",
+            "op de tv",
+            "film",
+            "afspelen",
+            "aflevering",
+            "seizoen",
+            "serie",
+            "volgende aflevering",
+        )
     )
 
 
@@ -259,9 +539,36 @@ def _movie_label(title: str, year: int | None) -> str:
     return title
 
 
+def _episode_label(pending: PendingPlayOnTv) -> str:
+    """``S2E4 Title`` when known, else the episode title, else nothing."""
+    bits: list[str] = []
+    if pending.season_number is not None and pending.episode_number is not None:
+        bits.append(f"S{pending.season_number}E{pending.episode_number}")
+    if pending.episode_title:
+        bits.append(pending.episode_title)
+    return " ".join(bits)
+
+
+def _is_series(pending: PendingPlayOnTv) -> bool:
+    return pending.media_kind == "series"
+
+
 def build_play_confirm_reply(pending: PendingPlayOnTv) -> str:
-    label = _movie_label(pending.title, pending.year)
     name = pending.device_name or pending.device_id or "TV"
+    if _is_series(pending):
+        label = _movie_label(pending.title, pending.year)
+        ep = _episode_label(pending)
+        target = f"{label} — {ep}" if ep else label
+        if pending.dutch:
+            return (
+                f"**{target}** afspelen op **{name}** via Jellyfin — nog niet gedaan.\n"
+                "Zeg *ja* of tik Confirm."
+            )
+        return (
+            f"Play **{target}** on **{name}** via Jellyfin — not done yet.\n"
+            "Say *yes* or tap Confirm."
+        )
+    label = _movie_label(pending.title, pending.year)
     if pending.dutch:
         return (
             f"**{label}** afspelen op **{name}** via Jellyfin — nog niet gedaan.\n"
@@ -273,21 +580,33 @@ def build_play_confirm_reply(pending: PendingPlayOnTv) -> str:
     )
 
 
+def _candidate_name(item: Any) -> str:
+    name = getattr(item, "name", None) or getattr(item, "title", None) or ""
+    return str(name)
+
+
+def _candidate_year(item: Any) -> int | None:
+    value = getattr(item, "year", None)
+    return value if isinstance(value, int) else None
+
+
 def build_play_ambiguous_reply(
     query: str,
-    candidates: list[Movie],
+    candidates: list[Any],
     *,
     dutch: bool,
+    kind: str = "movie",
 ) -> str:
     lines: list[str] = []
+    noun = "series" if kind == "series" else "movies"
     if dutch:
         lines.append(
-            f"Meerdere films matchen **{query}** — welke bedoel je?"
+            f"Meerdere {noun} matchen **{query}** — welke bedoel je?"
         )
     else:
-        lines.append(f"Several movies match **{query}** — which one?")
+        lines.append(f"Several {noun} match **{query}** — which one?")
     for i, m in enumerate(candidates[:8], start=1):
-        label = _movie_label(m.name, m.year)
+        label = _movie_label(_candidate_name(m), _candidate_year(m))
         lines.append(f"{i}. {label}")
     return "\n".join(lines)
 
@@ -298,9 +617,54 @@ def build_play_missing_reply(query: str, *, dutch: bool) -> str:
     return f"No movie **{query}** in the Jellyfin catalogue."
 
 
+def build_play_series_missing_reply(query: str, *, dutch: bool) -> str:
+    if dutch:
+        return f"Geen serie **{query}** in Jellyfin."
+    return f"No series **{query}** in Jellyfin."
+
+
+def build_play_episode_failure_reply(
+    reason: str,
+    title: str,
+    *,
+    dutch: bool,
+    available: str = "",
+) -> str:
+    """Loud, specific failure for the episode selector (T-127)."""
+    tail = f" {available}" if available else ""
+    if reason == "all-played":
+        if dutch:
+            return (
+                f"Alle afleveringen van **{title}** zijn gekeken — "
+                f"welke aflevering of welk seizoen?{tail}"
+            )
+        return (
+            f"All episodes of **{title}** are watched — "
+            f"which episode or season?{tail}"
+        )
+    if reason == "season-not-found":
+        if dutch:
+            return f"Seizoen niet gevonden in **{title}**.{tail}"
+        return f"Season not found in **{title}**.{tail}"
+    if reason == "episode-not-found":
+        if dutch:
+            return f"Die aflevering bestaat niet in dat seizoen van **{title}**.{tail}"
+        return f"That episode does not exist in that season of **{title}**.{tail}"
+    if dutch:
+        return f"Geen afleveringen gevonden voor **{title}**."
+    return f"No episodes found for **{title}**."
+
+
 def build_play_success_reply(pending: PendingPlayOnTv) -> str:
-    label = _movie_label(pending.title, pending.year)
     name = pending.device_name or "TV"
+    if _is_series(pending):
+        label = _movie_label(pending.title, pending.year)
+        ep = _episode_label(pending)
+        target = f"{label} — {ep}" if ep else label
+        if pending.dutch:
+            return f"**{target}** speelt nu op **{name}**."
+        return f"Playing **{target}** on **{name}**."
+    label = _movie_label(pending.title, pending.year)
     if pending.dutch:
         return f"**{label}** speelt nu op **{name}**."
     return f"Playing **{label}** on **{name}**."
@@ -321,6 +685,18 @@ def _candidate_dicts(movies: list[Movie]) -> list[dict[str, Any]]:
             "year": m.year,
         }
         for m in movies
+    ]
+
+
+def _series_candidate_dicts(items: list[Playable]) -> list[dict[str, Any]]:
+    return [
+        {
+            "jellyfin_id": p.jellyfin_id,
+            "title": p.title,
+            "year": p.year,
+            "kind": "series",
+        }
+        for p in items
     ]
 
 
@@ -436,18 +812,55 @@ def execute_play_on_tv(
 ) -> tuple[bool, str]:
     """Run launch_app → poll WebOS session → PlayNow. Returns (ok, user_reply)."""
     dutch = pending.dutch
-    movie = revalidate_movie(
-        db,
-        jellyfin_id=pending.jellyfin_id,
-        sync_generation=pending.sync_generation,
+    owns_client = jellyfin_client is None
+    client = (
+        jellyfin_client
+        if jellyfin_client is not None
+        else jellyfin_client_from_settings(settings)
     )
-    if movie is None:
+    if client is None:
         return False, build_play_failure_reply(
-            "Film niet meer in de catalogus."
-            if dutch
-            else "Movie no longer in the catalogue.",
+            "Jellyfin is not configured."
+            if not dutch
+            else "Jellyfin is niet geconfigureerd.",
             dutch=dutch,
         )
+
+    def _fail(message: str) -> tuple[bool, str]:
+        if owns_client:
+            client.close()
+        return False, build_play_failure_reply(message, dutch=dutch)
+
+    playable_title = pending.title
+    playable_year = pending.year
+    if _is_series(pending):
+        try:
+            episode = client.get_item(pending.jellyfin_id)
+        except JellyfinError as exc:
+            return _fail(
+                f"Jellyfin check failed: {exc}" if not dutch else f"Jellyfin-check mislukt: {exc}"
+            )
+        if episode is None:
+            return _fail(
+                "That episode is no longer available."
+                if not dutch
+                else "Die aflevering is niet meer beschikbaar."
+            )
+        playable_title = str(episode.get("SeriesName") or pending.title) or pending.title
+    else:
+        movie = revalidate_movie(
+            db,
+            jellyfin_id=pending.jellyfin_id,
+            sync_generation=pending.sync_generation,
+        )
+        if movie is None:
+            return _fail(
+                "Film niet meer in de catalogus."
+                if dutch
+                else "Movie no longer in the catalogue.",
+            )
+        playable_title = movie.name
+        playable_year = movie.year
 
     wake = pending.wake_if_needed
     if (
@@ -505,16 +918,6 @@ def execute_play_on_tv(
             conversation_id, device_id=pending.device_id
         )
 
-    owns_client = jellyfin_client is None
-    client = jellyfin_client or jellyfin_client_from_settings(settings)
-    if client is None:
-        return False, build_play_failure_reply(
-            "Jellyfin is not configured."
-            if not dutch
-            else "Jellyfin is niet geconfigureerd.",
-            dutch=dutch,
-        )
-
     try:
         session = _wait_unique_webos_session(
             client,
@@ -549,16 +952,7 @@ def execute_play_on_tv(
             client.close()
 
     return True, build_play_success_reply(
-        PendingPlayOnTv(
-            device_id=pending.device_id,
-            device_name=pending.device_name,
-            jellyfin_id=pending.jellyfin_id,
-            title=movie.name,
-            year=movie.year,
-            sync_generation=pending.sync_generation,
-            wake_if_needed=pending.wake_if_needed,
-            dutch=dutch,
-        )
+        replace(pending, title=playable_title, year=playable_year)
     )
 
 
@@ -616,6 +1010,37 @@ def stage_play_from_movie(
         sync_generation=state.active_generation,
         wake_if_needed=wake_if_needed,
         dutch=dutch,
+    )
+
+
+def stage_play_from_series(
+    *,
+    series: Playable,
+    episode: dict[str, Any],
+    device: dict[str, Any],
+    wake_if_needed: bool,
+    dutch: bool,
+    db: Database,
+) -> PendingPlayOnTv:
+    state = db.get_sync_state()
+    episode_id = str(episode.get("Id") or "").strip()
+    season, number = _episode_numbers(episode)
+    return PendingPlayOnTv(
+        device_id=str(device.get("id") or "").strip(),
+        device_name=str(device.get("name") or "").strip()
+        or str(device.get("id") or "TV"),
+        jellyfin_id=episode_id,
+        title=series.title,
+        year=series.year,
+        sync_generation=state.active_generation,
+        wake_if_needed=wake_if_needed,
+        dutch=dutch,
+        media_kind="series",
+        series_id=series.jellyfin_id,
+        episode_id=episode_id or None,
+        episode_number=number or None,
+        season_number=season or None,
+        episode_title=str(episode.get("Name") or "").strip() or None,
     )
 
 
