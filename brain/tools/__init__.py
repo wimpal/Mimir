@@ -132,7 +132,10 @@ def build_registry(
 ) -> dict[str, Tool]:
     """Dummy tools + weather + calendar + lookups + optional preference / recommend / MCP tools."""
     from brain.tools.calendar import calendar_tools
+    from brain.tools.continue_watching import continue_watching_tools
     from brain.tools.currency import currency_tools
+    from brain.tools.media_lookup import media_lookup_tools
+    from brain.tools.media_watch_stats import media_watch_stats_tools
     from brain.tools.preferences import preference_tools
     from brain.tools.random_fact import random_fact_tools
     from brain.tools.recently_watched import recently_watched_tools
@@ -161,6 +164,9 @@ def build_registry(
         **wikipedia_tools(settings, fetch_override=wikipedia_fetch_override),
         **random_fact_tools(settings),
         **usage_stats_tools(settings, data_dir=resolved_data),
+        **media_lookup_tools(settings),
+        **continue_watching_tools(settings),
+        **media_watch_stats_tools(settings),
     }
     if db is not None:
         registry.update(preference_tools(db))

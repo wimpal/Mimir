@@ -42,6 +42,9 @@ _LOCAL_CLUSTER: dict[str, str] = {
     "get_calendar": "local.calendar",
     "recommend_movies": "local.media",
     "list_recently_watched": "local.media",
+    "find_media": "local.media",
+    "list_continue_watching": "local.media",
+    "media_watch_stats": "local.media",
     "convert_currency": "local.currency",
     "wikipedia_lookup": "local.wikipedia",
     "random_fact": "local.facts",
@@ -52,7 +55,10 @@ _LOCAL_CLUSTER: dict[str, str] = {
 _CLUSTER_LABELS: dict[str, tuple[str, str]] = {
     "local.weather": ("weather", "weer"),
     "local.calendar": ("calendar", "agenda"),
-    "local.media": ("movies and recently watched", "films en recent bekeken"),
+    "local.media": (
+        "movies, library lookup, continue watching, recently watched, and watch stats",
+        "films, bibliotheek-opzoeken, verder kijken, recent bekeken en kijkstatistieken",
+    ),
     "local.currency": ("currency conversion", "valuta"),
     "local.wikipedia": ("Wikipedia", "Wikipedia"),
     "local.facts": ("random facts", "weetjes"),

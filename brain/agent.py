@@ -156,6 +156,19 @@ from brain.mcp.protocols import (
     should_keep_pending_protocol,
     user_message_requests_protocol_run,
 )
+from brain.jellyfin_favourite import (
+    PendingFavourite,
+    PendingFavouriteStore,
+    build_favourite_cancel_reply,
+    build_favourite_confirm_reply,
+    build_favourite_failure_reply,
+    execute_favourite_write,
+    resolve_favourite_disambiguation_pick,
+    should_keep_pending_favourite,
+    stage_favourite_from_request,
+    extract_favourite_request,
+    user_message_requests_favourite,
+)
 from brain.tv_play import (
     SESSION_POLL_DEFAULT_MAX_S,
     PendingPlayDisambiguation,
@@ -183,6 +196,7 @@ from brain.tv_play import (
     should_keep_pending_play,
     stage_play_from_movie,
     stage_play_from_series,
+    title_match_quality,
     user_message_requests_play_on_tv,
     _candidate_dicts,
     _series_candidate_dicts,
@@ -289,8 +303,11 @@ _READ_ONLY_TOOL_NAMES = frozenset(
         "budgettracker.categories.list",
         "get_preference",
         "list_preferences",
-        "recommend",
-        "recently_watched",
+        "recommend_movies",
+        "list_recently_watched",
+        "find_media",
+        "list_continue_watching",
+        "media_watch_stats",
     }
 )
 
@@ -853,7 +870,18 @@ def _complete_cook_start(
     )
 
 
-def _resolve_series_for_stage(
+@dataclass
+class _SeriesProbe:
+    """Result of the live series probe. The caller ranks it vs a movie match."""
+
+    series: Playable | None = None
+    episode: dict[str, Any] | None = None
+    candidates: list[Playable] = field(default_factory=list)
+    reply: str | None = None
+    reason: str | None = None
+
+
+def _probe_series_for_stage(
     *,
     settings: Any,
     title: str,
@@ -862,78 +890,165 @@ def _resolve_series_for_stage(
     series: Playable | None,
     deadline_monotonic: float | None,
     dutch: bool,
-    pending_play: PendingPlayStore,
-    conversation_id: str,
-) -> tuple[Playable | None, dict[str, Any] | None, str | None, str | None]:
-    """Live Jellyfin Series/Episode resolve.
+) -> _SeriesProbe:
+    """Live Jellyfin Series/Episode resolve — a probe, no side effects.
 
-    Returns (series, episode, user_reply, reason). Exactly one of
-    series / user_reply is set; reason is missing | ambiguous | episode |
-    unconfigured | timeout | error.
+    Never touches the pending store: the caller decides whether the series
+    wins over a movie match, and only then stages anything.
     """
+    probe = _SeriesProbe()
     remaining = _remaining_s(deadline_monotonic)
     if remaining is not None and remaining < SESSION_POLL_DEFAULT_MAX_S + 10.0:
-        return None, None, build_play_failure_reply(
+        probe.reason = "timeout"
+        probe.reply = build_play_failure_reply(
             "Not enough time left in this turn to start playback — try again."
             if not dutch
             else "Te weinig tijd over in deze beurt om af te spelen — probeer opnieuw.",
             dutch=dutch,
-        ), "timeout"
-    client = jellyfin_client_from_settings(settings)
+        )
+        return probe
+    try:
+        client = jellyfin_client_from_settings(settings)
+    except Exception:  # noqa: BLE001 - probe must never break a movie play
+        client = None
     if client is None:
-        return None, None, build_play_failure_reply(
+        probe.reason = "unconfigured"
+        probe.reply = build_play_failure_reply(
             "Jellyfin is not configured."
             if not dutch
             else "Jellyfin is niet geconfigureerd.",
             dutch=dutch,
-        ), "unconfigured"
+        )
+        return probe
     episodes: list[dict[str, Any]] = []
+    next_up: dict[str, Any] | None = None
     try:
         if series is None:
             found, candidates, missing = resolve_series_for_play(
                 client,
                 title=title,
-                libraries=list(settings.jellyfin.library_ids),
             )
             if missing or (found is None and not candidates):
-                return None, None, None, "missing"
+                probe.reason = "missing"
+                return probe
             if candidates:
-                pending_play.set_ambiguous(
-                    conversation_id,
-                    PendingPlayDisambiguation(
-                        query=title,
-                        candidates=_series_candidate_dicts(candidates),
-                        dutch=dutch,
-                        kind="series",
-                        season=season,
-                        episode=episode,
-                    ),
-                )
-                return None, None, build_play_ambiguous_reply(
-                    title, candidates, dutch=dutch, kind="series"
-                ), "ambiguous"
+                probe.candidates = candidates
+                probe.reason = "ambiguous"
+                return probe
             series = found
         assert series is not None
         episodes = client.list_episodes(series.jellyfin_id)
+        if season is None and episode is None:
+            next_up = client.next_up_episode(series.jellyfin_id)
     except JellyfinError as exc:
-        return None, None, build_play_failure_reply(
+        probe.reason = "error"
+        probe.reply = build_play_failure_reply(
             f"Jellyfin lookup failed: {exc}"
             if not dutch
             else f"Jellyfin-opzoeking mislukt: {exc}",
             dutch=dutch,
-        ), "error"
+        )
+        return probe
     finally:
         client.close()
 
-    picked, reason = pick_episode(episodes, season=season, episode=episode)
+    probe.series = series
+    if next_up is not None and isinstance(next_up.get("Id"), str) and next_up["Id"].strip():
+        picked, reason = next_up, "unplayed"
+    else:
+        picked, reason = pick_episode(episodes, season=season, episode=episode)
     if picked is None:
-        return None, None, build_play_episode_failure_reply(
+        probe.reason = "episode"
+        probe.reply = build_play_episode_failure_reply(
             reason,
             series.title,
             dutch=dutch,
             available=episode_availability(episodes),
-        ), "episode"
-    return series, picked, None, None
+        )
+        return probe
+    probe.episode = picked
+    return probe
+
+
+def _complete_favourite_confirm(
+    *,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    pending_favourites: PendingFavouriteStore,
+    conversation_id: str,
+    settings: Any,
+) -> TurnResult:
+    pending = pending_favourites.clear_favourite(conversation_id)
+    if pending is None:
+        reply = "Nothing pending to confirm."
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+    ok, reply = execute_favourite_write(settings, pending)
+    working.append(ChatMessage(role="assistant", content=reply))
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=["jellyfin.set_favorite"],
+            success=ok,
+            anomaly=None if ok else "favourite_write_failed",
+            content_preview=reply[:120],
+        )
+    )
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
+
+
+def _stage_or_ask_favourite(
+    *,
+    user_message: str,
+    working: list[ChatMessage],
+    steps: list[StepTrace],
+    pending_favourites: PendingFavouriteStore,
+    conversation_id: str,
+    settings: Any,
+) -> TurnResult:
+    req = extract_favourite_request(user_message)
+    if req is None:
+        reply = "Which title should I favourite?"
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+    reply, pending, amb = stage_favourite_from_request(settings, req)
+    if amb is not None:
+        pending_favourites.set_ambiguous(conversation_id, amb)
+    elif pending is not None:
+        pending_favourites.set_favourite(conversation_id, pending)
+    else:
+        pending_favourites.clear(conversation_id)
+    working.append(ChatMessage(role="assistant", content=reply))
+    steps.append(
+        StepTrace(
+            ollama_latency_ms=0.0,
+            tool_names=[],
+            success=True,
+            anomaly="favourite_staged" if pending or amb else "favourite_resolve",
+            content_preview=reply[:120],
+        )
+    )
+    return TurnResult(
+        content=reply,
+        messages=working,
+        steps=steps,
+        stopped_reason=StoppedReason.FINAL,
+    )
 
 
 def _stage_or_ask_play_on_tv(
@@ -991,9 +1106,10 @@ def _stage_or_ask_play_on_tv(
 
     if movie is None and episode is None:
         assert title is not None
+        movie_quality = "none"
         if series is None and not is_series:
-            # Movie first (T-116): a same-name movie always wins.
-            movie, ambiguous, missing = resolve_movie_for_play(db, title)
+            # Movie first (T-116), but a weak match can lose to a series.
+            movie, ambiguous, _missing = resolve_movie_for_play(db, title)
             if ambiguous:
                 pending_play.set_ambiguous(
                     conversation_id,
@@ -1004,19 +1120,12 @@ def _stage_or_ask_play_on_tv(
                     ),
                 )
                 return _final(build_play_ambiguous_reply(title, ambiguous, dutch=dutch))
-            # No movie matched → try the live series resolve (T-127).
-            is_series = movie is None
-        if is_series or series is not None:
-            if settings is None:
-                return _final(
-                    build_play_failure_reply(
-                        "Jellyfin is not configured."
-                        if not dutch
-                        else "Jellyfin is niet geconfigureerd.",
-                        dutch=dutch,
-                    )
-                )
-            series, episode, series_reply, reason = _resolve_series_for_stage(
+            if movie is not None:
+                movie_quality = title_match_quality(title, movie.name)
+        # Skip the live series probe when the movie matched the exact title:
+        # T-116 stays byte-for-byte unchanged and costs no extra request.
+        if is_series or movie_quality != "exact":
+            probe = _probe_series_for_stage(
                 settings=settings,
                 title=title,
                 season=req.season if req is not None else None,
@@ -1024,18 +1133,51 @@ def _stage_or_ask_play_on_tv(
                 series=series,
                 deadline_monotonic=deadline_monotonic,
                 dutch=dutch,
-                pending_play=pending_play,
-                conversation_id=conversation_id,
             )
-            if series is None:
-                if series_reply is not None:
-                    return _final(series_reply)
-                if reason == "missing" and req is None:
-                    # Movie resolve already missed; nothing in Jellyfin either.
-                    return _final(build_play_missing_reply(title, dutch=dutch))
+            series_wins = probe.series is not None and (
+                movie is None
+                or (
+                    movie_quality == "contains"
+                    and title_match_quality(title, probe.series.title) == "exact"
+                )
+            )
+            if series_wins:
+                assert probe.series is not None
+                series = probe.series
+                episode = probe.episode
+                is_series = True
+                if probe.episode is None and probe.reply is not None:
+                    return _final(probe.reply)
+            elif movie is None:
+                # Nothing in the catalogue and nothing better in Jellyfin.
+                if probe.candidates:
+                    pending_play.set_ambiguous(
+                        conversation_id,
+                        PendingPlayDisambiguation(
+                            query=title,
+                            candidates=_series_candidate_dicts(probe.candidates),
+                            dutch=dutch,
+                            kind="series",
+                            season=req.season if req is not None else None,
+                            episode=req.episode if req is not None else None,
+                        ),
+                    )
+                    return _final(
+                        build_play_ambiguous_reply(
+                            title, probe.candidates, dutch=dutch, kind="series"
+                        )
+                    )
+                if probe.reason == "missing":
+                    if req is None:
+                        return _final(build_play_missing_reply(title, dutch=dutch))
+                    return _final(build_play_series_missing_reply(title, dutch=dutch))
+                if probe.reply is not None:
+                    return _final(probe.reply)
                 return _final(build_play_series_missing_reply(title, dutch=dutch))
-        else:
-            assert movie is not None
+        if series is not None:
+            is_series = True
+        elif movie is None:
+            return _final(build_play_missing_reply(title, dutch=dutch))
 
     if DEVICE_LAUNCH_APP_TOOL not in registry:
         reply = build_play_failure_reply(
@@ -1398,6 +1540,7 @@ def run_turn(
     pending_devices: PendingDeviceStore | None = None,
     pending_protocols: PendingProtocolStore | None = None,
     pending_play: PendingPlayStore | None = None,
+    pending_favourites: PendingFavouriteStore | None = None,
     db: Any | None = None,
     settings: Any | None = None,
     unavailable_services: list[str] | None = None,
@@ -1473,6 +1616,14 @@ def run_turn(
                 or pending_play.has_ambiguous(conversation_id)
             )
         )
+        or (
+            pending_favourites is not None
+            and conversation_id
+            and (
+                pending_favourites.is_confirmable(conversation_id)
+                or pending_favourites.has_ambiguous(conversation_id)
+            )
+        )
     )
 
     # T-055: ELI5 — strengthen system constraints this turn (model often ignores base prompt).
@@ -1515,6 +1666,20 @@ def run_turn(
         )
     ):
         pending_play.clear(conversation_id)
+
+    if (
+        pending_favourites is not None
+        and conversation_id
+        and (
+            pending_favourites.has_favourite(conversation_id)
+            or pending_favourites.has_ambiguous(conversation_id)
+        )
+        and not should_keep_pending_favourite(
+            user_message,
+            has_ambiguous=pending_favourites.has_ambiguous(conversation_id),
+        )
+    ):
+        pending_favourites.clear(conversation_id)
 
     # T-048: drop post-save soft-followup state when the user moves on.
     if (
@@ -1588,6 +1753,26 @@ def run_turn(
             stopped_reason=StoppedReason.FINAL,
         )
 
+    if (
+        pending_favourites is not None
+        and conversation_id
+        and is_bare_cancel(user_message)
+        and (
+            pending_favourites.has_favourite(conversation_id)
+            or pending_favourites.has_ambiguous(conversation_id)
+        )
+    ):
+        dutch = pending_favourites.is_dutch(conversation_id)
+        pending_favourites.clear(conversation_id)
+        cancel_reply = build_favourite_cancel_reply(dutch=dutch)
+        working.append(ChatMessage(role="assistant", content=cancel_reply))
+        return TurnResult(
+            content=cancel_reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
     # T-115: Protocol phrase but Homebase tool absent → deterministic unavailable.
     if user_message_requests_protocol_run(user_message) and PROTOCOL_RUN_TOOL not in registry:
         unavailable = build_protocol_unavailable_reply(
@@ -1647,6 +1832,22 @@ def run_turn(
             conversation_id=conversation_id,
             settings=settings,
             db=db,
+        )
+
+    # T-130: bare yes/ja with staged favourite → Jellyfin write.
+    if (
+        pending_favourites is not None
+        and conversation_id
+        and settings is not None
+        and is_bare_confirm(user_message)
+        and pending_favourites.is_confirmable(conversation_id)
+    ):
+        return _complete_favourite_confirm(
+            working=working,
+            steps=steps,
+            pending_favourites=pending_favourites,
+            conversation_id=conversation_id,
+            settings=settings,
         )
 
     # T-116: disambiguation pick → stage M3 play.
@@ -1749,6 +1950,49 @@ def run_turn(
             stopped_reason=StoppedReason.FINAL,
         )
 
+    # T-130: favourite disambiguation pick → stage M3.
+    if (
+        pending_favourites is not None
+        and conversation_id
+        and pending_favourites.has_ambiguous(conversation_id)
+        and not is_bare_confirm(user_message)
+        and not is_bare_cancel(user_message)
+    ):
+        amb = pending_favourites.get_ambiguous(conversation_id)
+        assert amb is not None
+        pick = resolve_favourite_disambiguation_pick(user_message, amb)
+        if pick is not None:
+            pending = PendingFavourite(
+                item_id=pick.item_id,
+                title=pick.title,
+                year=pick.year,
+                kind=pick.kind,
+                favorite=amb.favorite,
+                dutch=amb.dutch,
+            )
+            pending_favourites.set_favourite(conversation_id, pending)
+            reply = build_favourite_confirm_reply(pending)
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        dutch = amb.dutch
+        reply = (
+            "Welke van de lijst? Zeg het nummer, de titel, of film/serie."
+            if dutch
+            else "Which one from the list? Say the number, the title, or movie/series."
+        )
+        working.append(ChatMessage(role="assistant", content=reply))
+        return TurnResult(
+            content=reply,
+            messages=working,
+            steps=steps,
+            stopped_reason=StoppedReason.FINAL,
+        )
+
     # T-116: play <title> on the TV — deterministic resolve + M3 (no Ollama).
     if db is not None and user_message_requests_play_on_tv(user_message):
         if pending_play is None or not conversation_id:
@@ -1777,6 +2021,33 @@ def run_turn(
             pending_devices=pending_devices,
             conversation_id=conversation_id,
             db=db,
+            settings=settings,
+        )
+
+    # T-130: favourite / unfavourite — resolve + M3 (no write until confirm).
+    if user_message_requests_favourite(user_message):
+        if pending_favourites is None or not conversation_id or settings is None:
+            req = extract_favourite_request(user_message)
+            dutch = bool(req and req.dutch)
+            reply = build_favourite_failure_reply(
+                "Favoriet wijzigen heeft een actief gesprek nodig (bevestiging)."
+                if dutch
+                else "Favourites need an active conversation (confirm flow).",
+                dutch=dutch,
+            )
+            working.append(ChatMessage(role="assistant", content=reply))
+            return TurnResult(
+                content=reply,
+                messages=working,
+                steps=steps,
+                stopped_reason=StoppedReason.FINAL,
+            )
+        return _stage_or_ask_favourite(
+            user_message=user_message,
+            working=working,
+            steps=steps,
+            pending_favourites=pending_favourites,
+            conversation_id=conversation_id,
             settings=settings,
         )
 

@@ -161,6 +161,23 @@ class Playable:
     kind: str = "series"
 
 
+def title_match_quality(query: str, title: str) -> str:
+    """exact | contains | none — the same order resolve_seed uses.
+
+    Lets a movie resolve and a live series resolve be ranked against each
+    other, so an exact series title beats a substring movie hit.
+    """
+    needle = (query or "").strip().casefold()
+    hay = (title or "").strip().casefold()
+    if not needle or not hay:
+        return "none"
+    if hay == needle:
+        return "exact"
+    if needle in hay:
+        return "contains"
+    return "none"
+
+
 @dataclass
 class PendingPlayOnTv:
     device_id: str
@@ -349,13 +366,12 @@ def resolve_series_for_play(
     client: JellyfinClient,
     *,
     title: str,
-    libraries: list[str],
 ) -> tuple[Playable | None, list[Playable] | None, bool]:
     """Same match order as resolve_seed: exact, unique contains, else ambiguous."""
     needle = (title or "").strip()
     if not needle:
         return None, None, True
-    raws = client.find_series(needle, libraries=list(libraries))
+    raws = client.find_series(needle)
     items = [p for p in (_playable_from_item(r) for r in raws) if p is not None]
     lower = needle.casefold()
 
@@ -409,39 +425,61 @@ def pick_episode(
 ) -> tuple[dict[str, Any] | None, str]:
     """Pick the episode to play. Returns (episode_item | None, reason).
 
+    Default (no season/episode named): continue after furthest watched —
+    earlier unplayed holes are skipped so a series mid-run is not reset.
+    Prefer ``JellyfinClient.next_up_episode`` at the call site when the
+    server is reachable; this is the offline / fallback selector.
+
     Reasons: requested | unplayed | no-episodes | season-not-found |
-    episode-not-found | all-played.
+    episode-not-found | all-played | caught-up.
     """
     usable = _playable_episodes(episodes)
     if not usable:
         return None, "no-episodes"
 
     if season is not None:
-        in_season = [e for e in usable if _episode_numbers(e)[0] == season]
-        if not in_season:
+        bucket = [e for e in usable if _episode_numbers(e)[0] == season]
+        if not bucket:
             return None, "season-not-found"
-        seasons: list[list[dict[str, Any]]] = [in_season]
-    else:
-        seasons = []
-        for season_no in sorted({_episode_numbers(e)[0] for e in usable}):
-            bucket = [e for e in usable if _episode_numbers(e)[0] == season_no]
-            if any(not _episode_played(e) for e in bucket):
-                seasons.append(bucket)
-        if not seasons:
+        if episode is not None:
+            for e in bucket:
+                if _episode_numbers(e)[1] == episode:
+                    return e, "requested"
+            return None, "episode-not-found"
+        unplayed = [e for e in bucket if not _episode_played(e)]
+        if not unplayed:
             return None, "all-played"
-        seasons = [seasons[0]]
+        unplayed.sort(key=lambda e: _episode_numbers(e))
+        return unplayed[0], "unplayed"
 
-    bucket = seasons[0]
     if episode is not None:
-        for e in bucket:
-            if _episode_numbers(e)[1] == episode:
-                return e, "requested"
+        # Episode number without a season: first season that has that number.
+        for season_no in sorted({_episode_numbers(e)[0] for e in usable}):
+            for e in usable:
+                if _episode_numbers(e) == (season_no, episode):
+                    return e, "requested"
         return None, "episode-not-found"
-    unplayed = [e for e in bucket if not _episode_played(e)]
-    if not unplayed:
-        return None, "all-played"
-    unplayed.sort(key=lambda e: _episode_numbers(e))
-    return unplayed[0], "unplayed"
+
+    # Continue after furthest played. Skipped earlier holes must not win.
+    played = [e for e in usable if _episode_played(e)]
+    if not played:
+        usable.sort(key=lambda e: _episode_numbers(e))
+        return usable[0], "unplayed"
+
+    furthest = max(played, key=lambda e: _episode_numbers(e))
+    after = [
+        e
+        for e in usable
+        if _episode_numbers(e) > _episode_numbers(furthest)
+        and not _episode_played(e)
+    ]
+    if after:
+        after.sort(key=lambda e: _episode_numbers(e))
+        return after[0], "unplayed"
+    # Progress is past every later episode, but earlier skips remain.
+    if any(not _episode_played(e) for e in usable):
+        return None, "caught-up"
+    return None, "all-played"
 
 
 def episode_availability(episodes: list[dict[str, Any]]) -> str:
@@ -641,6 +679,16 @@ def build_play_episode_failure_reply(
         return (
             f"All episodes of **{title}** are watched — "
             f"which episode or season?{tail}"
+        )
+    if reason == "caught-up":
+        if dutch:
+            return (
+                f"Je bent bij met **{title}** — "
+                f"noem seizoen of aflevering om een overgeslagen aflevering te kijken.{tail}"
+            )
+        return (
+            f"You're caught up on **{title}** — "
+            f"name a season or episode to jump back to a skipped one.{tail}"
         )
     if reason == "season-not-found":
         if dutch:

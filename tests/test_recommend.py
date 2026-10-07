@@ -314,6 +314,8 @@ def test_tool_description_mentions_seed_fallback(tmp_path: Path) -> None:
     desc = tools["recommend_movies"].description.lower()
     assert "falls back" in desc
     assert "must exist" not in desc
+    assert "find_media" in desc
+    assert "runtime" in desc or "minutes" in desc
 
 
 def test_registry_dispatch(tmp_path: Path) -> None:

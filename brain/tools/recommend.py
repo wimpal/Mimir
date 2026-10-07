@@ -358,9 +358,11 @@ def recommend_tools(settings: Settings, db: Database) -> dict[str, Tool]:
     tool = Tool(
         name="recommend_movies",
         description=(
-            "Recommend movies from the user's Jellyfin Catalogue cache. "
-            "Use for movie suggestions, 'something like X', unwatched picks, "
-            "or genre/mood requests. Returns a small subset — pick and explain "
+            "Recommend movies from the user's Jellyfin Catalogue cache by "
+            "taste: 'something like X', unwatched picks, genre/mood. "
+            "Does NOT include runtime/length — never use for 'under N minutes', "
+            "'how long is X', or 'do we have X?' / library membership; use "
+            "find_media for those. Returns a small subset — pick and explain "
             "from the tool output only; never invent titles. "
             "When filters include box_set_next movies, prefer those first "
             "(next in a Box set the user has been watching). "

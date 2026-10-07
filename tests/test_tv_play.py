@@ -28,6 +28,7 @@ from brain.tv_play import (
     PendingPlayOnTv,
     PendingPlayStore,
     build_play_confirm_reply,
+    build_play_episode_failure_reply,
     episode_availability,
     execute_play_on_tv,
     extract_play_title,
@@ -38,6 +39,7 @@ from brain.tv_play import (
     resolve_movie_for_play,
     resolve_series_for_play,
     stage_play_from_series,
+    title_match_quality,
     user_message_requests_play_on_tv,
 )
 
@@ -579,22 +581,30 @@ def _devices_and_launch_tools() -> dict[str, Tool]:
 # ------------------------------------------------- T-127 Step A: client reads
 
 
-def test_find_series_merges_libraries_and_asks_for_series() -> None:
+def test_find_series_queries_all_libraries_without_parent() -> None:
+    """Regression (live 2026-10-01): the TV library is not in library_ids.
+
+    Scoping the search with ParentId=<movie library> returned zero series, so
+    'reacher' could never beat the movie Machine Gun Preacher.
+    """
     client, fake = _client(
-        [
-            _FakeResponse(200, {"Items": [_series_item("The Bear")], "TotalRecordCount": 1}),
-            _FakeResponse(200, {"Items": [], "TotalRecordCount": 0}),
-        ]
+        [_FakeResponse(200, {"Items": [_series_item("Reacher")], "TotalRecordCount": 1})]
     )
-    items = client.find_series("bear", libraries=["lib1", "lib2"])
+    items = client.find_series("reacher")
     assert [i["Id"] for i in items] == ["s1"]
+    assert len(fake.gets) == 1
     path, params = fake.gets[0]
     assert path == "Users/u1/Items"
     assert params["IncludeItemTypes"] == "Series"
-    assert params["SearchTerm"] == "bear"
+    assert params["SearchTerm"] == "reacher"
     assert params["EnableUserData"] == "true"
-    assert params["ParentId"] == "lib1"
-    assert fake.gets[1][1]["ParentId"] == "lib2"
+    assert "ParentId" not in params
+
+
+def test_find_series_returns_empty_for_blank_title() -> None:
+    client, fake = _client([])
+    assert client.find_series("   ") == []
+    assert fake.gets == []
 
 
 def test_list_episodes_requests_userdata() -> None:
@@ -625,7 +635,7 @@ def test_get_item_404_is_none_other_errors_raise() -> None:
 def test_find_series_upstream_error_raises() -> None:
     client, _fake = _client([_FakeResponse(502, {})])
     try:
-        client.find_series("bear", libraries=["lib1"])
+        client.find_series("bear")
     except JellyfinError:
         pass
     else:  # pragma: no cover - must raise
@@ -640,7 +650,7 @@ def test_resolve_series_exact_substring_ambiguous_missing() -> None:
         [_FakeResponse(200, {"Items": [_series_item("The Bear")]})]
     )
     found, amb, missing = resolve_series_for_play(
-        client, title="the bear", libraries=["lib1"]
+        client, title="the bear"
     )
     assert missing is False and amb is None
     assert found is not None and found.jellyfin_id == "s1"
@@ -650,7 +660,7 @@ def test_resolve_series_exact_substring_ambiguous_missing() -> None:
         [_FakeResponse(200, {"Items": [_series_item("The Bear Tonight")]})]
     )
     found2, amb2, missing2 = resolve_series_for_play(
-        client2, title="bear", libraries=["lib1"]
+        client2, title="bear"
     )
     assert found2 is not None and amb2 is None and missing2 is False
 
@@ -668,19 +678,19 @@ def test_resolve_series_exact_substring_ambiguous_missing() -> None:
         ]
     )
     found3, amb3, missing3 = resolve_series_for_play(
-        client3, title="Dune", libraries=["lib1"]
+        client3, title="Dune"
     )
     assert found3 is None and missing3 is False
     assert amb3 is not None and len(amb3) == 2
 
     client4, _f4 = _client([_FakeResponse(200, {"Items": []})])
     found4, amb4, missing4 = resolve_series_for_play(
-        client4, title="Nope", libraries=["lib1"]
+        client4, title="Nope"
     )
     assert found4 is None and amb4 is None and missing4 is True
 
 
-def test_pick_episode_next_unplayed_lowest_season() -> None:
+def test_pick_episode_next_unplayed_after_furthest() -> None:
     picked, reason = pick_episode(_bear_episodes())
     assert reason == "unplayed"
     assert picked is not None and picked["Id"] == "ep-1-3"
@@ -696,6 +706,108 @@ def test_pick_episode_skips_finished_seasons_and_specials() -> None:
     picked, reason = pick_episode(episodes)
     assert reason == "unplayed"
     assert picked is not None and picked["Id"] == "ep-2-1"
+
+
+def test_pick_episode_skips_earlier_holes_after_progress() -> None:
+    """Modern Family case: S3 holes must not beat continue-at S8E11."""
+    episodes = [
+        _episode(3, 14, played=True, name="Tableau Vivant"),
+        _episode(3, 15, name="Aunt Mommy"),
+        _episode(3, 16, name="Virgin Territory"),
+        _episode(8, 10, played=True, name="Ringmaster Keifth"),
+        _episode(8, 11, name="Sarge & Pea"),
+        _episode(8, 12, name="Do You Believe In Magic"),
+    ]
+    picked, reason = pick_episode(episodes)
+    assert reason == "unplayed"
+    assert picked is not None
+    assert picked["Id"] == "ep-8-11"
+    assert picked["Name"] == "Sarge & Pea"
+
+
+def test_pick_episode_caught_up_with_earlier_holes() -> None:
+    episodes = [
+        _episode(3, 15, name="Aunt Mommy"),
+        _episode(8, 10, played=True, name="Ringmaster Keifth"),
+        _episode(8, 11, played=True, name="Sarge & Pea"),
+    ]
+    picked, reason = pick_episode(episodes)
+    assert picked is None and reason == "caught-up"
+    reply = build_play_episode_failure_reply("caught-up", "Modern Family", dutch=False)
+    assert "caught up" in reply.casefold()
+    assert "all episodes" not in reply.casefold()
+
+
+def test_next_up_episode_requests_series_id() -> None:
+    client, fake = _client(
+        [
+            _FakeResponse(
+                200,
+                {
+                    "Items": [_episode(8, 11, eid="next", name="Sarge & Pea")],
+                    "TotalRecordCount": 1,
+                },
+            )
+        ]
+    )
+    item = client.next_up_episode("s1")
+    assert item is not None and item["Id"] == "next"
+    path, params = fake.gets[0]
+    assert path == "Shows/NextUp"
+    assert params["SeriesId"] == "s1"
+    assert params["UserId"] == "u1"
+    assert params["Limit"] == 1
+
+
+def test_agent_uses_next_up_over_local_hole(
+    monkeypatch: Any,
+) -> None:
+    """Bare series play prefers Jellyfin NextUp over an earlier unplayed hole."""
+    import brain.agent as agent_mod
+    import brain.tv_play as tv_play_mod
+
+    hole_eps = [
+        _episode(3, 15, name="Aunt Mommy"),
+        _episode(8, 10, played=True, name="Ringmaster Keifth"),
+        _episode(8, 11, name="Sarge & Pea"),
+    ]
+    client = _fake_series_client(
+        hole_eps,
+        series_items=[_series_item("Modern Family", jid="mf1", year=2009)],
+    )
+    client.next_up_episode.return_value = _episode(
+        8, 11, eid="ep-8-11", name="Sarge & Pea"
+    )
+    monkeypatch.setattr(agent_mod, "jellyfin_client_from_settings", lambda s: client)
+    monkeypatch.setattr(tv_play_mod, "jellyfin_client_from_settings", lambda s: client)
+
+    class _Db:
+        def list_active_movies(self) -> list[Movie]:
+            return []
+
+        def get_sync_state(self) -> Any:
+            return MagicMock(active_generation=1)
+
+    store = PendingPlayStore()
+    ollama = MagicMock()
+    ollama.chat.side_effect = AssertionError("Ollama must not run for play phrase")
+
+    r1 = run_turn(
+        ollama,
+        [
+            ChatMessage(role="system", content="sys"),
+            ChatMessage(role="user", content="play Modern Family on the TV"),
+        ],
+        tools=_devices_and_launch_tools(),
+        conversation_id="s1",
+        pending_play=store,
+        pending_devices=PendingDeviceStore(),
+        db=_Db(),
+        settings=_settings(),
+    )
+    assert "S8E11" in r1.content or "Sarge & Pea" in r1.content
+    assert "Aunt Mommy" not in r1.content
+    client.next_up_episode.assert_called_once_with("mf1")
 
 
 def test_pick_episode_explicit_number() -> None:
@@ -714,7 +826,7 @@ def test_pick_episode_wrong_season_and_season_not_found() -> None:
 
     picked2, reason2 = pick_episode(_bear_episodes(), season=2, episode=9)
     assert picked2 is None and reason2 == "episode-not-found"
-    # No season named → lowest season with an unplayed episode, then that season.
+    # Episode number without a season: first season that has that number.
     picked3, reason3 = pick_episode(_bear_episodes(), episode=9)
     assert picked3 is None and reason3 == "episode-not-found"
 
@@ -911,10 +1023,11 @@ def _fake_series_client(
     items = series_items if series_items is not None else [_series_item("The Bear")]
     client = MagicMock(spec=JellyfinClient)
     # Honour SearchTerm so resolves behave like the real server.
-    client.find_series.side_effect = lambda title, *, libraries: [
+    client.find_series.side_effect = lambda title: [
         i for i in items if title.casefold() in str(i["Name"]).casefold()
     ]
     client.list_episodes.return_value = episodes
+    client.next_up_episode.return_value = None
     client.get_item.return_value = episodes[0] if episodes else None
     client.list_sessions.return_value = [
         {"Id": "sess-webos", "Client": "Jellyfin for WebOS", "SupportsRemoteControl": True}
@@ -1152,6 +1265,179 @@ def test_agent_movie_wins_over_same_name_series(monkeypatch: Any) -> None:
     assert pending.media_kind == "movie" and pending.jellyfin_id == "m1"
     client.find_series.assert_not_called()
     assert "Dune" in result.content
+
+
+def test_title_match_quality() -> None:
+    assert title_match_quality("Reacher", "Reacher") == "exact"
+    assert title_match_quality("reacher", "REACHER") == "exact"
+    assert title_match_quality("reacher", "Machine Gun Preacher") == "contains"
+    assert title_match_quality("reacher", "Severance") == "none"
+    assert title_match_quality("", "Reacher") == "none"
+    assert title_match_quality("Reacher", "") == "none"
+
+
+def test_agent_exact_series_beats_substring_movie(monkeypatch: Any) -> None:
+    """Regression: 'reacher' must not resolve to the movie Machine Gun Preacher."""
+    import brain.agent as agent_mod
+
+    client = _fake_series_client(
+        _bear_episodes(), series_items=[_series_item("Reacher", jid="r1", year=2022)]
+    )
+    monkeypatch.setattr(agent_mod, "jellyfin_client_from_settings", lambda s: client)
+
+    class _Db:
+        def list_active_movies(self) -> list[Movie]:
+            return [_movie("Machine Gun Preacher", year=2011, jid="m1")]
+
+        def get_sync_state(self) -> Any:
+            return MagicMock(active_generation=1)
+
+    store = PendingPlayStore()
+    ollama = MagicMock()
+    ollama.chat.side_effect = AssertionError("Ollama must not run for play phrase")
+    result = run_turn(
+        ollama,
+        [
+            ChatMessage(role="system", content="sys"),
+            ChatMessage(role="user", content="play reacher on the tv"),
+        ],
+        tools=_devices_and_launch_tools(),
+        conversation_id="r1c",
+        pending_play=store,
+        pending_devices=PendingDeviceStore(),
+        db=_Db(),
+        settings=_settings(),
+    )
+    pending = store.get_play("r1c")
+    assert pending is not None
+    assert pending.media_kind == "series"
+    assert pending.series_id == "r1"
+    assert "Reacher" in result.content
+    assert "Machine Gun Preacher" not in result.content
+
+
+def test_agent_substring_series_does_not_beat_substring_movie(
+    monkeypatch: Any,
+) -> None:
+    """Ties stay with the movie — only exact beats a weaker match."""
+    import brain.agent as agent_mod
+
+    client = _fake_series_client(
+        _bear_episodes(),
+        series_items=[_series_item("Reacher County", jid="r1", year=2022)],
+    )
+    monkeypatch.setattr(agent_mod, "jellyfin_client_from_settings", lambda s: client)
+
+    class _Db:
+        def list_active_movies(self) -> list[Movie]:
+            return [_movie("Machine Gun Preacher", year=2011, jid="m1")]
+
+        def get_sync_state(self) -> Any:
+            return MagicMock(active_generation=1)
+
+    store = PendingPlayStore()
+    ollama = MagicMock()
+    ollama.chat.side_effect = AssertionError("Ollama must not run for play phrase")
+    result = run_turn(
+        ollama,
+        [
+            ChatMessage(role="system", content="sys"),
+            ChatMessage(role="user", content="play reacher on the tv"),
+        ],
+        tools=_devices_and_launch_tools(),
+        conversation_id="r2c",
+        pending_play=store,
+        pending_devices=PendingDeviceStore(),
+        db=_Db(),
+        settings=_settings(),
+    )
+    pending = store.get_play("r2c")
+    assert pending is not None
+    assert pending.media_kind == "movie" and pending.jellyfin_id == "m1"
+    assert "Machine Gun Preacher" in result.content
+
+
+def test_agent_substring_movie_still_plays_when_jellyfin_is_down(
+    monkeypatch: Any,
+) -> None:
+    """A failing series probe must never cost the operator their movie."""
+    import brain.agent as agent_mod
+
+    def _boom(settings: Any) -> Any:
+        raise JellyfinError("jellyfin unavailable (network)")
+
+    monkeypatch.setattr(agent_mod, "jellyfin_client_from_settings", _boom)
+
+    class _Db:
+        def list_active_movies(self) -> list[Movie]:
+            return [_movie("Machine Gun Preacher", year=2011, jid="m1")]
+
+        def get_sync_state(self) -> Any:
+            return MagicMock(active_generation=1)
+
+    store = PendingPlayStore()
+    ollama = MagicMock()
+    ollama.chat.side_effect = AssertionError("Ollama must not run for play phrase")
+    result = run_turn(
+        ollama,
+        [
+            ChatMessage(role="system", content="sys"),
+            ChatMessage(role="user", content="play preacher on the tv"),
+        ],
+        tools=_devices_and_launch_tools(),
+        conversation_id="r3c",
+        pending_play=store,
+        pending_devices=PendingDeviceStore(),
+        db=_Db(),
+        settings=_settings(),
+    )
+    pending = store.get_play("r3c")
+    assert pending is not None
+    assert pending.media_kind == "movie" and pending.jellyfin_id == "m1"
+    assert "Machine Gun Preacher" in result.content
+
+
+def test_agent_movie_still_wins_when_series_is_ambiguous(monkeypatch: Any) -> None:
+    """Ambiguous series must not hijack a matched movie — no guessing, no ask."""
+    import brain.agent as agent_mod
+
+    client = _fake_series_client(
+        _bear_episodes(),
+        series_items=[
+            _series_item("Reacher", jid="r1", year=2022),
+            _series_item("Reacher", jid="r2", year=2022),
+        ],
+    )
+    monkeypatch.setattr(agent_mod, "jellyfin_client_from_settings", lambda s: client)
+
+    class _Db:
+        def list_active_movies(self) -> list[Movie]:
+            return [_movie("Machine Gun Preacher", year=2011, jid="m1")]
+
+        def get_sync_state(self) -> Any:
+            return MagicMock(active_generation=1)
+
+    store = PendingPlayStore()
+    ollama = MagicMock()
+    ollama.chat.side_effect = AssertionError("Ollama must not run for play phrase")
+    result = run_turn(
+        ollama,
+        [
+            ChatMessage(role="system", content="sys"),
+            ChatMessage(role="user", content="play preacher on the tv"),
+        ],
+        tools=_devices_and_launch_tools(),
+        conversation_id="r4c",
+        pending_play=store,
+        pending_devices=PendingDeviceStore(),
+        db=_Db(),
+        settings=_settings(),
+    )
+    pending = store.get_play("r4c")
+    assert pending is not None
+    assert pending.media_kind == "movie" and pending.jellyfin_id == "m1"
+    assert not store.has_ambiguous("r4c")
+    assert "Machine Gun Preacher" in result.content
 
 
 def test_agent_series_fallback_when_no_movie_matched(monkeypatch: Any) -> None:

@@ -17,6 +17,12 @@ logger = logging.getLogger("mimir.jellyfin")
 _FIELDS = "Overview,Genres,People,CommunityRating,OfficialRating,ProductionYear"
 _SERIES_FIELDS = "Overview,Genres,ProductionYear"
 _EPISODE_FIELDS = "Overview,ProductionYear"
+# Live media lookup (T-128): RunTimeTicks for films; series ticks often missing/episode-length.
+_MEDIA_LOOKUP_FIELDS = "Overview,Genres,ProductionYear,RunTimeTicks,UserData"
+_MEDIA_LOOKUP_MAX_PAGES = 3
+# Media watch stats (T-131): played films, last-played date per film.
+_STATS_FIELDS = "Overview,Genres,ProductionYear,RunTimeTicks,UserData"
+_STATS_MAX_PAGES = 20
 
 
 class JellyfinError(RuntimeError):
@@ -271,37 +277,91 @@ class JellyfinClient:
         if resp.status_code >= 400:
             raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
 
-    def find_series(self, title: str, *, libraries: list[str]) -> list[dict[str, Any]]:
-        """Series items matching ``title`` across the configured libraries."""
+    def find_series(self, title: str) -> list[dict[str, Any]]:
+        """Series items matching ``title`` in every library the user can see.
+
+        Deliberately not scoped to ``library_ids`` — that setting is the movie
+        sync scope and may point at a Movies-only library, while a live title
+        resolve must see the TV library too (live-proven 2026-10-01).
+        """
         needle = (title or "").strip()
         if not needle:
             return []
-        out: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for library_id in libraries:
-            if not str(library_id or "").strip():
-                continue
+        params: dict[str, Any] = {
+            "IncludeItemTypes": "Series",
+            "Recursive": "true",
+            "SearchTerm": needle,
+            "Fields": _SERIES_FIELDS,
+            "EnableUserData": "true",
+        }
+        payload = self._get_items(params)
+        items = payload.get("Items") or []
+        if not isinstance(items, list):
+            raise JellyfinError("jellyfin unavailable (bad Items)")
+        return [raw for raw in items if isinstance(raw, dict)]
+
+    def find_media(
+        self,
+        *,
+        title: str | None = None,
+        include_series: bool = True,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Live Movie/Series items across all libraries the user can see.
+
+        Never passes ``ParentId`` / ``library_ids`` — those are the movie-sync
+        scope and miss the TV library (T-127 / T-128).
+
+        Returns ``(items, truncated)``. Exact title matches (case-insensitive
+        ``Name``) are sorted ahead of substring hits after fetch.
+        """
+        needle = (title or "").strip() or None
+        types = "Movie,Series" if include_series else "Movie"
+        collected: list[dict[str, Any]] = []
+        start = 0
+        total: int | None = None
+        for _ in range(_MEDIA_LOOKUP_MAX_PAGES):
             params: dict[str, Any] = {
-                "ParentId": library_id,
-                "IncludeItemTypes": "Series",
+                "IncludeItemTypes": types,
                 "Recursive": "true",
-                "SearchTerm": needle,
-                "Fields": _SERIES_FIELDS,
                 "EnableUserData": "true",
+                "Fields": _MEDIA_LOOKUP_FIELDS,
+                "StartIndex": start,
+                "Limit": self.page_size,
             }
+            if needle is not None:
+                params["SearchTerm"] = needle
             payload = self._get_items(params)
             items = payload.get("Items") or []
             if not isinstance(items, list):
                 raise JellyfinError("jellyfin unavailable (bad Items)")
-            for raw in items:
-                if not isinstance(raw, dict):
-                    continue
-                item_id = str(raw.get("Id") or "").strip()
-                if not item_id or item_id in seen:
-                    continue
-                seen.add(item_id)
-                out.append(raw)
-        return out
+            trc = payload.get("TotalRecordCount")
+            if isinstance(trc, int):
+                total = trc
+            page_items = [raw for raw in items if isinstance(raw, dict)]
+            collected.extend(page_items)
+            got = len(page_items)
+            start += got
+            if got < self.page_size:
+                break
+            if total is not None and start >= total:
+                break
+
+        truncated = total is not None and len(collected) < total
+        if not truncated and len(collected) >= self.page_size * _MEDIA_LOOKUP_MAX_PAGES:
+            # Full page cap without a smaller TotalRecordCount — assume more may exist.
+            truncated = total is None or total > len(collected)
+
+        if needle is not None:
+            lower = needle.casefold()
+
+            def _exact_first(raw: dict[str, Any]) -> tuple[int, str]:
+                name = str(raw.get("Name") or "")
+                exact = 0 if name.casefold() == lower else 1
+                return (exact, name.casefold())
+
+            collected.sort(key=_exact_first)
+
+        return collected, truncated
 
     def list_episodes(self, series_id: str) -> list[dict[str, Any]]:
         """Episodes of one series (raw items, user data included)."""
@@ -320,6 +380,155 @@ class JellyfinClient:
         if not isinstance(items, list):
             raise JellyfinError("jellyfin unavailable (bad Items)")
         return [raw for raw in items if isinstance(raw, dict)]
+
+    def list_resume_movies(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Part-watched films for the configured user (``Items/Resume``).
+
+        Live-proven 2026-10-06: ``GET Users/{userId}/Items/Resume`` with
+        ``IncludeItemTypes=Movie`` returns 200. Never passes ``ParentId`` /
+        ``library_ids``.
+        """
+        lim = max(1, int(limit))
+        payload = self._get_path(
+            f"Users/{self.user_id}/Items/Resume",
+            {
+                "IncludeItemTypes": "Movie",
+                "EnableUserData": "true",
+                "Fields": _MEDIA_LOOKUP_FIELDS,
+                "Limit": lim,
+            },
+        )
+        items = payload.get("Items") or []
+        if not isinstance(items, list):
+            raise JellyfinError("jellyfin unavailable (bad Items)")
+        out: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("Type") or "") != "Movie":
+                continue
+            ud = raw.get("UserData")
+            ticks = 0
+            if isinstance(ud, dict):
+                try:
+                    ticks = int(ud.get("PlaybackPositionTicks") or 0)
+                except (TypeError, ValueError):
+                    ticks = 0
+            if ticks <= 0:
+                continue
+            out.append(raw)
+        return out
+
+    def list_next_up(self, *, limit: int = 25) -> list[dict[str, Any]]:
+        """Global NextUp episodes (no ``SeriesId``) for continue-watching.
+
+        Live-proven 2026-10-06: ``GET Shows/NextUp?UserId=…`` returns Episode
+        items with ``SeriesId`` / ``SeriesName`` / season+episode numbers.
+        """
+        lim = max(1, int(limit))
+        payload = self._get_path(
+            "Shows/NextUp",
+            {
+                "UserId": self.user_id,
+                "Limit": lim,
+                "Fields": _EPISODE_FIELDS,
+                "EnableUserData": "true",
+            },
+        )
+        items = payload.get("Items") or []
+        if not isinstance(items, list):
+            raise JellyfinError("jellyfin unavailable (bad Items)")
+        return [raw for raw in items if isinstance(raw, dict)]
+
+    def list_played_movies(
+        self,
+        *,
+        max_pages: int = _STATS_MAX_PAGES,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Played films for the configured user, newest play first.
+
+        Live-proven 2026-10-06: ``GET Users/{userId}/Items`` with
+        ``Filters=IsPlayed`` + ``IncludeItemTypes=Movie`` returns one row per
+        film (a rewatched film appears once, with its most recent
+        ``LastPlayedDate``). Never passes ``ParentId`` / ``library_ids``.
+        Sorted ``DatePlayed`` desc so callers can early-stop once the window
+        start passes. Returns ``(items, truncated)``.
+        """
+        collected: list[dict[str, Any]] = []
+        start = 0
+        total: int | None = None
+        for _ in range(max(1, int(max_pages))):
+            params: dict[str, Any] = {
+                "IncludeItemTypes": "Movie",
+                "Recursive": "true",
+                "Filters": "IsPlayed",
+                "EnableUserData": "true",
+                "Fields": _STATS_FIELDS,
+                "SortBy": "DatePlayed",
+                "SortOrder": "Descending",
+                "StartIndex": start,
+                "Limit": self.page_size,
+            }
+            payload = self._get_items(params)
+            items = payload.get("Items") or []
+            if not isinstance(items, list):
+                raise JellyfinError("jellyfin unavailable (bad Items)")
+            trc = payload.get("TotalRecordCount")
+            if isinstance(trc, int):
+                total = trc
+            page_items = [raw for raw in items if isinstance(raw, dict)]
+            collected.extend(page_items)
+            got = len(page_items)
+            start += got
+            if got == 0:
+                break
+            if total is not None and start >= total:
+                break
+            if got < self.page_size:
+                break
+
+        truncated = total is not None and len(collected) < total
+        if not truncated and len(collected) >= self.page_size * max(1, int(max_pages)):
+            truncated = total is None or total > len(collected)
+        return collected, truncated
+
+    def next_up_episode(self, series_id: str) -> dict[str, Any] | None:
+        """Jellyfin continue-watching episode for one series, or None."""
+        sid = (series_id or "").strip()
+        if not sid:
+            return None
+        payload = self._get_path(
+            "Shows/NextUp",
+            {
+                "UserId": self.user_id,
+                "SeriesId": sid,
+                "Limit": 1,
+                "Fields": _EPISODE_FIELDS,
+                "EnableUserData": "true",
+            },
+        )
+        items = payload.get("Items") or []
+        if not isinstance(items, list) or not items:
+            return None
+        first = items[0]
+        return first if isinstance(first, dict) else None
+
+    def _get_path(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        try:
+            resp = self._client.get(path, params=params)
+        except httpx.TimeoutException as exc:
+            raise JellyfinError("jellyfin unavailable (timeout)") from exc
+        except httpx.HTTPError as exc:
+            raise JellyfinError("jellyfin unavailable (network)") from exc
+        if resp.status_code >= 400:
+            raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise JellyfinError("jellyfin unavailable (bad JSON)") from exc
+        if not isinstance(payload, dict):
+            raise JellyfinError("jellyfin unavailable (bad JSON)")
+        return payload
 
     def get_item(self, item_id: str) -> dict[str, Any] | None:
         """One item by id; None when the server reports 404."""
@@ -344,6 +553,44 @@ class JellyfinClient:
             raise JellyfinError("jellyfin unavailable (bad JSON)")
         return payload
 
+    def set_favorite(self, item_id: str, *, favorite: bool) -> bool:
+        """Mark or unmark favourite. Returns verified ``IsFavorite``.
+
+        Live-proven 2026-10-06: ``POST``/``DELETE``
+        ``UserFavoriteItems/{id}?userId=…`` returns 200 with top-level
+        ``IsFavorite``. Empty 2xx bodies fall back to ``get_item``.
+        """
+        iid = (item_id or "").strip()
+        if not iid:
+            raise JellyfinError("jellyfin unavailable (missing item id)")
+        path = f"UserFavoriteItems/{iid}"
+        params = {"userId": self.user_id}
+        try:
+            if favorite:
+                resp = self._client.post(path, params=params)
+            else:
+                resp = self._client.delete(path, params=params)
+        except httpx.TimeoutException as exc:
+            raise JellyfinError("jellyfin unavailable (timeout)") from exc
+        except httpx.HTTPError as exc:
+            raise JellyfinError("jellyfin unavailable (network)") from exc
+        if resp.status_code >= 400:
+            raise JellyfinError(f"jellyfin unavailable (HTTP {resp.status_code})")
+
+        parsed = _favorite_flag_from_payload(resp)
+        if parsed is not None:
+            return parsed
+
+        item = self.get_item(iid)
+        if item is None:
+            raise JellyfinError(
+                "jellyfin unavailable (item missing after favourite write)"
+            )
+        flag = _favorite_flag_from_item(item)
+        if flag is None:
+            raise JellyfinError("jellyfin unavailable (favourite state unverified)")
+        return flag
+
     def _get_items(self, params: dict[str, Any]) -> dict[str, Any]:
         path = f"Users/{self.user_id}/Items"
         try:
@@ -364,6 +611,32 @@ class JellyfinClient:
         if not isinstance(payload, dict):
             raise JellyfinError("jellyfin unavailable (bad JSON)")
         return payload
+
+
+def _favorite_flag_from_payload(resp: httpx.Response) -> bool | None:
+    if not resp.content:
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if "IsFavorite" in payload:
+        return bool(payload.get("IsFavorite"))
+    ud = payload.get("UserData")
+    if isinstance(ud, dict) and "IsFavorite" in ud:
+        return bool(ud.get("IsFavorite"))
+    return None
+
+
+def _favorite_flag_from_item(item: dict[str, Any]) -> bool | None:
+    if "IsFavorite" in item:
+        return bool(item.get("IsFavorite"))
+    ud = item.get("UserData")
+    if isinstance(ud, dict) and "IsFavorite" in ud:
+        return bool(ud.get("IsFavorite"))
+    return None
 
 
 def normalize_item(raw: dict[str, Any]) -> Movie | None:
