@@ -87,6 +87,9 @@ currency:
   # Frankfurter (ECB rates). No API key. Override via CURRENCY_RATES_BASE_URL.
   rates_base_url: https://api.frankfurter.dev/v1
 
+# DEPRECATED as source of truth (T-140). get_calendar now reads Homebase's
+# household calendar (homebase.calendar.agenda). The feed fields below are
+# retained for compatibility only — no runtime path reads them as SoT.
 calendar:
   # Named feeds (id + display name). Optional context: short note for the LLM
   # about what the calendar is (work vs family, whose it is, etc.).

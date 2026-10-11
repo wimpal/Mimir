@@ -1,446 +1,251 @@
-"""Unit tests for Calendar feed ICS tool (Phase 8d + multi-feed)."""
+"""Tests for the Homebase-backed ``get_calendar`` tool (T-140 / ADR-029).
+
+Local ICS parsing/feeding is retired as a source of truth; these tests exercise
+the Homebase agenda adapter with a fake MCP bridge and keep the ``fetch_override``
+suite path unchanged.
+"""
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-import httpx
-
-from brain.config import Settings, resolved_calendar_feeds
-from brain.tools import TOOLS, build_registry, dispatch
+from brain.config import LocationSettings, RuntimeSettings, Settings
+from brain.tools import build_registry
 from brain.tools.calendar import (
-    events_in_window,
+    HOMEBASE_AGENDA_TOOL,
+    _execute_get_calendar,
+    calendar_tools,
+    make_get_calendar_tool,
     window_bounds,
 )
 
-FIXTURE_ICS = (
-    Path(__file__).parent / "fixtures" / "calendar" / "sample.ics"
-).read_text(encoding="utf-8")
 
-OTHER_ICS = """BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Mimir//Test//EN
-BEGIN:VEVENT
-UID:work-1@mimir.test
-DTSTART:20260827T130000Z
-DTEND:20260827T140000Z
-SUMMARY:Sprint planning
-END:VEVENT
-END:VCALENDAR
-"""
+class FakeBridge:
+    """Minimal stand-in for McpBridge (sync agenda call + discovery stub)."""
+
+    def __init__(self, result: str = "{}") -> None:
+        self.result = result
+        self.calls: list[tuple[str, dict, float]] = []
+        self.discovered: dict[str, list] = {}
+
+    def call_tool_sync(
+        self, tool_name: str, arguments: dict, *, timeout_s: float
+    ) -> str:
+        self.calls.append((tool_name, arguments, timeout_s))
+        return self.result
 
 
-def _settings(tmp_path: Path, **calendar_kw: object) -> Settings:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(exist_ok=True)
-    calendar = {
-        "url": "https://example.com/feed.ics",
-        "cache_ttl_s": 300.0,
-        **calendar_kw,
-    }
+def _settings(tmp_path: Path) -> Settings:
     return Settings(
-        location={
-            "latitude": 52.09,
-            "longitude": 5.12,
-            "timezone": "Europe/Amsterdam",
-        },
-        ollama={"url": "http://test", "model": "qwen3:8b"},
-        runtime={"data_dir": data_dir},
-        timeouts={"ollama_s": 30, "tool_s": 5, "turn_s": 60},
-        calendar=calendar,
+        location=LocationSettings(latitude=52.1, longitude=4.3, timezone="Europe/Amsterdam"),
+        runtime=RuntimeSettings(data_dir=tmp_path),
     )
 
 
-def _run_execute(settings: Settings, client: httpx.Client, *, now: datetime) -> str:
-    from brain.config import calendar_feeds_declared, resolved_calendar_feeds
-    from brain.tools.calendar import _execute_get_calendar
-
-    return _execute_get_calendar(
-        feeds=resolved_calendar_feeds(settings.calendar),
-        declared=calendar_feeds_declared(settings.calendar),
-        timezone_name=settings.location.timezone,
-        timeout_s=settings.timeouts.tool_s,
-        http_client=client,
-        data_dir=Path(settings.runtime.data_dir),
-        cache_ttl_s=settings.calendar.cache_ttl_s,
-        now=now,
-    )
+def _agenda(*events: dict, **extra: object) -> str:
+    payload: dict = {
+        "range": {"start": "2026-05-04", "end": "2026-05-04"},
+        "event_count": len(events),
+        "events": list(events),
+        "schedule_lines": [],
+        "stale": False,
+    }
+    payload.update(extra)
+    return json.dumps(payload)
 
 
 def test_window_bounds_full_calendar_day() -> None:
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 8, 30, tzinfo=tz)
+    tz = ZoneInfo("UTC")
+    now = datetime(2026, 3, 10, 9, 30, tzinfo=UTC)
     start, end = window_bounds(tz=tz, now=now)
-    assert start == datetime(2026, 8, 27, 0, 0, tzinfo=tz)
-    assert end == datetime(2026, 8, 28, 0, 0, tzinfo=tz)
+    assert start == datetime(2026, 3, 10, 0, 0, tzinfo=tz)
+    assert end == datetime(2026, 3, 11, 0, 0, tzinfo=tz)
 
 
 def test_window_bounds_day_offset_tomorrow() -> None:
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 22, 0, tzinfo=tz)
+    tz = ZoneInfo("UTC")
+    now = datetime(2026, 3, 10, 9, 30, tzinfo=UTC)
     start, end = window_bounds(tz=tz, now=now, day_offset=1)
-    assert start == datetime(2026, 8, 28, 0, 0, tzinfo=tz)
-    assert end == datetime(2026, 8, 29, 0, 0, tzinfo=tz)
-
-
-def test_events_in_window_includes_timed_allday_rrule() -> None:
-    from zoneinfo import ZoneInfo
-
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 8, 0, tzinfo=tz)
-    start, end = window_bounds(tz=tz, now=now)
-    events = events_in_window(FIXTURE_ICS, tz=tz, start=start, end=end)
-    summaries = [e["summary"] for e in events]
-    assert "Standup" in summaries
-    assert "Away day" in summaries
-    assert "Daily check-in" in summaries
-    assert "Tomorrow only" not in summaries
-
-
-def test_full_day_includes_past_morning_event() -> None:
-    from zoneinfo import ZoneInfo
-
-    ics = """BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Mimir//Test//EN
-BEGIN:VEVENT
-UID:morning@mimir.test
-DTSTART:20260827T064500Z
-DTEND:20260827T071500Z
-SUMMARY:Huisarts
-END:VEVENT
-END:VCALENDAR
-"""
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 10, 0, tzinfo=tz)
-    start, end = window_bounds(tz=tz, now=now)
-    events = events_in_window(ics, tz=tz, start=start, end=end)
-    assert [e["summary"] for e in events] == ["Huisarts"]
-
-
-def test_tool_schema_rejects_hours_argument(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    reg = build_registry(settings)
-    out = dispatch("get_calendar", {"hours": 24}, tools=reg)
-    assert out.startswith("error: unexpected argument")
+    assert start == datetime(2026, 3, 11, 0, 0, tzinfo=tz)
+    assert end == datetime(2026, 3, 12, 0, 0, tzinfo=tz)
 
 
 def test_tool_rejects_invalid_day_offset(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    reg = build_registry(settings)
-    out = dispatch("get_calendar", {"day_offset": 2}, tools=reg)
-    assert out.startswith("error:")
-    assert "day_offset" in out
+    tool = make_get_calendar_tool(_settings(tmp_path), bridge=FakeBridge())
+    assert tool.execute(day_offset=2).startswith("error: day_offset must be")
+    assert tool.execute(day_offset=True).startswith("error: day_offset must be")
+    assert tool.execute(day_offset=-1).startswith("error: day_offset must be")
 
 
-def test_events_in_window_day_offset_tomorrow() -> None:
-    from zoneinfo import ZoneInfo
-
-    ics = """BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Mimir//Test//EN
-BEGIN:VEVENT
-UID:today@mimir.test
-DTSTART:20260827T100000Z
-DTEND:20260827T110000Z
-SUMMARY:Today only
-END:VEVENT
-BEGIN:VEVENT
-UID:tomorrow@mimir.test
-DTSTART:20260828T140000Z
-DTEND:20260828T150000Z
-SUMMARY:Tomorrow meeting
-END:VEVENT
-END:VCALENDAR
-"""
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 12, 0, tzinfo=tz)
-    start, end = window_bounds(tz=tz, now=now, day_offset=1)
-    events = events_in_window(ics, tz=tz, start=start, end=end)
-    assert [e["summary"] for e in events] == ["Tomorrow meeting"]
-
-
-def test_build_registry_includes_calendar(tmp_path: Path) -> None:
-    reg = build_registry(_settings(tmp_path))
-    assert "get_calendar" in reg
-
-
-def test_missing_url_fails_loud(tmp_path: Path) -> None:
-    settings = _settings(tmp_path, url=None, feeds=[])
-    reg = build_registry(settings)
-    out = dispatch("get_calendar", {}, tools=reg)
-    assert out == "error: calendar unavailable (not configured)"
-
-
-def test_legacy_url_resolves_as_default_feed(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    feeds = resolved_calendar_feeds(settings.calendar)
-    assert len(feeds) == 1
-    assert feeds[0].id == "default"
-    assert feeds[0].name == "Calendar"
-
-
-def test_get_calendar_with_mock_transport(tmp_path: Path) -> None:
-    from zoneinfo import ZoneInfo
-
-    settings = _settings(tmp_path)
-    data_dir = settings.runtime.data_dir
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url).endswith("/feed.ics")
-        return httpx.Response(200, text=FIXTURE_ICS)
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        from brain.tools.calendar import calendar_tools
-
-        reg = {
-            **TOOLS,
-            **calendar_tools(settings, http_client=client, data_dir=data_dir),
-        }
-        now = datetime(2026, 8, 27, 8, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
-        out = _run_execute(settings, client, now=now)
-
-    assert not out.startswith("error:")
-    data = json.loads(out)
-    assert data["stale"] is False
-    summaries = [e["summary"] for e in data["events"]]
-    assert "Standup" in summaries
-    assert data["event_count"] == len(data["events"])
-    assert len(data["schedule_lines"]) == len(data["events"])
-    assert any("Standup" in line for line in data["schedule_lines"])
-    assert data["events"][0]["calendar"] == "default"
-    assert data["events"][0]["calendar_name"] == "Calendar"
-    from brain.calendar_cache import calendar_cache_path
-
-    assert calendar_cache_path(data_dir, "default").is_file()
-    out2 = dispatch("get_calendar", {}, tools=reg)
-    assert isinstance(out2, str)
-
-
-def test_multi_feed_merges_and_tags(tmp_path: Path) -> None:
-    from zoneinfo import ZoneInfo
-
-    settings = _settings(
-        tmp_path,
-        url=None,
-        feeds=[
+def test_execute_calls_homebase_and_maps_events(tmp_path: Path) -> None:
+    bridge = FakeBridge(
+        _agenda(
             {
-                "id": "family",
-                "name": "Fam Palland",
-                "url": "https://example.com/family.ics",
-                "context": "Shared household schedule",
+                "source": "event",
+                "id": "e1",
+                "title": "Dentist",
+                "start": "2026-05-04T09:00:00+02:00",
+                "end": "2026-05-04T09:30:00+02:00",
+                "all_day": False,
+                "calendar_name": "Homebase",
+                "calendar_color": "emerald",
             },
             {
-                "id": "work",
-                "name": "Work",
-                "url": "https://example.com/work.ics",
-                "context": "Photographer and videographer jobs",
+                "source": "feed",
+                "id": "f1",
+                "title": "Standup",
+                "start": "2026-05-04T08:00:00+02:00",
+                "end": "2026-05-04T08:15:00+02:00",
+                "all_day": True,
+                "calendar_name": "Fam Palland",
+                "calendar_color": "sky",
             },
-        ],
+            schedule_lines=["09:00 Dentist"],
+        )
     )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if url.endswith("family.ics"):
-            return httpx.Response(200, text=FIXTURE_ICS)
-        if url.endswith("work.ics"):
-            return httpx.Response(200, text=OTHER_ICS)
-        return httpx.Response(404, text="nope")
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        now = datetime(2026, 8, 27, 8, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
-        out = _run_execute(settings, client, now=now)
-
-    data = json.loads(out)
-    by_summary = {e["summary"]: e for e in data["events"]}
-    assert by_summary["Standup"]["calendar"] == "family"
-    assert by_summary["Standup"]["calendar_name"] == "Fam Palland"
-    assert by_summary["Standup"]["calendar_context"] == "Shared household schedule"
-    assert by_summary["Sprint planning"]["calendar"] == "work"
-    assert by_summary["Sprint planning"]["calendar_name"] == "Work"
-    assert (
-        by_summary["Sprint planning"]["calendar_context"]
-        == "Photographer and videographer jobs"
-    )
-    assert len(data["feeds"]) == 2
-    assert all(f["ok"] for f in data["feeds"])
-    by_feed = {f["id"]: f for f in data["feeds"]}
-    assert by_feed["family"]["context"] == "Shared household schedule"
-    assert by_feed["work"]["context"] == "Photographer and videographer jobs"
-
-
-def test_multi_feed_partial_failure(tmp_path: Path) -> None:
-    from zoneinfo import ZoneInfo
-
-    settings = _settings(
-        tmp_path,
-        url=None,
-        feeds=[
-            {"id": "family", "name": "Fam Palland", "url": "https://example.com/family.ics"},
-            {"id": "work", "name": "Work", "url": "https://example.com/work.ics"},
-        ],
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url).endswith("family.ics"):
-            return httpx.Response(200, text=FIXTURE_ICS)
-        return httpx.Response(503, text="down")
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        now = datetime(2026, 8, 27, 8, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
-        out = _run_execute(settings, client, now=now)
-
-    assert not out.startswith("error:")
-    data = json.loads(out)
-    assert any(e["summary"] == "Standup" for e in data["events"])
-    assert data["errors"]
-    assert data["errors"][0]["id"] == "work"
-
-
-def test_fetch_uses_network_even_with_fresh_cache(tmp_path: Path) -> None:
-    """Weather pattern: always fetch; in-TTL cache is only a failure fallback."""
-    from zoneinfo import ZoneInfo
-
-    from brain.calendar_cache import calendar_cache_path, write_cache
-
-    settings = _settings(tmp_path)
-    data_dir = Path(settings.runtime.data_dir)
-    path = calendar_cache_path(data_dir, "default")
     tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 8, 0, tzinfo=tz)
-    write_cache(path, FIXTURE_ICS, fetched_at=now.astimezone(UTC).isoformat())
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(200, text=FIXTURE_ICS)
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        out = _run_execute(settings, client, now=now)
-
-    assert calls["n"] == 1
-    data = json.loads(out)
-    assert data["stale"] is False
-    assert any(e["summary"] == "Standup" for e in data["events"])
-
-
-def test_fetch_fail_serves_in_ttl_stale_cache(tmp_path: Path) -> None:
-    from zoneinfo import ZoneInfo
-
-    from brain.calendar_cache import calendar_cache_path, write_cache
-
-    settings = _settings(tmp_path, cache_ttl_s=300.0)
-    data_dir = Path(settings.runtime.data_dir)
-    path = calendar_cache_path(data_dir, "default")
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 8, 0, tzinfo=tz)
-    # Within TTL so weather-like stale fallback applies.
-    fetched_at = (now.astimezone(UTC) - timedelta(seconds=60)).isoformat()
-    write_cache(path, FIXTURE_ICS, fetched_at=fetched_at)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="down")
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        out = _run_execute(settings, client, now=now)
-
-    data = json.loads(out)
-    assert data["stale"] is True
-    assert data["fetched_at"] == fetched_at
-    assert any(e["summary"] == "Standup" for e in data["events"])
-
-
-def test_fetch_fail_expired_cache_fails_loud(tmp_path: Path) -> None:
-    from zoneinfo import ZoneInfo
-
-    from brain.calendar_cache import calendar_cache_path, write_cache
-
-    settings = _settings(tmp_path, cache_ttl_s=1.0)
-    data_dir = Path(settings.runtime.data_dir)
-    path = calendar_cache_path(data_dir, "default")
-    tz = ZoneInfo("Europe/Amsterdam")
-    now = datetime(2026, 8, 27, 8, 0, tzinfo=tz)
-    old = (now.astimezone(UTC) - timedelta(seconds=120)).isoformat()
-    write_cache(path, FIXTURE_ICS, fetched_at=old)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="down")
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        out = _run_execute(settings, client, now=now)
-
-    assert out.startswith("error: calendar unavailable")
-    assert "503" in out
-
-
-def test_named_feeds_without_urls_ignore_legacy(tmp_path: Path) -> None:
-    """When feeds are declared, legacy CALENDAR_ICS_URL is not a fallback."""
-    settings = _settings(
-        tmp_path,
-        url="https://example.com/legacy.ics",
-        feeds=[{"id": "family", "name": "Fam Palland", "url": None}],
+    result = _execute_get_calendar(
+        bridge,
+        "Europe/Amsterdam",
+        10.0,
+        now=datetime(2026, 5, 4, 7, 0, tzinfo=tz),
+        day_offset=0,
     )
-    from brain.config import calendar_feeds_declared, resolved_calendar_feeds
-
-    assert resolved_calendar_feeds(settings.calendar) == []
-    declared = calendar_feeds_declared(settings.calendar)
-    assert len(declared) == 1
-    reg = build_registry(settings)
-    out = dispatch("get_calendar", {}, tools=reg)
-    assert out.startswith("error: calendar unavailable")
-    assert "not configured" in out
-
-
-def test_http_error_without_cache(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text="missing")
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=5.0) as client:
-        from brain.tools.calendar import calendar_tools
-
-        reg = {**TOOLS, **calendar_tools(settings, http_client=client)}
-        out = dispatch("get_calendar", {}, tools=reg)
-
-    assert out.startswith("error: calendar unavailable")
-    assert "404" in out
+    payload = json.loads(result)
+    assert payload["day_offset"] == 0
+    assert payload["date"] == "2026-05-04"
+    assert payload["event_count"] == 2
+    # sorted by start; Homebase `title` is renamed to `summary`
+    assert [e["summary"] for e in payload["events"]] == ["Standup", "Dentist"]
+    assert payload["events"][0]["calendar_name"] == "Fam Palland"
+    assert payload["events"][0]["all_day"] is True
+    assert payload["events"][1]["calendar_color"] == "emerald"
+    assert payload["schedule_lines"] == ["09:00 Dentist"]
+    assert payload["stale"] is False
+    assert bridge.calls == [
+        (HOMEBASE_AGENDA_TOOL, {"date": "2026-05-04"}, 10.0),
+    ]
 
 
-def test_timeout(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.TimeoutException("slow", request=request)
-
-    transport = httpx.MockTransport(handler)
-    with httpx.Client(transport=transport, timeout=1.0) as client:
-        from brain.tools.calendar import calendar_tools
-
-        reg = {**TOOLS, **calendar_tools(settings, http_client=client)}
-        out = dispatch("get_calendar", {}, tools=reg)
-
-    assert "timed out" in out
-
-
-def test_fetch_override(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    reg = build_registry(
-        settings,
-        calendar_fetch_override=lambda: "error: calendar unavailable (offline)",
+def test_execute_day_offset_tomorrow_computes_date(tmp_path: Path) -> None:
+    bridge = FakeBridge(_agenda())
+    tz = ZoneInfo("Europe/Amsterdam")
+    result = _execute_get_calendar(
+        bridge,
+        "Europe/Amsterdam",
+        5.0,
+        now=datetime(2026, 5, 4, 23, 30, tzinfo=tz),
+        day_offset=1,
     )
-    out = dispatch("get_calendar", {}, tools=reg)
-    assert out == "error: calendar unavailable (offline)"
+    payload = json.loads(result)
+    assert payload["date"] == "2026-05-05"
+    assert payload["day_offset"] == 1
+    assert bridge.calls[0][1] == {"date": "2026-05-05"}
+
+
+def test_missing_title_falls_back(tmp_path: Path) -> None:
+    bridge = FakeBridge(
+        _agenda(
+            {
+                "source": "event",
+                "id": "e1",
+                "title": "",
+                "start": "2026-05-04T09:00:00+02:00",
+                "all_day": False,
+                "calendar_name": "Homebase",
+            }
+        )
+    )
+    payload = json.loads(
+        _execute_get_calendar(bridge, "UTC", 5.0, day_offset=0)
+    )
+    assert payload["events"][0]["summary"] == "(no title)"
+
+
+def test_empty_day_is_honest() -> None:
+    bridge = FakeBridge(_agenda())
+    payload = json.loads(_execute_get_calendar(bridge, "UTC", 5.0, day_offset=0))
+    assert payload["event_count"] == 0
+    assert payload["events"] == []
+
+
+def test_homebase_down_returns_clear_unavailable() -> None:
+    bridge = FakeBridge("error: unknown MCP tool 'homebase.calendar.agenda'")
+    out = _execute_get_calendar(bridge, "UTC", 5.0, day_offset=0)
+    assert out.startswith("error: calendar unavailable")
+    assert "unknown MCP tool" in out
+
+
+def test_homebase_timeout_returns_clear_unavailable() -> None:
+    bridge = FakeBridge("error: tool 'homebase.calendar.agenda' timed out")
+    out = _execute_get_calendar(bridge, "UTC", 5.0, day_offset=0)
+    assert out.startswith("error: calendar unavailable")
+
+
+def test_module_off_json_returns_clear_unavailable() -> None:
+    bridge = FakeBridge(
+        json.dumps({"error": {"code": "unavailable", "message": "Calendar module is off"}})
+    )
+    out = _execute_get_calendar(bridge, "UTC", 5.0, day_offset=0)
+    assert out == "error: calendar unavailable (Calendar module is off)"
+
+
+def test_invalid_agenda_response() -> None:
+    bridge = FakeBridge("not json at all")
+    out = _execute_get_calendar(bridge, "UTC", 5.0, day_offset=0)
+    assert out == "error: calendar unavailable (invalid agenda response)"
+
+
+def test_bridge_none_degrades() -> None:
+    out = _execute_get_calendar(None, "UTC", 5.0, day_offset=0)
+    assert out == "error: calendar unavailable (MCP bridge not available)"
+
+
+def test_bad_timezone_degrades() -> None:
+    out = _execute_get_calendar(FakeBridge(), "Not/AZone", 5.0, day_offset=0)
+    assert out.startswith("error: calendar unavailable (bad timezone")
+
+
+def test_fetch_override_short_circuits_bridge(tmp_path: Path) -> None:
+    bridge = FakeBridge(_agenda())
+    override = json.dumps({"window": {"start": "2026-01-02T00:00:00+00:00"}, "events": []})
+    tool = make_get_calendar_tool(
+        _settings(tmp_path), fetch_override=lambda: override, bridge=bridge
+    )
+    payload = json.loads(tool.execute(day_offset=1))
+    assert payload["day_offset"] == 1
+    assert payload["date"] == "2026-01-02"
+    assert bridge.calls == []
+
+
+def test_fetch_override_error_passthrough(tmp_path: Path) -> None:
+    tool = make_get_calendar_tool(
+        _settings(tmp_path),
+        fetch_override=lambda: "error: calendar unavailable (offline)",
+        bridge=FakeBridge(_agenda()),
+    )
+    assert tool.execute(day_offset=0) == "error: calendar unavailable (offline)"
+
+
+def test_description_has_no_ics_or_calendar_context(tmp_path: Path) -> None:
+    tool = make_get_calendar_tool(_settings(tmp_path), bridge=FakeBridge())
+    description = tool.description
+    assert "ICS" not in description
+    assert "calendar_context" not in description
+    assert "Homebase" in description
+
+
+def test_build_registry_wires_bridge_into_get_calendar(tmp_path: Path) -> None:
+    bridge = FakeBridge(_agenda())
+    registry = build_registry(_settings(tmp_path), data_dir=tmp_path, mcp=bridge)
+    assert "get_calendar" in registry
+    registry["get_calendar"].execute(day_offset=0)
+    assert bridge.calls and bridge.calls[0][0] == HOMEBASE_AGENDA_TOOL
+
+
+def test_calendar_tools_without_bridge_degrades(tmp_path: Path) -> None:
+    tool = calendar_tools(_settings(tmp_path))["get_calendar"]
+    assert tool.execute(day_offset=0).startswith("error: calendar unavailable")

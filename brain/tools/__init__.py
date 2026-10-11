@@ -157,7 +157,7 @@ def build_registry(
         **calendar_tools(
             settings,
             fetch_override=calendar_fetch_override,
-            data_dir=resolved_data,
+            bridge=mcp,
         ),
         **web_fetch_tools(settings),
         **currency_tools(settings, fetch_override=currency_fetch_override),

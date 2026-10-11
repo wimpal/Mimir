@@ -178,7 +178,11 @@ class CurrencySettings(_Strict):
 
 
 class CalendarFeedSettings(_Strict):
-    """One named Calendar feed. URL/auth secrets come from env (see load_config)."""
+    """DEPRECATED as a source of truth (T-140) — kept for config compatibility.
+
+    Calendar reads now come from Homebase (``homebase.calendar.agenda``); these
+    ICS feed fields are inert. URL/auth secrets come from env (see load_config).
+    """
 
     id: str
     name: str
@@ -217,6 +221,13 @@ class CalendarFeedSettings(_Strict):
 
 
 class CalendarSettings(_Strict):
+    """DEPRECATED as a source of truth (T-140) — retained but inert.
+
+    ``get_calendar`` now reads Homebase's household calendar. These ICS fields
+    are kept only until the operator finishes migrating the subscription URLs
+    into Homebase; do not add a runtime read path that treats them as SoT.
+    """
+
     # Legacy single-feed secrets (CALENDAR_ICS_URL) — used when feeds is empty.
     url: str | None = None
     username: str | None = None
